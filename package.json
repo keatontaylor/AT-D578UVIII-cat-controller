@@ -1,0 +1,21 @@
+{
+  "name": "anytone-d578-controller",
+  "version": "0.1.0",
+  "description": "Web-based remote controller for the AnyTone AT-D578UV radio over Bluetooth. Root entry point — delegates to the app in app/.",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "postinstall": "npm --prefix app install",
+    "dev": "npm --prefix app run dev",
+    "dev:frontend": "npm --prefix app run dev:frontend",
+    "dev:backend": "npm --prefix app run dev:backend",
+    "build": "npm --prefix app run build",
+    "start": "npm --prefix app run start",
+    "start:frontend": "npm --prefix app run start:frontend",
+    "start:backend": "npm --prefix app run start:backend",
+    "preview": "npm --prefix app run preview",
+    "typecheck": "npm --prefix app run typecheck"
+  }
+}

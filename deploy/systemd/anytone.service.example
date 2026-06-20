@@ -1,0 +1,36 @@
+# Example systemd unit for running the AnyTone controller in production.
+# OPTIONAL — development does not need systemd (use `npm run dev`).
+#
+# This is a TEMPLATE: replace every <PLACEHOLDER> and review each line before use.
+# It runs the *built* app, so build first:  npm run build
+#
+# Install as a SYSTEM service:
+#   sudo cp anytone.service.example /etc/systemd/system/anytone.service
+#   sudo edit the placeholders, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now anytone.service
+#
+# Or as a USER service (no root; needs `loginctl enable-linger <user>` to start
+# at boot without a login):
+#   mkdir -p ~/.config/systemd/user
+#   cp anytone.service.example ~/.config/systemd/user/anytone.service
+#   systemctl --user daemon-reload && systemctl --user enable --now anytone.service
+# (For a user service, remove the User=/Group= lines below.)
+
+[Unit]
+Description=AnyTone AT-D578UV Bluetooth controller
+After=network-online.target bluetooth.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<YOUR_USER>
+Group=<YOUR_USER>
+WorkingDirectory=<ABSOLUTE_PATH_TO_REPO>/app
+# Local config (gitignored). The launcher also sources <repo>/.env itself.
+EnvironmentFile=-<ABSOLUTE_PATH_TO_REPO>/.env
+ExecStart=<ABSOLUTE_PATH_TO_REPO>/app/scripts/run-anytone.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

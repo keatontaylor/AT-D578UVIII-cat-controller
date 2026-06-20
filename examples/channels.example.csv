@@ -1,0 +1,5 @@
+"No.","Channel Name","Receive Frequency","Transmit Frequency","Channel Type","Transmit Power","Band Width","CTCSS/DCS Decode","CTCSS/DCS Encode","Contact","Contact Call Type","Contact TG/DMR ID","Radio ID","Color Code","Slot","Squelch Mode"
+"1","2M CALLING","146.520000","146.520000","A-Analog","High","25K","Off","Off","","","","","","","Carrier"
+"2","70CM SIMPLEX","446.000000","446.000000","A-Analog","High","25K","Off","Off","","","","","","","Carrier"
+"3","EXAMPLE RPT","145.000000","144.400000","A-Analog","Mid","25K","100.0","100.0","","","","","","","CTCSS/DCS"
+"4","EXAMPLE DMR","441.000000","446.000000","D-Digital","High","12.5K","Off","Off","Example TG","Group Call","91","1234567","1","1","Carrier"

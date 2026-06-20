@@ -1,0 +1,39 @@
+{
+  "name": "anytone-d578-ui",
+  "version": "0.1.0",
+  "description": "AnyTone AT-D578UVIII Bluetooth controller",
+  "author": "Keaton Taylor",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n backend,ui -c blue,green \"npm:dev:backend\" \"npm:dev:frontend\"",
+    "dev:frontend": "nuxt dev --host 0.0.0.0 --port 3030",
+    "dev:backend": "node anytone-server.mjs",
+    "dev:remote": "nuxt dev --host 0.0.0.0 --port 3030",
+    "serial": "node anytone-server.mjs",
+    "build": "nuxt build",
+    "generate": "nuxt generate",
+    "start": "concurrently -k -n backend,ui -c blue,green \"npm:start:backend\" \"npm:start:frontend\"",
+    "start:backend": "node anytone-server.mjs",
+    "start:frontend": "node .output/server/index.mjs",
+    "preview": "nuxt preview",
+    "preview:remote": "nuxt preview --host 0.0.0.0 --port 3030",
+    "typecheck": "vue-tsc --noEmit",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@roamhq/wrtc": "^0.10.0",
+    "concurrently": "^9.0.0",
+    "dbus-next": "^0.10.2",
+    "ffmpeg-static": "^5.3.0",
+    "koffi": "^3.0.2",
+    "nuxt": "^3.13.0",
+    "serialport": "^12.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.0.0",
+    "vue-tsc": "^2.0.0"
+  }
+}
