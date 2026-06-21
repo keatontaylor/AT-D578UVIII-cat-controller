@@ -302,8 +302,8 @@ const RADIO_SETTINGS = [
   { key: 'gps',             label: 'GPS',             block: 0x05, offset: 33, enum: { 0: 'Off', 1: 'On' }, write: 0x3c },
   { key: 'gpsMode',         label: 'GPS Mode',        block: 0x09, offset: 40, enum: { 0: 'GPS', 1: 'BDS', 2: 'GPS+BDS', 3: 'GLONASS', 4: 'GPS+GLONASS', 5: 'BDS+GLONASS', 6: 'ALL' }, write: 0x3d },
   { key: 'gpsAreaSql',      label: 'GPS Area SQL',    block: 0x09, offset: 76, enum: { 0: 'Off', 1: 'On' }, write: 0x3e },
-  // Fan mode: read-only (no write opcode captured).
-  { key: 'fanMode',         label: 'Fan',             block: 0x09, offset: 43, enum: { 0: 'PTT', 1: 'Temp', 2: 'Both' } },
+  // Fan mode: write 08 16 (captured 2026-06-21; `08 16 01` = Temp). Stored raw == enum.
+  { key: 'fanMode',         label: 'Fan',             block: 0x09, offset: 43, enum: { 0: 'PTT', 1: 'Temp', 2: 'Both' }, write: 0x16 },
 ]
 const RADIO_SETTINGS_BY_KEY = Object.fromEntries(RADIO_SETTINGS.map(s => [s.key, s]))
 
