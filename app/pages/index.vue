@@ -113,9 +113,12 @@
               </div>
             </div>
           </div>
-          <div v-if="(state.subMode === 'DMR' && (state.subContactName || state.subContactTg)) || vfoDmrCallerDisplay('1')" class="sql-row">
+          <div v-if="(state.subMode === 'DMR' && (state.subContactName || state.subContactTg)) || vfoDmrLiveTalkgroup('1') || vfoDmrCallerDisplay('1')" class="sql-row">
             <span v-if="state.subMode === 'DMR' && (state.subContactName || state.subContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
               TG {{ state.subContactName || state.subContactTg }}<span v-if="state.subContactName && state.subContactTg" class="sql-tone">{{ state.subContactTg }}</span>
+            </span>
+            <span v-if="vfoDmrLiveTalkgroup('1')" class="sql-badge sql-badge--dmr-live" title="Incoming DMR call on a different talkgroup">
+              {{ vfoDmrLiveTalkgroup('1') }}
             </span>
             <span v-if="vfoDmrCallerDisplay('1')" class="sql-badge sql-badge--dmr-caller" title="DMR caller">
               {{ vfoDmrCallerDisplay('1') }}
@@ -181,6 +184,9 @@
             <div v-if="state.subTxTone" class="ctl-box" :class="{ 'ctl-box--open': tonePopup?.vfo === '1' && tonePopup?.field === 'tx' }" role="button" tabindex="0" title="Edit TX Tone (SUB)" @click.stop="openTonePopup('1', 'tx')" @keydown.enter.space.prevent="openTonePopup('1', 'tx')">
               <StatusBadge label="TX Tone" :value="state.subTxTone.display" :active="tonePopup?.vfo === '1' && tonePopup?.field === 'tx'" color-active="#58a6ff" />
             </div>
+            <div v-if="state.subMode === 'DMR'" class="ctl-box" :class="{ 'ctl-box--open': manualDialPopup === '1' }" role="button" tabindex="0" title="Manual dial DMR contact (SUB)" @click.stop="openManualDialPopup('1')" @keydown.enter.space.prevent="openManualDialPopup('1')">
+              <StatusBadge label="Manual Dial" :value="manualDialBadgeValue" :active="manualDialPopup === '1' || !!state.manualDial" :color-active="state.manualDial ? '#f59e0b' : '#58a6ff'" />
+            </div>
             <div
               v-for="cs in state.subChannelSettings"
               :key="cs.key"
@@ -234,9 +240,12 @@
               </div>
             </div>
           </div>
-          <div v-if="(state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)) || vfoDmrCallerDisplay('0')" class="sql-row">
+          <div v-if="(state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)) || vfoDmrLiveTalkgroup('0') || vfoDmrCallerDisplay('0')" class="sql-row">
             <span v-if="state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
               TG {{ state.mainContactName || state.mainContactTg }}<span v-if="state.mainContactName && state.mainContactTg" class="sql-tone">{{ state.mainContactTg }}</span>
+            </span>
+            <span v-if="vfoDmrLiveTalkgroup('0')" class="sql-badge sql-badge--dmr-live" title="Incoming DMR call on a different talkgroup">
+              {{ vfoDmrLiveTalkgroup('0') }}
             </span>
             <span v-if="vfoDmrCallerDisplay('0')" class="sql-badge sql-badge--dmr-caller" title="DMR caller">
               {{ vfoDmrCallerDisplay('0') }}
@@ -301,6 +310,9 @@
             </div>
             <div v-if="state.mainTxTone" class="ctl-box" :class="{ 'ctl-box--open': tonePopup?.vfo === '0' && tonePopup?.field === 'tx' }" role="button" tabindex="0" title="Edit TX Tone (MAIN)" @click.stop="openTonePopup('0', 'tx')" @keydown.enter.space.prevent="openTonePopup('0', 'tx')">
               <StatusBadge label="TX Tone" :value="state.mainTxTone.display" :active="tonePopup?.vfo === '0' && tonePopup?.field === 'tx'" color-active="#58a6ff" />
+            </div>
+            <div v-if="state.mainMode === 'DMR'" class="ctl-box" :class="{ 'ctl-box--open': manualDialPopup === '0' }" role="button" tabindex="0" title="Manual dial DMR contact (MAIN)" @click.stop="openManualDialPopup('0')" @keydown.enter.space.prevent="openManualDialPopup('0')">
+              <StatusBadge label="Manual Dial" :value="manualDialBadgeValue" :active="manualDialPopup === '0' || !!state.manualDial" :color-active="state.manualDial ? '#f59e0b' : '#58a6ff'" />
             </div>
             <div
               v-for="cs in state.mainChannelSettings"
@@ -830,6 +842,53 @@
               <span class="setting-enum-label">{{ opt.label }}</span>
               <span v-if="settingPopupItem.value === opt.value" class="setting-enum-check">✓</span>
             </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ── DMR manual-dial popup (teleported to body) ── -->
+    <Teleport to="body">
+      <div
+        v-if="manualDialPopup !== null"
+        class="tone-modal-backdrop"
+        @click.self="closeManualDialPopup"
+      >
+        <div
+          class="tone-modal setting-modal manual-dial-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Manual Dial"
+        >
+          <div class="tone-modal-header">
+            <span class="tone-modal-title">Manual Dial — {{ manualDialPopup === '0' ? 'MAIN' : 'SUB' }}</span>
+            <button class="tone-modal-close" @click="closeManualDialPopup" aria-label="Close">✕</button>
+          </div>
+          <div class="manual-dial-body">
+            <div class="manual-dial-status" :class="{ 'manual-dial-status--on': !!state.manualDial }">
+              <span v-if="state.manualDial">Dialed: <strong>{{ state.manualDial.callType === 'private' ? 'Private' : 'Group' }} {{ state.manualDial.target }}</strong></span>
+              <span v-else>Using channel contact</span>
+            </div>
+            <label class="manual-dial-label">Target TG / DMR ID</label>
+            <input
+              v-model="manualDialInput"
+              class="dmr-dial-input"
+              inputmode="numeric"
+              placeholder="e.g. 3223436"
+              :disabled="manualDialBusy"
+              @keydown.enter.prevent="applyManualDial"
+            />
+            <div class="manual-dial-types">
+              <button class="dmr-dial-type" :class="{ 'dmr-dial-type--on': manualDialType === 'group' }" :disabled="manualDialBusy" @click="manualDialType = 'group'">Group Call</button>
+              <button class="dmr-dial-type" :class="{ 'dmr-dial-type--on': manualDialType === 'private' }" :disabled="manualDialBusy" @click="manualDialType = 'private'">Private Call</button>
+            </div>
+            <button class="btn btn-primary setting-edit-done" :disabled="manualDialBusy || !manualDialDigits" @click="applyManualDial">
+              {{ manualDialBusy ? 'Working…' : 'Dial' }}
+            </button>
+            <button class="btn btn-ghost manual-dial-restore" :disabled="manualDialBusy || !state.manualDial" @click="restoreChannelContact">
+              Restore channel contact
+            </button>
+            <p class="manual-dial-note">The next PTT calls the dialed target instead of the channel's programmed contact, until restored.</p>
           </div>
         </div>
       </div>
@@ -1390,7 +1449,14 @@ interface TransceiverState {
     callsign: string | null
     name: string | null
     location: string | null
+    talkgroup: number | null
+    colorCode: number | null
+    slot: number | null
     at: number
+  } | null
+  manualDial: {
+    target: string
+    callType: 'group' | 'private'
   } | null
   mainZone: string | null
   subZone: string | null
@@ -1507,6 +1573,7 @@ const defaultState = (): TransceiverState => ({
   subContactName: null,
   subContactTg: null,
   dmrActivity: null,
+  manualDial: null,
   mainZone: null,
   subZone: null,
   mainZonePosition: null,
@@ -2896,6 +2963,61 @@ async function setSetting(key: string, value: number) {
   }
 }
 
+// ── DMR manual dial ──────────────────────────────────────────
+// Sticky target override: dial a TG / DMR ID + call type, and the next PTT(s)
+// transmit to it instead of the channel's programmed contact, until cleared.
+// Mirrors the radio's own manual-dial 56 frame (see backend manualDialPttTail).
+const manualDialInput = ref('')
+const manualDialType = ref<'group' | 'private'>('group')
+const manualDialBusy = ref(false)
+const manualDialPopup = ref<'0' | '1' | null>(null)   // open dial popup's VFO
+const manualDialDigits = computed(() => manualDialInput.value.replace(/\D/g, ''))
+// Settings-box value: the active dialed target, or "Channel" when using the contact.
+const manualDialBadgeValue = computed(() => {
+  const dial = state.value.manualDial
+  if (!dial) return 'Off'
+  return `${dial.callType === 'private' ? 'PVT' : 'GRP'} ${dial.target}`
+})
+
+function openManualDialPopup(vfo: '0' | '1') {
+  manualDialPopup.value = vfo
+  manualDialInput.value = state.value.manualDial?.target ?? ''
+  manualDialType.value = state.value.manualDial?.callType ?? 'group'
+}
+
+function closeManualDialPopup() {
+  manualDialPopup.value = null
+}
+
+async function applyManualDial() {
+  if (manualDialBusy.value || !manualDialDigits.value) return
+  manualDialBusy.value = true
+  try {
+    const data = await $fetch<{ state: TransceiverState }>('/api/dmr-dial', { method: 'POST', body: { target: manualDialDigits.value, callType: manualDialType.value } })
+    if (data.state) applyState(data.state)
+    closeManualDialPopup()
+  } catch (e: any) {
+    lastError.value = e.message
+  } finally {
+    manualDialBusy.value = false
+  }
+}
+
+async function restoreChannelContact() {
+  if (manualDialBusy.value) return
+  manualDialBusy.value = true
+  try {
+    const data = await $fetch<{ state: TransceiverState }>('/api/dmr-dial', { method: 'POST', body: { clear: true } })
+    if (data.state) applyState(data.state)
+    manualDialInput.value = ''
+    closeManualDialPopup()
+  } catch (e: any) {
+    lastError.value = e.message
+  } finally {
+    manualDialBusy.value = false
+  }
+}
+
 // ── RX/TX tone popup (CTCSS/DCS) ─────────────────────────────
 // One popup per RX/TX tone: pick a type (Off/CTC/DCS) then a value. Writes the
 // 2f tone frame via /api/channel-tone (selecting the side first).
@@ -3197,6 +3319,23 @@ function vfoDmrCallerDisplay(vfo: '0' | '1'): string | null {
     activity.location,
   ].filter((part): part is string => Boolean(part))
   return parts.length ? parts.join(' · ') : null
+}
+
+// The live incoming talkgroup of an in-progress DMR call (from the radio's 0x59
+// push), surfaced only when it differs from the channel's programmed contact —
+// e.g. Digital Monitor "dual" hears traffic on a TG the channel isn't set to.
+// dmrActivity is global to the radio's DMR receiver, so it shows on the DMR side.
+function vfoDmrLiveTalkgroup(vfo: '0' | '1'): string | null {
+  if (vfoMode(vfo) !== 'DMR') return null
+  const activity = state.value.dmrActivity
+  if (!activity?.active || activity.talkgroup == null) return null
+  const channelTg = vfo === '0' ? state.value.mainContactTg : state.value.subContactTg
+  if (channelTg != null && String(channelTg) === String(activity.talkgroup)) return null
+  // CC/slot ride the live 5e stream (byte 7 / byte 12); slot is 0-based → TS1/TS2.
+  let label = `TG ${activity.talkgroup}`
+  if (activity.colorCode != null) label += ` · CC ${activity.colorCode}`
+  if (activity.slot != null) label += ` · TS${activity.slot + 1}`
+  return label
 }
 
 function vfoTxFrequencyDisplay(vfo: '0' | '1'): string | null {
@@ -7931,6 +8070,87 @@ body {
   background: rgba(210, 153, 34, .12);
 }
 
+/* DMR manual-dial popup (settings-pane "Manual Dial" box opens this).
+   Matches the radio-setting popup: same outer body padding + theme vars. */
+.manual-dial-modal { width: 300px; }
+
+.manual-dial-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.manual-dial-status {
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--surface-2, #161b22);
+  border: 1px solid var(--border);
+  color: var(--text-dim, #9ca3af);
+}
+
+.manual-dial-status--on {
+  background: rgba(245, 158, 11, .14);
+  border-color: rgba(245, 158, 11, .6);
+  color: #fcd34d;
+}
+
+.manual-dial-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--text-dim, #9ca3af);
+}
+
+.dmr-dial-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2, #161b22);
+  color: var(--text, #e6edf3);
+  font-family: var(--font-mono);
+  font-size: 16px;
+}
+
+.manual-dial-types {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.dmr-dial-type {
+  padding: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  border-radius: 8px;
+  background: var(--surface-2, #161b22);
+  border: 1px solid var(--border);
+  color: var(--text-dim, #9ca3af);
+  cursor: pointer;
+}
+
+.dmr-dial-type--on {
+  background: rgba(56, 189, 248, .18);
+  border-color: var(--accent, #58a6ff);
+  color: #7dd3fc;
+}
+
+.manual-dial-restore {
+  width: 100%;
+}
+
+.manual-dial-note {
+  margin: 2px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim, #9ca3af);
+}
+
 .floating-ptt {
   position: fixed;
   right: max(18px, env(safe-area-inset-right));
@@ -9409,7 +9629,8 @@ button.recordings-lane-label:hover {
 }
 
 .sql-badge--tone,
-.sql-badge--dmr-caller {
+.sql-badge--dmr-caller,
+.sql-badge--dmr-live {
   max-width: min(100%, 360px);
 }
 
@@ -9445,6 +9666,20 @@ button.recordings-lane-label:hover {
   background: rgba(16, 185, 129, .14);
   border-color: rgba(16, 185, 129, .72);
   color: #86efac;
+}
+
+/* Live incoming call on a talkgroup the channel isn't set to (Digital Monitor). */
+.sql-badge--dmr-live {
+  background: rgba(245, 158, 11, .16);
+  border-color: rgba(245, 158, 11, .78);
+  color: #fcd34d;
+  font-family: var(--font-mono);
+  animation: sql-badge-live-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes sql-badge-live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .55; }
 }
 
 .sql-tone {

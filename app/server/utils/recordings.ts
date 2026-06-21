@@ -59,6 +59,8 @@ interface ActiveRecording {
   forceFinishTimer: ReturnType<typeof setTimeout> | null
   stopRequestedAt: number | null
   finished: boolean
+  sampleRate: number
+  audioBytesWritten: number
 }
 
 interface RecordingsConfig {
@@ -69,6 +71,9 @@ interface RecordingsQuery {
   from?: number
   to?: number
 }
+
+// Capture and TX-mic PCM are both signed 16-bit mono once written to ffmpeg.
+const BYTES_PER_SAMPLE = 2
 
 const DEFAULT_SETTINGS: RecordingSettings = {
   enabled: false,
@@ -426,6 +431,7 @@ class RecordingsManager {
       const active = this.active.get('tx')
       if (!active || active.finished || !active.process.stdin?.writable) return
       active.process.stdin.write(frame)
+      active.audioBytesWritten += frame.length
     })
   }
 
@@ -506,7 +512,9 @@ class RecordingsManager {
           : process.env.CAT_AUDIO_SUB_CHANNEL || 'right',
         frame.channelCount,
       )
-      active.process.stdin.write(selectMonoChannel(source, frame.channelCount, channel))
+      const mono = selectMonoChannel(source, frame.channelCount, channel)
+      active.process.stdin.write(mono)
+      active.audioBytesWritten += mono.length
     }
   }
 
@@ -539,7 +547,7 @@ class RecordingsManager {
     const clip = await this.buildClip(id, kind, side, startedAt, relativePath, status, meter, squelch)
     const processConfig = buildAudioRecordingEncoderProcess(config, { outputPath, sampleRate: String(sampleRate) })
     const child = spawn(processConfig.command, processConfig.args, { stdio: ['pipe', 'ignore', 'pipe'] })
-    const active: ActiveRecording = { key, clip, process: child, closeTimer: null, killTimer: null, forceFinishTimer: null, stopRequestedAt: null, finished: false }
+    const active: ActiveRecording = { key, clip, process: child, closeTimer: null, killTimer: null, forceFinishTimer: null, stopRequestedAt: null, finished: false, sampleRate, audioBytesWritten: 0 }
     this.active.set(key, active)
     this.clips.push(clip)
     await this.saveIndex()
@@ -666,7 +674,14 @@ class RecordingsManager {
     const path = resolve(recordingsRoot(), active.clip.relativePath)
     const fileStat = await stat(path).catch(() => null)
     active.clip.bytes = fileStat?.size ?? null
-    if ((active.clip.durationMs ?? 0) < this.settings.minDurationMs || !active.clip.bytes) {
+    // durationMs above is wall-clock (squelch-open span). If the audio capture
+    // stalled while the squelch bit stayed open, ffmpeg still emits a tiny
+    // header-only mp3 (bytes > 0) that plays as 0 seconds. Require that we
+    // actually wrote enough PCM to cover at least half the minimum duration,
+    // so empty/near-empty clips are dropped instead of cluttering the timeline.
+    const minAudioBytes = Math.floor((this.settings.minDurationMs / 1000) * active.sampleRate * BYTES_PER_SAMPLE * 0.5)
+    const hasAudio = active.audioBytesWritten >= Math.max(1, minAudioBytes)
+    if ((active.clip.durationMs ?? 0) < this.settings.minDurationMs || !active.clip.bytes || !hasAudio) {
       this.clips = this.clips.filter(clip => clip.id !== active.clip.id)
       await unlink(path).catch(() => {})
     }

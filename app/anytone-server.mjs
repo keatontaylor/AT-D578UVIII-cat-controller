@@ -603,7 +603,11 @@ function dmrPttTail(context) {
 function dmrPttFrame(on, context) {
   const frame = simplePttFrame(on)
   frame[3] = context.sideContext & 0xff
-  frame[4] = on ? 0x80 : 0x00
+  // byte4 = key-down call-setup type: 0x80 for a normal channel-contact PTT, but
+  // 0x06 for a manual-dial / new-address call (matches the real BT-01 head's
+  // 56 01 frame — sending 0x80 with a manual target made the radio do a normal
+  // channel PTT instead). Release is 0x00 for both. Decoded 2026-06-21.
+  frame[4] = on ? (context.manualDial ? 0x06 : 0x80) : 0x00
   dmrPttTail(context).copy(frame, 5)
   return frame
 }
@@ -627,6 +631,28 @@ function dmrTailFrom04Raw(raw) {
   tail[3] = raw[4] & 0xff
   tail[4] = raw[5] & 0xff
   tail[5] = (raw[0] >> 7) & 0x01
+  return tail
+}
+
+// Manual-dial DMR target → 18-byte PTT context tail. This tail lands at frame[5..]
+// of the 56 PTT frame (see dmrPttFrame), so it reproduces the real BT-01 head's
+// manual-dial 56 layout decoded 2026-06-21 from H→R relay captures:
+//   frame[5] (tail[0]) = call class — group 0x01 / private 0x00
+//   frame[6] (tail[1]) = 0x00
+//   frame[7..9] (tail[2..4]) = target ID/TG as 24-bit BIG-ENDIAN HEX
+//        (3223436 → 0x31 0x2F 0x8C — NOT BCD; the earlier BCD guess transmitted
+//        to the channel contact instead because the radio couldn't parse it.)
+// A programmed channel instead uses frame[5]=0xff; manual dial carries the target.
+// Returns null if the target isn't a valid 24-bit DMR ID/TG.
+function manualDialPttTail(target, callType) {
+  const id = Number(String(target ?? '').replace(/\D/g, ''))
+  if (!Number.isInteger(id) || id <= 0 || id > 0xffffff) return null
+  const group = String(callType).toLowerCase() !== 'private'
+  const tail = Buffer.alloc(18)
+  tail[0] = group ? 0x01 : 0x00
+  tail[2] = (id >> 16) & 0xff
+  tail[3] = (id >> 8) & 0xff
+  tail[4] = id & 0xff
   return tail
 }
 
@@ -1865,24 +1891,33 @@ class AnyToneBackend extends EventEmitter {
     const side = this.state.sides?.[sideName] ?? {}
     const programmed = channelProgramFor(side.channelNumber, side.channelName)
     const dmr = side.txDigital === true
+    // Manual dial overrides the channel's programmed contact while it is set and
+    // the active side is DMR. group → call class 0x01 / private → 0x00.
+    const manual = dmr && this.state.manualDial?.target ? this.state.manualDial : null
+    const manualGroup = manual ? String(manual.callType).toLowerCase() !== 'private' : false
     const context = {
       side: sideName,
       sideContext: sideName === 'B' ? 0x01 : 0x00,
       dmr,
-      callClass: dmrCallClass(programmed),
-      contextBytes: dmrContextBytes(side, programmed),
-      flag0: dmrFlag0(programmed),
+      callClass: manual ? (manualGroup ? 0x01 : 0x00) : dmrCallClass(programmed),
+      contextBytes: manual ? (bcdBytesFromNumber(manual.target, 4) ?? [0x00, 0x00, 0x00, 0x00]) : dmrContextBytes(side, programmed),
+      flag0: manual ? (manualGroup ? 0x01 : 0x00) : dmrFlag0(programmed),
       channelNumber: side.channelNumber ?? null,
       channelName: side.channelName ?? null,
-      contactName: side.contactName ?? programmed?.contactName ?? null,
-      contactTg: side.contactTg ?? programmed?.contactTg ?? null,
+      contactName: manual ? null : (side.contactName ?? programmed?.contactName ?? null),
+      contactTg: manual ? manual.target : (side.contactTg ?? programmed?.contactTg ?? null),
     }
     // Tail source priority for the extended DMR key-down:
+    //   0. manual dial (synthetic tail from the dialed target — overrides all)
     //   1. 04 2c/2d channel read (pre-key, validator-correct, byte-exact)
     //   2. cached 0x58 keyed-context push (only available after a prior key)
     //   3. CPS-guessed call-class/TG (last resort; got tail[0] wrong and wedged)
-    const tail04 = dmr ? dmrTailFrom04Raw(side.dmrTailRaw) : null
-    if (dmr && tail04) {
+    const tail04 = dmr && !manual ? dmrTailFrom04Raw(side.dmrTailRaw) : null
+    if (manual) {
+      context.dmrTail = [...(manualDialPttTail(manual.target, manual.callType) ?? Buffer.alloc(18))]
+      context.dmrTailSource = 'manual'
+      context.manualDial = { target: manual.target, callType: manualGroup ? 'group' : 'private' }
+    } else if (dmr && tail04) {
       context.dmrTail = [...tail04]
       context.dmrTailSource = '04'
     } else if (dmr && Array.isArray(this.latestDmrStatusTail?.tail) && this.latestDmrStatusTail.tail.length === 18) {
@@ -1893,6 +1928,26 @@ class AnyToneBackend extends EventEmitter {
       context.dmrTailSource = 'channel'
     }
     return context
+  }
+
+  // Manual dial: set a sticky DMR target that overrides the channel's programmed
+  // contact on the next PTT(s) until cleared. callType 'group' (default) | 'private'.
+  setManualDial(target, callType = 'group') {
+    const digits = String(target ?? '').replace(/\D/g, '')
+    if (!digits) throw new Error('manual dial target is required')
+    if (!manualDialPttTail(digits, callType)) throw new Error(`invalid manual-dial target ${target}`)
+    const type = String(callType).toLowerCase() === 'private' ? 'private' : 'group'
+    this.state.manualDial = { target: digits, callType: type }
+    this.log(`manual dial set: ${type} call to ${digits}`)
+    this.emitState()
+    return this.getState()
+  }
+
+  clearManualDial() {
+    if (this.state.manualDial) this.log('manual dial cleared')
+    this.state.manualDial = null
+    this.emitState()
+    return this.getState()
   }
 
   // Live PTT used by the UI (TX1/TX0). Release is best-effort even when the
@@ -2132,6 +2187,9 @@ function emptyState() {
     signal: { smeter: null, squelchOpen: null, mainRssi: null, subRssi: null, mainOpen: null, subOpen: null, dmrRxOpen: false, dmrActiveAt: null, lastSignalAt: null, lastRxStatusAt: null, rawStatus: null, note: '5a squelch/RSSI fields are relative to selected TX/RX side: byte 2 / mask 0x02 = selected side, byte 3 / mask 0x04 = other side. 5e/5b are global. dmrRxOpen latches DMR RX (5e gate). Levels uncalibrated.' },
     clock: null,
     dmrActivity: null,
+    // Sticky manual-dial DMR target: { target: '<digits>', callType: 'group'|'private' }.
+    // Overrides the PTT contact tail until cleared. Null = use the channel's contact.
+    manualDial: null,
     rawFrames: [],
     asyncFrames: [],
     logs: [],
@@ -2551,7 +2609,26 @@ function decodePayload(payload) {
   }
   if (payload[0] === 0x5b && payload.length >= 3) return { ...decoded, type: 'rx-status', squelchOpen: payload[1] === 1 }
   if (payload[0] === 0x5a && payload.length >= 15) return { ...decoded, type: 'signal', activeRssi: payload[1], inactiveRssi: payload[2], activeOpen: (payload[5] & 0x02) !== 0, inactiveOpen: (payload[5] & 0x04) !== 0 }
-  if (payload[0] === 0x5e && payload.length >= 18) return { ...decoded, type: 'rx-status', statusCode: '5e', squelchOpen: payload[1] !== 0, statusByte: payload[1], bytes: [...payload.subarray(1, -1)] }
+  if (payload[0] === 0x5e && payload.length >= 18) {
+    // 18-byte async link-state push. byte1: 00 idle / 01 RX / 02 TX. The live DMR
+    // call's Color Code (byte 7, 0-15) and Time Slot (byte 12, 0=TS1/1=TS2) sit
+    // around the source-ID field (bytes 8-11); decoded 2026-06-21 against a known
+    // call (TG 5023426 = CC1/TS2: byte7=01, byte12=01). Only trusted while active —
+    // idle frames carry stale/zero values here.
+    const active = payload[1] !== 0
+    const cc = payload[7]
+    const ts = payload[12]
+    return {
+      ...decoded,
+      type: 'rx-status',
+      statusCode: '5e',
+      squelchOpen: payload[1] !== 0,
+      statusByte: payload[1],
+      dmrColorCode: active && cc <= 15 ? cc : null,
+      dmrSlot: active && ts <= 1 ? ts : null,
+      bytes: [...payload.subarray(1, -1)],
+    }
+  }
   if (payload[0] === 0x58) {
     const dmrTail = dmrTailFrom58Payload(payload)
     // DMR talker context: byte 1 is direction/context (`00` RX talker, `81` TX
@@ -2725,7 +2802,14 @@ function applyDecoded(state, decoded, timestamp) {
       // (a 5e/5b close used to zero BOTH sides and kill the analog smeter too).
       state.signal.dmrRxOpen = (decoded.statusByte ?? 0) !== 0
       if (state.signal.dmrRxOpen) state.signal.dmrActiveAt = timestamp
-      if (state.dmrActivity) state.dmrActivity = { ...state.dmrActivity, active: state.signal.dmrRxOpen, at: timestamp }
+      if (state.dmrActivity) state.dmrActivity = {
+        ...state.dmrActivity,
+        active: state.signal.dmrRxOpen,
+        at: timestamp,
+        // CC/slot ride the 5e stream; keep the last good values for the call.
+        ...(decoded.dmrColorCode != null ? { colorCode: decoded.dmrColorCode } : {}),
+        ...(decoded.dmrSlot != null ? { slot: decoded.dmrSlot } : {}),
+      }
     } else if (decoded.statusCode === '045e') {
       // Polled 04 5e only says "some squelch is open". Use it as a DMR fallback
       // only when there is a DMR side and 5a is not already identifying an analog
@@ -2938,6 +3022,8 @@ function anytoneToState(source) {
     subContactTg: sub.contactTg ?? null,
     // Live DMR call context (caller during RX), enriched from the RadioID dump.
     dmrActivity: connected ? (source.dmrActivity ?? null) : null,
+    // Sticky manual-dial DMR target overriding the PTT contact (null = channel contact).
+    manualDial: source.manualDial ?? null,
     radioMemories: [],
     radioMemoryScanActive: false,
     radioMemoryScanProgress: 0,
@@ -3307,6 +3393,18 @@ async function handleRequest(req, res) {
     const holdMs = body.holdMs == null ? undefined : Math.max(20, Math.min(3000, Number(body.holdMs) || 120))
     const responses = await backend.pressKey(code, { variant: String(body.variant || 'raw41'), holdMs })
     return sendJson(res, 200, { ok: true, variant: body.variant, responses })
+  }
+  if (req.method === 'POST' && url.pathname === '/anytone/dmr-dial') {
+    const body = await readJson(req)
+    try {
+      if (body?.clear === true || body?.target == null || String(body.target).trim() === '') {
+        return sendJson(res, 200, { state: backend.clearManualDial() })
+      }
+      const state = backend.setManualDial(body.target, body.callType)
+      return sendJson(res, 200, { state })
+    } catch (err) {
+      return sendJson(res, 400, { error: err?.message ?? 'manual dial failed' })
+    }
   }
   if (req.method === 'POST' && url.pathname === '/anytone/command') {
     const body = await readJson(req)
