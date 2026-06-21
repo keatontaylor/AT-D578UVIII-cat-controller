@@ -360,7 +360,10 @@ class RecordingsManager {
       return
     }
 
-    if (!status?.connected) {
+    // Not connected, or the squelch follower lost its status stream (squelch.error
+    // set): the per-side "open" bits are unreliable — the follower fails them OPEN
+    // and reports the stale last status. Don't start clips on that; stop any open.
+    if (!status?.connected || squelch.error) {
       this.deferStopClip('main')
       this.deferStopClip('sub')
       this.deferStopClip('tx')
@@ -396,7 +399,11 @@ class RecordingsManager {
         active.closeTimer = null
         active.stopRequestedAt = null
       }
-      if (!active && this.ensureCaptureSubscription()) await this.startClip(side, status, meter, squelch)
+      // Only START on a real meter reading. On (re)connect the first status has
+      // null meters and squelchOpenFromMeter falls back to "open", which would
+      // otherwise spawn a 0-second clip per side. An already-active clip keeps
+      // recording through a transient null (handled above), so this only gates new ones.
+      if (!active && meter != null && this.ensureCaptureSubscription()) await this.startClip(side, status, meter, squelch)
     } else {
       this.deferStopClip(side)
     }

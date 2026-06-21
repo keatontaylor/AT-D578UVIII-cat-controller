@@ -2445,12 +2445,13 @@ function vfoModeForSide(side) {
 }
 
 function txFrequencyFromOffset(rxMhz, txOffsetMhz, programmed) {
-  if (programmed?.transmitFrequencyMhz != null) return programmed.transmitFrequencyMhz
-  if (rxMhz == null || txOffsetMhz == null) return null
-  if (txOffsetMhz === 0) return rxMhz
-
-  // The live channel block gives offset magnitude but no confirmed direction byte.
-  return rxMhz + txOffsetMhz
+  // txOffsetMhz is the SIGNED repeater shift decoded straight from the channel
+  // block (direction = byte10 bits 6-7; see the 04 2c/2d decoder). Prefer the
+  // live radio value; the CSV's absolute TX is only a fallback for when the
+  // offset couldn't be read. (Previously the CSV won unconditionally and the
+  // live path assumed a +offset, so negative-shift channels read backwards.)
+  if (rxMhz != null && txOffsetMhz != null) return rxMhz + txOffsetMhz
+  return programmed?.transmitFrequencyMhz ?? null
 }
 
 function decodePayload(payload) {
@@ -2486,15 +2487,22 @@ function decodePayload(payload) {
       const mhz = payload.length >= 6 ? decodeBcdFrequency(payload.subarray(2, 6)) : null
       if (mhz == null) return { ...decoded, type: 'status-probe', command, statusCode: `04${command.toString(16).padStart(2, '0')}`, bytes: [...payload.subarray(2, -1)] }
       const strings = extractAsciiStrings(payload, 37)
-      // TX offset field [6..9]: BCD; equals RX freq on simplex, small value (MHz)
-      // for repeater shift. Direction byte not identified yet — magnitude only.
+      // TX offset field [6..9] = shift MAGNITUDE, BCD (0.600 / 5.000 etc; equals
+      // RX on simplex). Direction is byte10 bits 6-7: 0 simplex / 1 positive /
+      // 2 negative (decoded 2026-06-21 across the full codeplug — every channel's
+      // signed TX matched). Yields a SIGNED txOffsetMhz so negative repeaters
+      // (most ham) no longer read as RX+offset.
       let txOffsetMhz = null
-      if (payload.length >= 10) {
-        const offsetValue = bcdNumber(payload.subarray(6, 10))
-        if (offsetValue != null) {
-          const offsetMhz = offsetValue / 100000
-          if (mhz != null && Math.abs(offsetMhz - mhz) < 0.00001) txOffsetMhz = 0
-          else if (offsetMhz > 0 && offsetMhz <= 12) txOffsetMhz = offsetMhz
+      if (payload.length >= 11) {
+        const offsetDir = (payload[10] >> 6) & 0x03
+        if (offsetDir === 0) {
+          txOffsetMhz = 0
+        } else {
+          const offsetValue = bcdNumber(payload.subarray(6, 10))
+          if (offsetValue != null) {
+            const offsetMhz = offsetValue / 100000
+            if (offsetMhz > 0 && offsetMhz <= 12) txOffsetMhz = offsetDir === 2 ? -offsetMhz : offsetMhz
+          }
         }
       }
       const customRaw = payload.length >= 20 ? payload[18] | (payload[19] << 8) : 0

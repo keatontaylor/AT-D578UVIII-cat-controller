@@ -2619,7 +2619,12 @@ const floatingPttSub = computed(() => {
 })
 
 const radioTxActive = computed(() => state.value.txState || state.value.mox)
-const pttConfirmedActive = computed(() => pttIntent.value && radioTxActive.value)
+// Red "transmitting" state. radioTxActive is the radio's txState echoed back over
+// SSE, which can lag or drop under the heavy frame traffic during a transmission;
+// audioTxActive is the local confirmation that the TX1 command round-tripped and
+// the mic is live (an equally-strong "we keyed the radio" signal). Accept either
+// so the indicator reliably turns red while actually transmitting.
+const pttConfirmedActive = computed(() => pttIntent.value && (radioTxActive.value || audioTxActive.value))
 const activeVfo = computed<'0' | '1'>(() => state.value.txVfo === 1 ? '1' : '0')
 const rxOnlyVfo = computed<'0' | '1'>(() => activeVfo.value === '0' ? '1' : '0')
 const activeVfoMode = computed(() => activeVfo.value === '0' ? state.value.mainVfoMode : state.value.subVfoMode)
@@ -8211,8 +8216,10 @@ body {
 
 /* Disabled: stay fully opaque (no see-through "watermark" over the card
    underneath) — just dim the colors so it reads as a deliberate, inactive
-   button rather than bleed-through. */
-.floating-ptt:disabled {
+   button rather than bleed-through. Exclude the active (transmitting) state:
+   the button is :disabled during TX (to block re-press), but it must still show
+   the red "transmitting" color rather than being greyed out by this rule. */
+.floating-ptt:disabled:not(.floating-ptt--active) {
   cursor: default;
   transform: none;
   border-color: rgba(139, 148, 158, .3);
