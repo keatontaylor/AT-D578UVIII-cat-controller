@@ -23,7 +23,7 @@
 #   ANYTONE_REPO_URL    git URL to clone from   (default below)
 #   ANYTONE_BRANCH      branch to check out     (default: main)
 #   ANYTONE_INSTALL_DIR where to clone if needed (default: <run-user-home>/anytone)
-#   ANYTONE_RUN_USER    user the service should run as when installer is run as root
+#   ANYTONE_RUN_USER    user the service should run as (default: the current/invoking user; required when run as root with no SUDO_USER)
 #   ANYTONE_NO_SERVICE=1   skip the AnyTone systemd service install/enable
 #   ANYTONE_NO_BT_SETUP=1  skip the BlueALSA service/D-Bus setup
 #   ANYTONE_NO_SUDOERS=1   skip scoped sudoers install
@@ -165,12 +165,17 @@ fi
 REPO="$(cd "$REPO" && pwd)"
 
 # ── 4. Install deps + build ─────────────────────────────────────────────────
+# Non-interactive guards: under `curl | bash` there is no TTY, so Nuxt's
+# first-run telemetry consent prompt (fired by the `nuxt prepare` postinstall)
+# would read EOF and abort under `set -e`. CI=1 + NUXT_TELEMETRY_DISABLED=1 keep
+# every Nuxt invocation headless so the first install succeeds like a re-run.
+NPM_ENV="CI=1 NUXT_TELEMETRY_DISABLED=1"
 step "Installing npm dependencies (this compiles native modules; may take a while on a Pi)"
 # Force a dev install so build tooling (nuxt/vue-tsc/typescript) is available.
-as_user env NODE_ENV=development npm --prefix "$REPO" install
+as_user env $NPM_ENV NODE_ENV=development npm --prefix "$REPO" install
 
 step "Building the UI (npm run build)"
-as_user npm --prefix "$REPO" run build
+as_user env $NPM_ENV npm --prefix "$REPO" run build
 
 # ── 5. Starter .env ─────────────────────────────────────────────────────────
 if [ -f "$REPO/.env" ]; then
