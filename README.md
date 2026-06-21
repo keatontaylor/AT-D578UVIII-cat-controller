@@ -12,15 +12,16 @@ For a full production setup on a Linux host — system deps, Node 20, build,
 Bluetooth audio, and a boot-time systemd service — run the installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/sourceunknown/anytone/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/keatontaylor/AT-D578UVIII-cat-controller/main/install.sh | bash
 ```
 
 It is idempotent (safe to re-run) and also works from inside an existing clone
-(`./install.sh`). It installs `bluez`, `bluez-alsa-utils`, `ffmpeg` and build
+(`./install.sh`). It installs Bluetooth/BlueALSA, ffmpeg/ALSA, nginx and build
 tools, ensures Node ≥ 20 via NodeSource, runs `npm install && npm run build`,
-seeds `.env` from the example, configures the isolated BlueALSA HFP instance, and
-enables an `anytone` systemd service. Afterward, edit `.env` (set
-`ANYTONE_BT_ADDR`) and `sudo systemctl restart anytone`. See
+seeds `.env` from the example, configures the isolated AnyTone BlueALSA HFP
+service, installs scoped sudoers, and enables the `anytone` systemd service plus
+the nginx proxy. Afterward, edit `.env` (set `ANYTONE_BT_ADDR`) and
+`sudo systemctl restart anytone`. See
 [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for the manual route.
 
 ## Quick start (development)

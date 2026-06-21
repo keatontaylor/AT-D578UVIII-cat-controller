@@ -3,7 +3,7 @@
 # AnyTone AT-D578UV Bluetooth controller — one-shot installer.
 #
 # Usage (from a fresh machine):
-#   curl -fsSL https://raw.githubusercontent.com/<USER>/<REPO>/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/keatontaylor/AT-D578UVIII-cat-controller/main/install.sh | bash
 #
 # Or, from inside an existing clone:
 #   ./install.sh
@@ -29,7 +29,11 @@
 #   ANYTONE_NO_SUDOERS=1   skip scoped sudoers install
 #   ANYTONE_NO_NGINX=1     skip nginx install/configure
 #   ANYTONE_NGINX_SERVER_NAME server_name value (default: _)
-#   ANYTONE_NGINX_LISTEN      listen directive value (default: 80)
+#   ANYTONE_NGINX_LISTEN      HTTP listen port    (default: 80)
+#   ANYTONE_NGINX_TLS=0       disable TLS; serve plain HTTP only (default: TLS on)
+#   ANYTONE_NGINX_TLS_LISTEN  HTTPS listen port   (default: 443)
+#   ANYTONE_NGINX_TLS_CERT / _KEY  cert/key paths (default: /etc/nginx/ssl/<site>.crt|.key)
+#   ANYTONE_NGINX_TLS_DAYS    self-signed validity in days (default: 3650)
 #
 set -euo pipefail
 
@@ -79,7 +83,7 @@ as_user() {
 }
 
 # ── Tunables ────────────────────────────────────────────────────────────────
-REPO_URL="${ANYTONE_REPO_URL:-https://github.com/sourceunknown/anytone.git}"
+REPO_URL="${ANYTONE_REPO_URL:-https://github.com/keatontaylor/AT-D578UVIII-cat-controller.git}"
 BRANCH="${ANYTONE_BRANCH:-main}"
 INSTALL_DIR="${ANYTONE_INSTALL_DIR:-$USER_HOME/anytone}"
 NODE_MAJOR_MIN=20
@@ -87,6 +91,13 @@ NGINX_SITE_NAME="${ANYTONE_NGINX_SITE_NAME:-anytone}"
 NGINX_SERVER_NAME="${ANYTONE_NGINX_SERVER_NAME:-_}"
 NGINX_LISTEN="${ANYTONE_NGINX_LISTEN:-80}"
 NGINX_DISABLE_DEFAULT="${ANYTONE_NGINX_DISABLE_DEFAULT:-1}"
+# TLS: terminate HTTPS at nginx with a self-signed cert and redirect HTTP->HTTPS.
+NGINX_TLS="${ANYTONE_NGINX_TLS:-1}"
+NGINX_TLS_LISTEN="${ANYTONE_NGINX_TLS_LISTEN:-443}"
+NGINX_TLS_DIR="${ANYTONE_NGINX_TLS_DIR:-/etc/nginx/ssl}"
+NGINX_TLS_CERT="${ANYTONE_NGINX_TLS_CERT:-${NGINX_TLS_DIR}/${NGINX_SITE_NAME}.crt}"
+NGINX_TLS_KEY="${ANYTONE_NGINX_TLS_KEY:-${NGINX_TLS_DIR}/${NGINX_SITE_NAME}.key}"
+NGINX_TLS_DAYS="${ANYTONE_NGINX_TLS_DAYS:-3650}"
 
 # ── 1. System packages ──────────────────────────────────────────────────────
 step "Installing system packages (apt)"
@@ -95,13 +106,14 @@ as_root apt-get update -y
 # bluez-alsa-utils -> bluealsa / bluealsa-cli (HFP audio link)
 # ffmpeg           -> system fallback for audio (the app also ships ffmpeg-static)
 # nginx            -> LAN-facing reverse proxy for the loopback-bound UI
+# openssl          -> generate the self-signed TLS cert nginx terminates HTTPS with
 # build-essential, python3, pkg-config -> compile native npm modules (serialport, wrtc)
 as_root apt-get install -y \
   sudo git ca-certificates curl gnupg apt-transport-https \
   dbus systemd rfkill \
   bluez bluez-alsa-utils \
   ffmpeg alsa-utils libasound2-dev \
-  nginx \
+  nginx openssl \
   build-essential python3 pkg-config
 
 # ── 2. Node.js >= 20 ────────────────────────────────────────────────────────
@@ -252,8 +264,118 @@ if [ "${ANYTONE_NO_NGINX:-0}" = "1" ]; then
 elif [ "$uname_s" = "Linux" ] && command -v nginx >/dev/null 2>&1; then
   step "Installing nginx reverse proxy site '${NGINX_SITE_NAME}'"
   UI_PORT="${PORT:-3030}"
-  as_root mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
-  as_root tee "/etc/nginx/sites-available/${NGINX_SITE_NAME}.conf" >/dev/null <<EOF
+  as_root mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled /etc/nginx/snippets
+
+  # Shared proxy locations (kept in a snippet so HTTP and HTTPS reuse one copy).
+  PROXY_SNIPPET="/etc/nginx/snippets/${NGINX_SITE_NAME}-proxy.conf"
+  as_root tee "$PROXY_SNIPPET" >/dev/null <<EOF
+# Managed by AnyTone installer. Proxies to the loopback-bound Nuxt UI.
+location /api/events {
+    proxy_pass http://127.0.0.1:${UI_PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+}
+
+location /api/audio/stream {
+    proxy_pass http://127.0.0.1:${UI_PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+    proxy_send_timeout 1h;
+}
+
+location /api/raw-ws {
+    proxy_pass http://127.0.0.1:${UI_PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 1h;
+}
+
+location / {
+    proxy_pass http://127.0.0.1:${UI_PORT};
+    proxy_http_version 1.1;
+    proxy_set_header Host \$host;
+    proxy_set_header X-Real-IP \$remote_addr;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header Upgrade \$http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+EOF
+
+  if [ "$NGINX_TLS" = "1" ]; then
+    # ── Self-signed TLS cert (generated once; reused on re-runs) ──────────────
+    TLS_CN="$NGINX_SERVER_NAME"
+    [ "$TLS_CN" = "_" ] && TLS_CN="$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo anytone.local)"
+    if as_root test -f "$NGINX_TLS_CERT" && as_root test -f "$NGINX_TLS_KEY"; then
+      info "Reusing existing TLS cert at $NGINX_TLS_CERT."
+    else
+      step "Generating self-signed TLS certificate (CN=${TLS_CN}, ${NGINX_TLS_DAYS} days)"
+      as_root mkdir -p "$NGINX_TLS_DIR"
+      as_root openssl req -x509 -nodes -newkey rsa:2048 \
+        -keyout "$NGINX_TLS_KEY" -out "$NGINX_TLS_CERT" \
+        -days "$NGINX_TLS_DAYS" -subj "/CN=${TLS_CN}" \
+        -addext "subjectAltName=DNS:${TLS_CN},DNS:localhost,IP:127.0.0.1" \
+        || die "openssl failed to generate the self-signed certificate."
+      as_root chmod 600 "$NGINX_TLS_KEY"
+      as_root chmod 644 "$NGINX_TLS_CERT"
+      info "Wrote $NGINX_TLS_CERT and $NGINX_TLS_KEY (self-signed — browsers will warn once)."
+    fi
+
+    # Redirect target preserves a non-standard HTTPS port if configured.
+    if [ "$NGINX_TLS_LISTEN" = "443" ]; then
+      REDIRECT_TARGET="https://\$host\$request_uri"
+    else
+      REDIRECT_TARGET="https://\$host:${NGINX_TLS_LISTEN}\$request_uri"
+    fi
+
+    as_root tee "/etc/nginx/sites-available/${NGINX_SITE_NAME}.conf" >/dev/null <<EOF
+# Managed by AnyTone installer. Terminates HTTPS with a self-signed cert and
+# proxies to the loopback Nuxt UI. Plain HTTP is redirected to HTTPS.
+server {
+    listen ${NGINX_LISTEN};
+    server_name ${NGINX_SERVER_NAME};
+    return 301 ${REDIRECT_TARGET};
+}
+
+server {
+    listen ${NGINX_TLS_LISTEN} ssl http2;
+    server_name ${NGINX_SERVER_NAME};
+
+    ssl_certificate     ${NGINX_TLS_CERT};
+    ssl_certificate_key ${NGINX_TLS_KEY};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:SSL:1m;
+    ssl_session_timeout 10m;
+
+    access_log /var/log/nginx/${NGINX_SITE_NAME}.access.log;
+    error_log  /var/log/nginx/${NGINX_SITE_NAME}.error.log;
+
+    include ${PROXY_SNIPPET};
+}
+EOF
+  else
+    warn "ANYTONE_NGINX_TLS=0 — serving plain HTTP only (no TLS)."
+    as_root tee "/etc/nginx/sites-available/${NGINX_SITE_NAME}.conf" >/dev/null <<EOF
 # Managed by AnyTone installer. Proxies the LAN-facing HTTP site to the loopback
 # Nuxt UI. Put TLS/auth in front of this if exposing beyond a trusted LAN.
 server {
@@ -263,57 +385,11 @@ server {
     access_log /var/log/nginx/${NGINX_SITE_NAME}.access.log;
     error_log  /var/log/nginx/${NGINX_SITE_NAME}.error.log;
 
-    location /api/events {
-        proxy_pass http://127.0.0.1:${UI_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Connection "";
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 1h;
-        proxy_send_timeout 1h;
-    }
-
-    location /api/audio/stream {
-        proxy_pass http://127.0.0.1:${UI_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 1h;
-        proxy_send_timeout 1h;
-    }
-
-    location /api/raw-ws {
-        proxy_pass http://127.0.0.1:${UI_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_read_timeout 1h;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:${UI_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
+    include ${PROXY_SNIPPET};
 }
 EOF
+  fi
+
   as_root ln -sfn "../sites-available/${NGINX_SITE_NAME}.conf" "/etc/nginx/sites-enabled/${NGINX_SITE_NAME}.conf"
   if [ "$NGINX_DISABLE_DEFAULT" = "1" ]; then
     as_root rm -f /etc/nginx/sites-enabled/default
@@ -325,13 +401,22 @@ EOF
   else
     as_root service nginx reload 2>/dev/null || as_root service nginx restart
   fi
-  info "nginx site enabled at http://<this-host>/ (proxying 127.0.0.1:${UI_PORT})."
+  if [ "$NGINX_TLS" = "1" ]; then
+    info "nginx site enabled at https://<this-host>/ (self-signed TLS; HTTP redirects to HTTPS)."
+  else
+    info "nginx site enabled at http://<this-host>/ (proxying 127.0.0.1:${UI_PORT})."
+  fi
 else
   warn "nginx was not installed/found — skipping reverse proxy configuration."
 fi
 
 # ── Done ────────────────────────────────────────────────────────────────────
 PORT_HINT="${PORT:-3030}"
+if [ "${ANYTONE_NO_NGINX:-0}" != "1" ] && [ "$NGINX_TLS" = "1" ]; then
+  NGINX_URL_HINT="https://<this-host>/             (reverse proxy, self-signed TLS, unless skipped)"
+else
+  NGINX_URL_HINT="http://<this-host>/              (reverse proxy, unless skipped)"
+fi
 cat <<EOF
 
 ${BOLD}${GREEN}Done.${RESET}
@@ -339,7 +424,7 @@ ${BOLD}${GREEN}Done.${RESET}
 Source:   ${REPO}
 Config:   ${REPO}/.env   (set ANYTONE_BT_ADDR; see docs/CONFIGURATION.md)
 Local UI: http://localhost:${PORT_HINT}/   (Nuxt, bound to loopback by default)
-nginx:    http://<this-host>/              (reverse proxy, unless skipped)
+nginx:    ${NGINX_URL_HINT}
 
 Next steps:
   1. Edit ${REPO}/.env — at minimum ANYTONE_BT_ADDR (or rely on name auto-discovery).
@@ -351,6 +436,8 @@ Next steps:
      Or run in the foreground for development:
         cd ${REPO} && npm run dev
 
-nginx exposes the UI on port ${NGINX_LISTEN} by default. Add TLS/auth before exposing
-it outside a trusted LAN (docs/SECURITY_REVIEW.md).
+nginx terminates HTTPS with a self-signed certificate (browsers warn once until you
+trust it). It is generated under ${NGINX_TLS_DIR}; replace it with a real cert (e.g.
+certbot) before exposing the UI outside a trusted LAN (docs/SECURITY_REVIEW.md).
+Set ANYTONE_NGINX_TLS=0 to serve plain HTTP instead.
 EOF
