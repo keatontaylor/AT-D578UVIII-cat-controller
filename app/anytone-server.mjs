@@ -1501,14 +1501,21 @@ class AnyToneBackend extends EventEmitter {
     // on a phantom zone, so the host must own all zone bounds. We learn the zone
     // count the first time an up-step crosses the end (the new zone reads back blank
     // / non-matching), then bounce to zone 0; thereafter wraps are exact both ways.
+    // Authoritative count: the host enumerates every zone (04 2b walk) at connect,
+    // so zoneListCache.length is the true total even before any up-step has probed
+    // the end. Prefer the per-side learned count, then the enumerated list, and only
+    // then the looser zoneMaxSeen fallback. Without this, a zone-down at index 0 had
+    // no count to wrap against and silently stayed put (channels avoid this via the
+    // radio's own 0xf9 "last channel" sentinel; 08 39 has no equivalent).
+    const knownZoneCount = sideState.zoneCount ?? (this.zoneListCache?.length || null)
     if (direction < 0) {
       if (cur > 0) return this.selectZone(cur - 1)
-      const last = sideState.zoneCount != null ? sideState.zoneCount - 1 : (sideState.zoneMaxSeen ?? 0)
+      const last = knownZoneCount != null ? knownZoneCount - 1 : (sideState.zoneMaxSeen ?? 0)
       return this.selectZone(last)
     }
     // Up. If we already know the count, wrap cleanly without ever overshooting.
-    if (sideState.zoneCount != null) {
-      return this.selectZone(cur + 1 >= sideState.zoneCount ? 0 : cur + 1)
+    if (knownZoneCount != null) {
+      return this.selectZone(cur + 1 >= knownZoneCount ? 0 : cur + 1)
     }
     // Count unknown: probe one-past and validate the read-back. A real zone reports
     // its own index with a non-empty name; a phantom zone past the end does not, so
