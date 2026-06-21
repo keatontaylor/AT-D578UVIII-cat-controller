@@ -122,6 +122,7 @@
             </span>
             <!-- TX frequency now shown in the dedicated split-freq-row below. -->
           </div>
+          <div class="freq-block">
           <div class="freq-row">
             <!--div class="freq-display freq-sub">
               {{ formatFreq(state.subFreq) }}
@@ -142,10 +143,6 @@
               </template>
             </div>
             <span class="freq-unit">MHz</span>
-            <BandwidthDisplay
-              :mode="state.subMode"
-              :bandwidth="state.subBandwidth"
-            />
           </div>
           <div class="split-freq-row">
             <span class="split-freq-label">TX</span>
@@ -164,6 +161,11 @@
               </template>
             </div>
             <span class="split-freq-unit">MHz</span>
+          </div>
+          <BandwidthDisplay
+            :mode="state.subMode"
+            :bandwidth="state.subBandwidth"
+          />
           </div>
           <SMeter :value="state.subSmeter" label="SUB S-meter" />
           <LevelBar v-if="(state.sqlRfMode===0)||((state.sqlRfMode===2)&&isRfGainMode(state.subMode))" :value="state.rfGainSub" label="RF GAIN" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
@@ -241,6 +243,7 @@
             </span>
             <!-- TX frequency now shown in the dedicated split-freq-row below. -->
           </div>
+          <div class="freq-block">
           <div class="freq-row">
             <!-- div class="freq-display" :class="{ 'freq-tx': state.txState || state.mox }">
               {{ formatFreq(state.mainFreq) }}
@@ -261,10 +264,6 @@
               </template>
             </div>
             <span class="freq-unit">MHz</span>
-            <BandwidthDisplay
-              :mode="state.mainMode"
-              :bandwidth="state.mainBandwidth"
-            />
           </div>
           <div class="split-freq-row">
             <span class="split-freq-label">TX</span>
@@ -283,6 +282,11 @@
               </template>
             </div>
             <span class="split-freq-unit">MHz</span>
+          </div>
+          <BandwidthDisplay
+            :mode="state.mainMode"
+            :bandwidth="state.mainBandwidth"
+          />
           </div>
           <SMeter :value="state.mainSmeter" label="MAIN S-meter" />
           <LevelBar v-if="(state.sqlRfMode===0)||((state.sqlRfMode===2)&&isRfGainMode(state.mainMode))" :value="state.rfGainMain" label="RF GAIN" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
@@ -8499,6 +8503,10 @@ body {
   gap: 6px;
   margin: -6px 0 12px;
   color: var(--text-muted);
+  /* Inside .freq-block: forced onto its own line below the RX row, above the
+     bandwidth visual. */
+  order: 2;
+  flex: 1 0 100%;
 }
 
 /* TX frequency is always shown; edit affordance is enabled when writes are safe. */
@@ -8557,22 +8565,36 @@ body {
   text-transform: uppercase;
 }
 
+/* Wraps the RX freq row, the TX split row, and the bandwidth visual into one
+   flex context so the bandwidth can share the RX line on desktop (top-right) but
+   drop below BOTH frequencies on mobile via order/flex-basis. */
+.freq-block {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 6px;
+  margin-top: 22px;
+}
+
+.sql-row + .freq-block {
+  margin-top: 8px;
+}
+
 .freq-row {
   display: flex;
   align-items: center;
   gap: 6px;
   margin-bottom: 12px;
-  margin-top: 22px;
   flex-wrap: wrap;
   min-width: 0;
+  order: 0;
+  flex: 1 1 auto;
 }
 
-.freq-row .bw-display {
+/* Desktop: bandwidth rides the right edge of the RX line. */
+.freq-block > .bw-display {
+  order: 1;
   margin-left: auto;
-}
-
-.sql-row + .freq-row {
-  margin-top: 8px;
 }
 
 .freq-unit {
@@ -10089,9 +10111,19 @@ button.recordings-lane-label:hover {
     padding-bottom: 8px;
   }
 
-  .freq-row {
+  .freq-block {
     margin-top: 14px;
+  }
+
+  .freq-row {
     gap: 4px;
+    flex-basis: 100%;
+  }
+
+  /* Stack order on mobile: RX (0) → TX split row (1) → bandwidth (2), so the
+     channel-width visual sits below both frequencies, not between them. */
+  .split-freq-row {
+    order: 1;
   }
 
   .freq-tuner,
@@ -10114,7 +10146,8 @@ button.recordings-lane-label:hover {
     letter-spacing: 1px;
   }
 
-  .freq-row .bw-display {
+  .freq-block > .bw-display {
+    order: 2;
     flex: 1 0 100%;
     min-width: 0;
     max-width: none;
