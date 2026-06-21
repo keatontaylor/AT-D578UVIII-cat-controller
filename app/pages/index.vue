@@ -113,7 +113,7 @@
               </div>
             </div>
           </div>
-          <div class="sql-row">
+          <div v-if="(state.subMode === 'DMR' && (state.subContactName || state.subContactTg)) || vfoDmrCallerDisplay('1')" class="sql-row">
             <span v-if="state.subMode === 'DMR' && (state.subContactName || state.subContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
               TG {{ state.subContactName || state.subContactTg }}<span v-if="state.subContactName && state.subContactTg" class="sql-tone">{{ state.subContactTg }}</span>
             </span>
@@ -234,7 +234,7 @@
               </div>
             </div>
           </div>
-          <div class="sql-row">
+          <div v-if="(state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)) || vfoDmrCallerDisplay('0')" class="sql-row">
             <span v-if="state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
               TG {{ state.mainContactName || state.mainContactTg }}<span v-if="state.mainContactName && state.mainContactTg" class="sql-tone">{{ state.mainContactTg }}</span>
             </span>
