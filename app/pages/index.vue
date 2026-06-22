@@ -110,8 +110,8 @@
           </div>
           <div class="sql-row">
             <span class="sql-badge sql-badge--mode" :style="modeBadgeStyle(state.subMode)" title="Mode (read-only)">{{ state.subMode ?? '--' }}</span>
-            <span v-if="state.subMode === 'DMR' && (state.subContactName || state.subContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
-              TG {{ state.subContactName || state.subContactTg }}<span v-if="state.subContactName && state.subContactTg" class="sql-tone">{{ state.subContactTg }}</span>
+            <span v-if="state.subMode === 'DMR' && (state.subContactName || state.subContactTg)" class="sql-badge sql-badge--contact" title="DMR contact (call type)">
+              {{ vfoContactPrefix('1') }} {{ state.subContactName || state.subContactTg }}<span v-if="state.subContactName && state.subContactTg" class="sql-tone">{{ state.subContactTg }}</span>
             </span>
             <span v-if="vfoDmrLiveTalkgroup('1')" class="sql-badge sql-badge--dmr-live" title="Incoming DMR call on a different talkgroup">
               {{ vfoDmrLiveTalkgroup('1') }}
@@ -233,8 +233,8 @@
           </div>
           <div class="sql-row">
             <span class="sql-badge sql-badge--mode" :style="modeBadgeStyle(state.mainMode)" title="Mode (read-only)">{{ state.mainMode ?? '--' }}</span>
-            <span v-if="state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
-              TG {{ state.mainContactName || state.mainContactTg }}<span v-if="state.mainContactName && state.mainContactTg" class="sql-tone">{{ state.mainContactTg }}</span>
+            <span v-if="state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)" class="sql-badge sql-badge--contact" title="DMR contact (call type)">
+              {{ vfoContactPrefix('0') }} {{ state.mainContactName || state.mainContactTg }}<span v-if="state.mainContactName && state.mainContactTg" class="sql-tone">{{ state.mainContactTg }}</span>
             </span>
             <span v-if="vfoDmrLiveTalkgroup('0')" class="sql-badge sql-badge--dmr-live" title="Incoming DMR call on a different talkgroup">
               {{ vfoDmrLiveTalkgroup('0') }}
@@ -1434,8 +1434,10 @@ interface TransceiverState {
   subTxPower: string | null
   mainContactName: string | null
   mainContactTg: string | null
+  mainContactCallType: 'private' | 'group' | 'all' | null
   subContactName: string | null
   subContactTg: string | null
+  subContactCallType: 'private' | 'group' | 'all' | null
   dmrActivity: {
     id: number
     alias: string | null
@@ -1447,8 +1449,10 @@ interface TransceiverState {
     talkgroup: number | null
     colorCode: number | null
     slot: number | null
+    private: boolean
     at: number
   } | null
+  dmrCallVfo: 0 | 1 | null
   manualDial: {
     target: string
     callType: 'group' | 'private'
@@ -1568,9 +1572,12 @@ const defaultState = (): TransceiverState => ({
   subTxPower: null,
   mainContactName: null,
   mainContactTg: null,
+  mainContactCallType: null,
   subContactName: null,
   subContactTg: null,
+  subContactCallType: null,
   dmrActivity: null,
+  dmrCallVfo: null,
   manualDial: null,
   mainZone: null,
   subZone: null,
@@ -3320,6 +3327,8 @@ function vfoToneDisplay(vfo: '0' | '1'): string | null {
 
 function vfoDmrCallerDisplay(vfo: '0' | '1'): string | null {
   if (vfoMode(vfo) !== 'DMR') return null
+  // Only on the attributed side (same latch logic as the meter / live TG badge).
+  if (state.value.dmrCallVfo == null || Number(vfo) !== state.value.dmrCallVfo) return null
   const activity = state.value.dmrActivity
   if (!activity?.isUser) return null
   const parts = [
@@ -3334,14 +3343,33 @@ function vfoDmrCallerDisplay(vfo: '0' | '1'): string | null {
 // push), surfaced only when it differs from the channel's programmed contact —
 // e.g. Digital Monitor "dual" hears traffic on a TG the channel isn't set to.
 // dmrActivity is global to the radio's DMR receiver, so it shows on the DMR side.
+// Prefix for the programmed DMR contact badge: a Group call is a talkgroup (TG),
+// a Private call is a unit ID (e.g. a hotspot channel set to PARROT), All Call is
+// broadcast. Decoded from the channel's call-class byte (server contactCallType).
+function vfoContactPrefix(vfo: '0' | '1'): string {
+  const t = vfo === '0' ? state.value.mainContactCallType : state.value.subContactCallType
+  return t === 'private' ? 'Priv' : t === 'all' ? 'All' : 'TG'
+}
+
 function vfoDmrLiveTalkgroup(vfo: '0' | '1'): string | null {
   if (vfoMode(vfo) !== 'DMR') return null
+  // Only on the side the call is attributed to (matched, else active) — same latch
+  // logic as the meter. Null until the call locks, so nothing shows before then.
+  if (state.value.dmrCallVfo == null || Number(vfo) !== state.value.dmrCallVfo) return null
   const activity = state.value.dmrActivity
-  if (!activity?.active || activity.talkgroup == null) return null
-  const channelTg = vfo === '0' ? state.value.mainContactTg : state.value.subContactTg
-  if (channelTg != null && String(channelTg) === String(activity.talkgroup)) return null
+  if (!activity?.active) return null
+  const isPrivate = activity.private === true
+  // Group: the incoming talkgroup. Private: the call peer's DMR id.
+  const value = isPrivate ? activity.id : activity.talkgroup
+  if (value == null) return null
+  // A group call on your own channel's TG is normal traffic (the contact badge
+  // already shows it) — suppress. Private calls always show.
+  if (!isPrivate) {
+    const channelTg = vfo === '0' ? state.value.mainContactTg : state.value.subContactTg
+    if (channelTg != null && String(channelTg) === String(value)) return null
+  }
   // CC/slot ride the live 5e stream (byte 7 / byte 12); slot is 0-based → TS1/TS2.
-  let label = `TG ${activity.talkgroup}`
+  let label = `${isPrivate ? 'PRIV' : 'TG'} ${value}`
   if (activity.colorCode != null) label += ` · CC ${activity.colorCode}`
   if (activity.slot != null) label += ` · TS${activity.slot + 1}`
   return label

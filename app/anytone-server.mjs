@@ -2184,7 +2184,7 @@ function emptyState() {
     // its read offset is not mapped yet.
     // RADIO_SETTINGS raw values keyed by setting key (null until read).
     settings: Object.fromEntries(RADIO_SETTINGS.map(s => [s.key, null])),
-    signal: { smeter: null, squelchOpen: null, mainRssi: null, subRssi: null, mainOpen: null, subOpen: null, dmrRxOpen: false, dmrActiveAt: null, lastSignalAt: null, lastRxStatusAt: null, rawStatus: null, note: '5a RSSI/open mask is relative to the selected TX/RX side (byte 2 / 0x02 = selected, byte 3 / 0x04 = other) FOR ANALOG. For DMR that same 0x02/0x04 mask is the TIMESLOT, not the side (single-slot=0x02 on either side, dual-slot=0x04) — DMR side comes from the channel, not 5a. 5e/5b global; dmrRxOpen latches DMR RX (5e gate). Levels uncalibrated.' },
+    signal: { smeter: null, squelchOpen: null, activeRssi: null, inactiveRssi: null, activeOpen: null, inactiveOpen: null, mainRssi: null, subRssi: null, mainOpen: null, subOpen: null, dmrRxOpen: false, dmrLatchSide: null, dmrCallCc: null, dmrCallSlot: null, dmrCallTg: null, dmrCallDest: null, dmrCallPrivate: null, dmrActiveAt: null, lastSignalAt: null, lastRxStatusAt: null, rawStatus: null, note: '5a RSSI/open mask is per-side FOR ANALOG (0x02 selected / 0x04 other); for DMR that mask is the TIMESLOT not the side. DMR call side comes from matching the call identity (TG/CC/slot) to the programmed channel: dmrLatchSide is resolved ONCE when the call locks (5b audio gate opens after 5e RX), held until the 5e gate closes. dmrCallCc/Slot/Tg are the live call match keys. Levels uncalibrated.' },
     clock: null,
     dmrActivity: null,
     // Sticky manual-dial DMR target: { target: '<digits>', callType: 'group'|'private' }.
@@ -2378,6 +2378,53 @@ function isDmrChannel(side) {
   return side?.txDigital === true || txIsDigital(side?.channelType) === true
 }
 
+// Decide which side a live DMR call is on — run ONCE when the call locks (5b audio
+// gate opens), then held for the whole call. A lone DMR side wins outright. With
+// both sides DMR, the PRIMARY key is the call's DESTINATION (5e bytes 13-16 — the
+// TG for a group call, the contact unit-id for a private call) matched against each
+// side's programmed contact: a unique contact match wins. This is what makes a
+// PARROT private call land on its own side (dest == that side's contact) even when
+// the OTHER side is active. Slot is only a tiebreak (it's unreliable under Digital
+// Monitor dual-slot), and the active side is the last resort.
+function resolveDmrCallSide(state) {
+  const A = state.sides?.A, B = state.sides?.B
+  const aDmr = A?.txDigital === true, bDmr = B?.txDigital === true
+  const active = state.selectedSide === 'B' ? 'B' : 'A'
+  if (aDmr && !bDmr) return 'A'
+  if (bDmr && !aDmr) return 'B'
+  if (!aDmr && !bDmr) return active
+
+  const dest = state.signal?.dmrCallDest
+  const contactHit = side => dest != null && side?.contactTg != null && Number(side.contactTg) === Number(dest)
+  const cA = contactHit(A), cB = contactHit(B)
+  if (cA && !cB) return 'A'
+  if (cB && !cA) return 'B'
+
+  const slot = state.signal?.dmrCallSlot
+  const slotHit = side => slot != null && side?.channelSettingsRaw?.timeSlot != null && side.channelSettingsRaw.timeSlot === slot
+  const sA = slotHit(A), sB = slotHit(B)
+  if (sA && !sB) return 'A'
+  if (sB && !sA) return 'B'
+
+  return active
+}
+
+// Map the side-relative 5a fields (active = selected side, inactive = other) to
+// main/sub using the CURRENT selectedSide. Run on every 5a AND again when the first
+// settings read establishes selectedSide — so activity that arrives during the
+// startup race (before selectedSide is known) gets re-attributed to the right side
+// instead of being frozen on the wrong one.
+function mapSignalSides(state) {
+  const s = state.signal
+  if (s.activeRssi == null && s.activeOpen == null) return
+  const selectedIsSub = state.selectedSide === 'B'
+  s.mainRssi = selectedIsSub ? s.inactiveRssi : s.activeRssi
+  s.subRssi = selectedIsSub ? s.activeRssi : s.inactiveRssi
+  s.mainOpen = selectedIsSub ? s.inactiveOpen : s.activeOpen
+  s.subOpen = selectedIsSub ? s.activeOpen : s.inactiveOpen
+  s.squelchOpen = s.mainOpen || s.subOpen
+}
+
 function dmrCallClass(programmed) {
   if (DMR_PTT_CALL_CLASS_OVERRIDE != null) return DMR_PTT_CALL_CLASS_OVERRIDE
   const callType = String(programmed?.contactCallType || '').toLowerCase()
@@ -2519,6 +2566,14 @@ function decodePayload(payload) {
       const radioId = payload.length >= 101 ? bcdNumber(payload.subarray(97, 101)) : null
       const callsign = payload.length >= 111 ? cleanFixedString(payload.subarray(101, 111)) : null
       const channelTypeInfo = classify04CurrentChannelPayload(payload)
+      // DMR contact call class is byte 0x4a — the byte immediately before the
+      // 4-byte BCD contact target (bytes 0x4b-0x4e): 0x00 Private / 0x01 Group /
+      // 0x02 All Call. (0x49 is a record marker, not the class — confirmed against
+      // the live PARROT record: 0x49=0x49, 0x4a=0x00, target 00 31 09 97.) Gated to
+      // digital channels so an analog channel's leftover contact bytes don't show.
+      const contactCallType = (payload.length > 0x4a && channelTypeInfo?.txDigital === true)
+        ? (payload[0x4a] === 0x01 ? 'group' : payload[0x4a] === 0x02 ? 'all' : 'private')
+        : null
       return {
         ...decoded,
         type: 'channel',
@@ -2548,6 +2603,7 @@ function decodePayload(payload) {
         contactName,
         contactTg: tg,
         contactTgBytes,
+        contactCallType,
         // Authoritative DMR PTT context, straight from the radio. Bytes
         // 0x49-0x4e hold the live call-class flag + 5 context bytes that the
         // D578 COM-mode extended-PTT validator compares on key-down. Capturing
@@ -2615,7 +2671,7 @@ function decodePayload(payload) {
     }
     if ([0x4d, 0x4e].includes(command)) return { ...decoded, type: 'status-probe', command, statusCode: `04${command.toString(16).padStart(2, '0')}`, bytes: [...payload.subarray(2, -1)] }
   }
-  if (payload[0] === 0x5b && payload.length >= 3) return { ...decoded, type: 'rx-status', squelchOpen: payload[1] === 1 }
+  if (payload[0] === 0x5b && payload.length >= 3) return { ...decoded, type: 'rx-status', statusCode: '5b', squelchOpen: payload[1] === 1 }
   if (payload[0] === 0x5a && payload.length >= 15) return { ...decoded, type: 'signal', activeRssi: payload[1], inactiveRssi: payload[2], activeOpen: (payload[5] & 0x02) !== 0, inactiveOpen: (payload[5] & 0x04) !== 0 }
   if (payload[0] === 0x5e && payload.length >= 18) {
     // 18-byte async link-state push. byte1: 00 idle / 01 RX / 02 TX. byte2 is the
@@ -2623,16 +2679,17 @@ function decodePayload(payload) {
     // Control — Color Code (byte 7, 0-15) + Time Slot (byte 12, 0=TS1/1=TS2) are
     // only trustworthy here. byte2 0x21 (bit clear) = terminator/control frame,
     // where byte7 holds an unrelated LC/reason code (seen as 0x0d at call end —
-    // previously misdecoded as ColorCode 13). bytes 8-11 = this radio's own DMR
-    // ID (BCD; stayed constant even during RX, so it's the LOCAL end, not the
-    // talker), bytes 14-16 = the remote party (contact/TG, BCD). Which of those
-    // is source vs dest needs a non-loopback call to confirm. RE'd 2026-06-21
-    // against a PARROT call (CC1/TS1, local 3223436 / remote 310997) + an earlier
-    // TG 5023426 call (CC1/TS2: byte7=01, byte12=01).
+    // previously misdecoded as ColorCode 13). bytes 8-11 = SOURCE id, bytes 13-16
+    // = DEST id (both 4-byte BCD). GROUP vs PRIVATE falls straight out of these: a
+    // group call carries the TG in BOTH slots (source == dest), a private call is
+    // unit→unit so they differ. Confirmed 2026-06-22: group 67498/5067498 had
+    // src==dst, PARROT (private) had src 3223436 != dst 310997.
     const active = payload[1] !== 0
     const voiceFrame = (payload[2] & 0x40) !== 0
     const cc = payload[7]
     const ts = payload[12]
+    const src = active && voiceFrame ? bcdNumber(payload.subarray(8, 12)) : null
+    const dst = active && voiceFrame ? bcdNumber(payload.subarray(13, 17)) : null
     return {
       ...decoded,
       type: 'rx-status',
@@ -2642,8 +2699,10 @@ function decodePayload(payload) {
       dmrVoiceFrame: voiceFrame,
       dmrColorCode: active && voiceFrame && cc <= 15 ? cc : null,
       dmrSlot: active && voiceFrame && ts <= 1 ? ts : null,
-      dmrLocalId: active && voiceFrame ? bcdNumber(payload.subarray(8, 12)) : null,
-      dmrRemoteId: active && voiceFrame ? bcdNumber(payload.subarray(14, 17)) : null,
+      dmrSource: src,
+      dmrDest: dst,
+      // null until a voice frame lands; group => same id in both slots.
+      dmrCallPrivate: (src != null && dst != null) ? src !== dst : null,
       bytes: [...payload.subarray(1, -1)],
     }
   }
@@ -2803,7 +2862,7 @@ function applyDecoded(state, decoded, timestamp) {
     side.lastUpdate = timestamp
   } else if (decoded.type === 'channel' && state.sides[decoded.side]) {
     const side = state.sides[decoded.side]
-    for (const key of ['frequencyMhz', 'frequencyDisplay', 'channelName', 'channelNumber', 'channelPosition', 'txOffsetMhz', 'txFrequencyMhz', 'bandwidthKhz', 'txPower', 'channelType', 'channelTypeName', 'txDigital', 'rawRecord08', 'rawRecord09', 'ctcssEncodeHz', 'ctcssDecodeHz', 'dcsEncodeCode', 'dcsDecodeCode', 'customCtcssHz', 'squelchMode', 'contactName', 'contactTg', 'contactTgBytes', 'dmrTailRaw', 'radioId', 'callsign', 'strings', 'channelSettingsRaw']) side[key] = decoded[key]
+    for (const key of ['frequencyMhz', 'frequencyDisplay', 'channelName', 'channelNumber', 'channelPosition', 'txOffsetMhz', 'txFrequencyMhz', 'bandwidthKhz', 'txPower', 'channelType', 'channelTypeName', 'txDigital', 'rawRecord08', 'rawRecord09', 'ctcssEncodeHz', 'ctcssDecodeHz', 'dcsEncodeCode', 'dcsDecodeCode', 'customCtcssHz', 'squelchMode', 'contactName', 'contactTg', 'contactTgBytes', 'contactCallType', 'dmrTailRaw', 'radioId', 'callsign', 'strings', 'channelSettingsRaw']) side[key] = decoded[key]
     side.vfoMode = isVfoChannelName(decoded.channelName) ? 'VFO' : 'MEMORY'
     side.rawChannel = decoded.raw
     side.lastUpdate = timestamp
@@ -2819,7 +2878,23 @@ function applyDecoded(state, decoded, timestamp) {
       // owned by the continuously-streamed 5a frames, so we do NOT clear it here
       // (a 5e/5b close used to zero BOTH sides and kill the analog smeter too).
       state.signal.dmrRxOpen = (decoded.statusByte ?? 0) !== 0
+      // Capture the live call's match keys + group/private as voice frames stream
+      // them (independent of dmrActivity, which the 58 frame creates a beat later).
+      if (decoded.dmrColorCode != null) state.signal.dmrCallCc = decoded.dmrColorCode
+      if (decoded.dmrSlot != null) state.signal.dmrCallSlot = decoded.dmrSlot
+      if (decoded.dmrDest != null) state.signal.dmrCallDest = decoded.dmrDest
+      if (decoded.dmrCallPrivate != null) state.signal.dmrCallPrivate = decoded.dmrCallPrivate
       if (state.signal.dmrRxOpen) state.signal.dmrActiveAt = timestamp
+      else {
+        // Gate closed = call over (the radio always sends this). Drop the latch +
+        // match keys so the next call resolves its side cleanly from scratch.
+        state.signal.dmrLatchSide = null
+        state.signal.dmrCallCc = null
+        state.signal.dmrCallSlot = null
+        state.signal.dmrCallTg = null
+        state.signal.dmrCallDest = null
+        state.signal.dmrCallPrivate = null
+      }
       if (state.dmrActivity) state.dmrActivity = {
         ...state.dmrActivity,
         active: state.signal.dmrRxOpen,
@@ -2827,6 +2902,14 @@ function applyDecoded(state, decoded, timestamp) {
         // CC/slot ride the 5e stream; keep the last good values for the call.
         ...(decoded.dmrColorCode != null ? { colorCode: decoded.dmrColorCode } : {}),
         ...(decoded.dmrSlot != null ? { slot: decoded.dmrSlot } : {}),
+      }
+    } else if (decoded.statusCode === '5b') {
+      // 5b = the DMR audio gate (the radio's green→blue LED transition). The FIRST
+      // open during a call is our lock: we now have the identity frames, so resolve
+      // the side ONCE and latch it for the whole call (no per-frame re-eval = no
+      // flapping between sides). Held until the 5e gate closes (above).
+      if (decoded.squelchOpen === true && state.signal.dmrRxOpen === true && state.signal.dmrLatchSide == null) {
+        state.signal.dmrLatchSide = resolveDmrCallSide(state)
       }
     } else if (decoded.statusCode === '045e') {
       // Polled 04 5e only says "some squelch is open". Use it as a DMR fallback
@@ -2843,25 +2926,40 @@ function applyDecoded(state, decoded, timestamp) {
         if (state.dmrActivity) state.dmrActivity = { ...state.dmrActivity, active: true, at: timestamp }
       } else if (decoded.squelchOpen === false) {
         state.signal.dmrRxOpen = false
+        state.signal.dmrLatchSide = null
+        state.signal.dmrCallCc = null
+        state.signal.dmrCallSlot = null
+        state.signal.dmrCallTg = null
+        state.signal.dmrCallDest = null
+        state.signal.dmrCallPrivate = null
         if (state.dmrActivity) state.dmrActivity = { ...state.dmrActivity, active: false, at: timestamp }
       }
     }
   } else if (decoded.type === 'signal') {
-    const selectedIsSub = state.selectedSide === 'B'
-    state.signal.mainRssi = selectedIsSub ? decoded.inactiveRssi : decoded.activeRssi
-    state.signal.subRssi = selectedIsSub ? decoded.activeRssi : decoded.inactiveRssi
-    state.signal.mainOpen = selectedIsSub ? decoded.inactiveOpen : decoded.activeOpen
-    state.signal.subOpen = selectedIsSub ? decoded.activeOpen : decoded.inactiveOpen
-    state.signal.squelchOpen = state.signal.mainOpen || state.signal.subOpen
+    // Keep the raw side-relative values; map to main/sub via the current
+    // selectedSide (re-mappable once selectedSide is known — startup race).
+    state.signal.activeRssi = decoded.activeRssi
+    state.signal.inactiveRssi = decoded.inactiveRssi
+    state.signal.activeOpen = decoded.activeOpen
+    state.signal.inactiveOpen = decoded.inactiveOpen
     state.signal.lastSignalAt = timestamp
+    mapSignalSides(state)
   } else if (decoded.type === 'clock') {
     state.clock = decoded.clock
   } else if (decoded.type === 'settings') {
+    const firstSelect = state.selectedSide == null && decoded.selectedSide != null
     state.selectedSide = decoded.selectedSide
     state.dualWatch = decoded.dualWatch
     state.mainSquelch = decoded.mainSquelch
     state.subSquelch = decoded.subSquelch
     if (decoded.radioSettings) state.settings = { ...state.settings, ...decoded.radioSettings }
+    if (firstSelect) {
+      // selectedSide just became known — re-attribute anything captured during the
+      // startup race (activity that arrived before the first settings read). Only on
+      // the FIRST establishment, so a mid-call user side-switch doesn't re-guess.
+      mapSignalSides(state)
+      if (state.signal.dmrLatchSide != null) state.signal.dmrLatchSide = resolveDmrCallSide(state)
+    }
   } else if (decoded.type === 'settings-06' || decoded.type === 'settings-09') {
     // Merge the block's RADIO_SETTINGS raw values (each block carries a subset).
     if (decoded.radioSettings) state.settings = { ...state.settings, ...decoded.radioSettings }
@@ -2889,16 +2987,25 @@ function applyDecoded(state, decoded, timestamp) {
         callsign: op?.callsign ?? null,
         name: op?.name ?? null,
         location: op?.location ?? null,
+        // group/private from the 5e (source==dest ⇒ group) — set here too so the
+        // private flag is known even for a call that never sends a 59.
+        private: state.signal.dmrCallPrivate === true,
         at: timestamp,
       }
       if (state.signal.dmrRxOpen === true) state.signal.dmrActiveAt = timestamp
     } else if (decoded.statusCode === '59') {
-      // Group-call info: enrich the live call with the talkgroup (and caller id
-      // if the 58 hasn't landed yet). Merge so neither frame clobbers the other.
+      // 59 record-1 id (bytes 2-5) is the call destination = the talkgroup for a
+      // GROUP call. For a PRIVATE call there's no incoming TG (it's a unit→unit
+      // call), so we suppress it. Group/private comes from the 5e voice frame
+      // (source==dest ⇒ group; see dmrCallPrivate), which streams before the 59.
+      const dest = decoded.talkgroup
+      const isPrivate = state.signal.dmrCallPrivate === true
+      const tg = isPrivate ? null : dest
+      if (dest != null) state.signal.dmrCallTg = tg
       const base = state.dmrActivity ?? {}
       state.dmrActivity = {
         ...base,
-        ...(decoded.talkgroup != null ? { talkgroup: decoded.talkgroup } : {}),
+        ...(dest != null ? { talkgroup: tg, private: isPrivate } : {}),
         ...(decoded.dmrId && base.id == null ? { id: decoded.dmrId } : {}),
         at: timestamp,
       }
@@ -2913,30 +3020,23 @@ function anytoneToState(source) {
   const firmware = source.firmware
   // Uncalibrated: 5a levels grow with RX activity (0 idle, ~4 active).
   const meterFor = (open, rssi) => (open ? Math.min(255, 48 + (rssi ?? 0) * 24) : 0)
-  const signalFresh = source.signal?.lastSignalAt != null && (Date.now() - source.signal.lastSignalAt) < signalFreshWindowMs(source)
-  // DMR RX is digital on/off (not graduated). The radio gates it via 5e (one open
-  // → long quiet → one close), so we LATCH `dmrRxOpen` (set on 5e-RX/TX, cleared on
-  // 5e-idle) rather than trusting 58 byte 1, where `00` is a valid RX talker frame.
-  // A generous backstop clears it if the 5e-close is ever missed; `dmrActiveAt` is
-  // refreshed while 5e is latched. The 5e gate is global; the side comes from the
-  // DMR channel (dmrCallSide below), NOT from 5a — its 0x02/0x04 mask is the DMR
-  // TIMESLOT, not the A/B side (single-slot lands on 0x02 for BOTH sides, dual-slot
-  // moves the same side to 0x04; confirmed across PARROT A/B + Digimon dual-slot).
-  const DMR_RX_BACKSTOP_MS = 30000
+  // 5a's main/sub mapping is meaningless until the first settings read tells us
+  // which side is selected — suppress the analog meter until then so startup
+  // activity never lights the wrong side (it re-attributes once selectedSide lands).
+  const sideKnown = source.selectedSide != null
+  const signalFresh = sideKnown && source.signal?.lastSignalAt != null && (Date.now() - source.signal.lastSignalAt) < signalFreshWindowMs(source)
+  // DMR meter is driven by the call LATCH, not the raw 5e gate: we show NOTHING
+  // until the call locks (5b audio gate opens after 5e RX), at which point the side
+  // is resolved once and stored in `dmrLatchSide` (held until 5e closes — the radio
+  // always sends the close, so no backstop). This skips the green/carrier phase and
+  // the bursty 5a entirely. `dmrLatchSide` is the matched/active side or null.
   const DMR_RX_METER = 200
-  const dmrRxActive = source.signal?.dmrRxOpen === true
-    && (Date.now() - (source.signal?.dmrActiveAt ?? 0)) < DMR_RX_BACKSTOP_MS
-  // Which side the active DMR call is on. 5a can't tell us (its open mask is the
-  // timeslot, not the side), so it's simply the DMR channel's side: the lone DMR
-  // side, else the selected side. Resolves to exactly ONE side — never both.
-  const dmrCallSide = (main.txDigital === true) !== (sub.txDigital === true)
-    ? (main.txDigital === true ? 'A' : 'B')
-    : (source.selectedSide === 'B' ? 'B' : 'A')
+  const dmrSide = source.signal?.dmrLatchSide ?? null
   const mainMeter = main.txDigital === true
-    ? (dmrRxActive && dmrCallSide === 'A' ? DMR_RX_METER : 0)
+    ? (dmrSide === 'A' ? DMR_RX_METER : 0)
     : meterFor(signalFresh && source.signal?.mainOpen === true, source.signal?.mainRssi)
   const subMeter = sub.txDigital === true
-    ? (dmrRxActive && dmrCallSide === 'B' ? DMR_RX_METER : 0)
+    ? (dmrSide === 'B' ? DMR_RX_METER : 0)
     : meterFor(signalFresh && source.signal?.subOpen === true, source.signal?.subRssi)
   const mainVfoMode = vfoModeForSide(main)
   const subVfoMode = vfoModeForSide(sub)
@@ -3054,10 +3154,24 @@ function anytoneToState(source) {
     // DMR contact programmed on the selected channel (talkgroup / private call).
     mainContactName: main.contactName ?? null,
     mainContactTg: main.contactTg ?? null,
+    mainContactCallType: main.contactCallType ?? null,
     subContactName: sub.contactName ?? null,
     subContactTg: sub.contactTg ?? null,
+    subContactCallType: sub.contactCallType ?? null,
     // Live DMR call context (caller during RX), enriched from the RadioID dump.
-    dmrActivity: connected ? (source.dmrActivity ?? null) : null,
+    // CC/slot come from the reliably-captured live keys (dmrCallCc/Slot): the 58
+    // creates dmrActivity a beat AFTER the first 5e voice frame, so dmrActivity's
+    // own merge intermittently misses them while the TG (from 59) is always set.
+    // Fall back to whatever dmrActivity merged once the call ends + keys clear.
+    dmrActivity: connected && source.dmrActivity
+      ? { ...source.dmrActivity,
+          colorCode: source.signal?.dmrCallCc ?? source.dmrActivity.colorCode ?? null,
+          slot: source.signal?.dmrCallSlot ?? source.dmrActivity.slot ?? null }
+      : null,
+    // The vfo (0=main/A, 1=sub/B) the live DMR call is attributed to — the latched
+    // side from resolveDmrCallSide (match else active). Null until a call locks.
+    // Live-call badges follow this so they appear ONLY on the resolved side.
+    dmrCallVfo: dmrSide === 'A' ? 0 : dmrSide === 'B' ? 1 : null,
     // Sticky manual-dial DMR target overriding the PTT contact (null = channel contact).
     manualDial: source.manualDial ?? null,
     radioMemories: [],
