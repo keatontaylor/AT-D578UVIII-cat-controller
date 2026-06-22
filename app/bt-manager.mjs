@@ -27,6 +27,19 @@ const PLACEHOLDER = 'AA:BB:CC:DD:EE:FF'
 const normAddr = a => String(a || '').trim().toUpperCase()
 const isValidAddr = a => /^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(normAddr(a)) && normAddr(a) !== PLACEHOLDER
 
+// Profiles that ONLY a Classic BR/EDR interface can carry. A D578 advertises two
+// addresses under the same name: the Classic one (SPP for the control socket +
+// HFP-AG for audio — the interface we actually need) and a BLE shadow that has
+// neither. These are the positive Classic discriminators used when collapsing the
+// same-named pair down to one entry.
+const SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb'
+const HFP_AG_UUID = '0000111f-0000-1000-8000-00805f9b34fb'
+const hasUuid = (d, u) => (d.uuids || []).includes(u)
+// MAC as a comparable integer (48 bits fits in a JS number). The Classic
+// interface sits at the LOWER address; the BLE shadow is the adjacent higher one
+// (user-confirmed across hardware, e.g. Classic ..:1C:.. vs BLE ..:2C:..).
+const addrInt = a => Number.parseInt(String(a).replace(/[^0-9a-fA-F]/g, ''), 16) || 0
+
 export class BtManager extends EventEmitter {
   constructor({ address, namePattern, pin, scanTimeoutMs, log } = {}) {
     super()
@@ -117,18 +130,37 @@ export class BtManager extends EventEmitter {
     // 1. Configured/persisted address that's already known to BlueZ.
     if (this.address) {
       const known = await this.bluez.findDeviceByAddress(this.address)
-      if (known) return known
+      if (known) {
+        // Self-heal a persisted/auto-adopted BLE-shadow address: only when the
+        // known device is NOT itself a usable Classic interface (it lacks SPP, so
+        // it's the BLE shadow) do we look for the Classic sibling and switch to it.
+        // This leaves a real Classic selection — including an explicit dropdown
+        // pick via setTarget, or one of two same-named radios — untouched. An
+        // explicit configured MAC is always honoured as pinned.
+        if (!this.configuredAddress && !hasUuid(known, SPP_UUID)) {
+          const classic = await this._classicSibling(known)
+          if (classic.address !== known.address) {
+            this.log(`re-resolved ${known.address} -> ${classic.address} (Classic BR/EDR interface)`)
+            this.address = classic.address
+            this._persist(classic.address)
+            return classic
+          }
+        }
+        return known
+      }
       // Known address but not currently present — try to find it by scanning.
       const scanned = await this._scanFor({ wantAddress: this.address })
-      if (scanned) return scanned
+      if (scanned) return this.configuredAddress ? scanned : await this._classicSibling(scanned)
       // Configured MAC takes precedence; don't silently adopt a different radio.
       if (this.configuredAddress) {
         throw new Error(`configured radio ${this.address} not found (out of range or powered off)`)
       }
     }
-    // 2. Name-fallback discovery + adopt.
-    const found = await this._scanFor({})
-    if (!found) throw new Error('no radio found — power it on and ensure it is in range / pairable')
+    // 2. Name-fallback discovery + adopt. _scanFor may have stopped on whichever
+    // interface appeared first (often the BLE shadow); collapse to the Classic one.
+    const hit = await this._scanFor({})
+    if (!hit) throw new Error('no radio found — power it on and ensure it is in range / pairable')
+    const found = await this._classicSibling(hit)
     if (found.address !== this.address) {
       this.address = found.address
       this._persist(found.address)
@@ -215,19 +247,45 @@ export class BtManager extends EventEmitter {
   // Manual UI helpers ------------------------------------------------------
   // A single radio often advertises twice — its Classic BR/EDR address (which
   // carries SPP+HFP) and a BLE shadow at an adjacent address with the same name
-  // but no usable profiles. Collapse same-named shadows, preferring the configured
-  // MAC, then the entry exposing the most SDP records (the Classic one). Shared by
-  // the scan picker and the status panel so they never disagree.
+  // but no usable profiles. Collapse same-named shadows down to the Classic entry.
+  // Shared by the scan picker and the status panel so they never disagree.
+  //
+  // Picking the Classic interface is the whole ballgame here: pair the BLE shadow
+  // and the radio looks paired/trusted/connected in bluetoothctl yet the app's SPP
+  // control socket never opens. We must NOT rank by raw UUID count — a BLE shadow
+  // can advertise MORE (GATT) UUIDs than the Classic interface's two (SPP+HFP-AG),
+  // so "most UUIDs" actively picks the wrong one. Prefer, in order: the explicitly
+  // configured MAC; an entry carrying SPP; one carrying HFP-AG; then the lower
+  // address (the Classic interface; the BLE shadow is the adjacent higher one).
+  _preferClassic(cand, prev) {
+    const conf = d => this.configuredAddress && d.address === this.configuredAddress
+    if (conf(cand) !== conf(prev)) return conf(cand)
+    if (hasUuid(cand, SPP_UUID) !== hasUuid(prev, SPP_UUID)) return hasUuid(cand, SPP_UUID)
+    if (hasUuid(cand, HFP_AG_UUID) !== hasUuid(prev, HFP_AG_UUID)) return hasUuid(cand, HFP_AG_UUID)
+    return addrInt(cand.address) < addrInt(prev.address)
+  }
+
   _dedupeRadios(devices) {
     const radios = devices.filter(d => isLikelyRadio(d, this.namePattern))
-    const score = d => (this.configuredAddress && d.address === this.configuredAddress ? 1e6 : 0) + (d.uuids?.length || 0)
     const best = new Map()
     for (const d of radios) {
       const key = (d.name || d.address).toUpperCase()
       const prev = best.get(key)
-      if (!prev || score(d) > score(prev)) best.set(key, d)
+      if (!prev || this._preferClassic(d, prev)) best.set(key, d)
     }
     return [...best.values()].map(d => ({ ...d, configured: !!this.configuredAddress && d.address === this.configuredAddress }))
+  }
+
+  // Given any device snapshot that may be a BLE shadow, return the Classic
+  // interface of the same-named radio if BlueZ knows it. Used to self-heal an
+  // address that was discovered/persisted as the shadow.
+  async _classicSibling(dev) {
+    if (!dev) return dev
+    const name = (dev.name || '').toUpperCase()
+    if (!name) return dev
+    const best = this._dedupeRadios(await this.bluez.listDevices())
+      .find(d => (d.name || '').toUpperCase() === name)
+    return best || dev
   }
 
   // Return candidate radios seen during a fresh scan (for an explicit picker).
