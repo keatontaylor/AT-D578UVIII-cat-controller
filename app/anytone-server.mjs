@@ -2184,7 +2184,7 @@ function emptyState() {
     // its read offset is not mapped yet.
     // RADIO_SETTINGS raw values keyed by setting key (null until read).
     settings: Object.fromEntries(RADIO_SETTINGS.map(s => [s.key, null])),
-    signal: { smeter: null, squelchOpen: null, mainRssi: null, subRssi: null, mainOpen: null, subOpen: null, dmrRxOpen: false, dmrActiveAt: null, lastSignalAt: null, lastRxStatusAt: null, rawStatus: null, note: '5a squelch/RSSI fields are relative to selected TX/RX side: byte 2 / mask 0x02 = selected side, byte 3 / mask 0x04 = other side. 5e/5b are global. dmrRxOpen latches DMR RX (5e gate). Levels uncalibrated.' },
+    signal: { smeter: null, squelchOpen: null, mainRssi: null, subRssi: null, mainOpen: null, subOpen: null, dmrRxOpen: false, dmrActiveAt: null, lastSignalAt: null, lastRxStatusAt: null, rawStatus: null, note: '5a RSSI/open mask is relative to the selected TX/RX side (byte 2 / 0x02 = selected, byte 3 / 0x04 = other) FOR ANALOG. For DMR that same 0x02/0x04 mask is the TIMESLOT, not the side (single-slot=0x02 on either side, dual-slot=0x04) — DMR side comes from the channel, not 5a. 5e/5b global; dmrRxOpen latches DMR RX (5e gate). Levels uncalibrated.' },
     clock: null,
     dmrActivity: null,
     // Sticky manual-dial DMR target: { target: '<digits>', callType: 'group'|'private' }.
@@ -2618,12 +2618,19 @@ function decodePayload(payload) {
   if (payload[0] === 0x5b && payload.length >= 3) return { ...decoded, type: 'rx-status', squelchOpen: payload[1] === 1 }
   if (payload[0] === 0x5a && payload.length >= 15) return { ...decoded, type: 'signal', activeRssi: payload[1], inactiveRssi: payload[2], activeOpen: (payload[5] & 0x02) !== 0, inactiveOpen: (payload[5] & 0x04) !== 0 }
   if (payload[0] === 0x5e && payload.length >= 18) {
-    // 18-byte async link-state push. byte1: 00 idle / 01 RX / 02 TX. The live DMR
-    // call's Color Code (byte 7, 0-15) and Time Slot (byte 12, 0=TS1/1=TS2) sit
-    // around the source-ID field (bytes 8-11); decoded 2026-06-21 against a known
-    // call (TG 5023426 = CC1/TS2: byte7=01, byte12=01). Only trusted while active —
-    // idle frames carry stale/zero values here.
+    // 18-byte async link-state push. byte1: 00 idle / 01 RX / 02 TX. byte2 is the
+    // superframe type: bit 0x40 set (0x61) = VOICE frame carrying valid Link
+    // Control — Color Code (byte 7, 0-15) + Time Slot (byte 12, 0=TS1/1=TS2) are
+    // only trustworthy here. byte2 0x21 (bit clear) = terminator/control frame,
+    // where byte7 holds an unrelated LC/reason code (seen as 0x0d at call end —
+    // previously misdecoded as ColorCode 13). bytes 8-11 = this radio's own DMR
+    // ID (BCD; stayed constant even during RX, so it's the LOCAL end, not the
+    // talker), bytes 14-16 = the remote party (contact/TG, BCD). Which of those
+    // is source vs dest needs a non-loopback call to confirm. RE'd 2026-06-21
+    // against a PARROT call (CC1/TS1, local 3223436 / remote 310997) + an earlier
+    // TG 5023426 call (CC1/TS2: byte7=01, byte12=01).
     const active = payload[1] !== 0
+    const voiceFrame = (payload[2] & 0x40) !== 0
     const cc = payload[7]
     const ts = payload[12]
     return {
@@ -2632,8 +2639,11 @@ function decodePayload(payload) {
       statusCode: '5e',
       squelchOpen: payload[1] !== 0,
       statusByte: payload[1],
-      dmrColorCode: active && cc <= 15 ? cc : null,
-      dmrSlot: active && ts <= 1 ? ts : null,
+      dmrVoiceFrame: voiceFrame,
+      dmrColorCode: active && voiceFrame && cc <= 15 ? cc : null,
+      dmrSlot: active && voiceFrame && ts <= 1 ? ts : null,
+      dmrLocalId: active && voiceFrame ? bcdNumber(payload.subarray(8, 12)) : null,
+      dmrRemoteId: active && voiceFrame ? bcdNumber(payload.subarray(14, 17)) : null,
       bytes: [...payload.subarray(1, -1)],
     }
   }
@@ -2908,19 +2918,29 @@ function anytoneToState(source) {
   // → long quiet → one close), so we LATCH `dmrRxOpen` (set on 5e-RX/TX, cleared on
   // 5e-idle) rather than trusting 58 byte 1, where `00` is a valid RX talker frame.
   // A generous backstop clears it if the 5e-close is ever missed; `dmrActiveAt` is
-  // refreshed while 5e is latched. It's global, so it applies to whichever side is DMR.
+  // refreshed while 5e is latched. The 5e gate is global; the side comes from the
+  // DMR channel (dmrCallSide below), NOT from 5a — its 0x02/0x04 mask is the DMR
+  // TIMESLOT, not the A/B side (single-slot lands on 0x02 for BOTH sides, dual-slot
+  // moves the same side to 0x04; confirmed across PARROT A/B + Digimon dual-slot).
   const DMR_RX_BACKSTOP_MS = 30000
   const DMR_RX_METER = 200
   const dmrRxActive = source.signal?.dmrRxOpen === true
     && (Date.now() - (source.signal?.dmrActiveAt ?? 0)) < DMR_RX_BACKSTOP_MS
+  // Which side the active DMR call is on. 5a can't tell us (its open mask is the
+  // timeslot, not the side), so it's simply the DMR channel's side: the lone DMR
+  // side, else the selected side. Resolves to exactly ONE side — never both.
+  const dmrCallSide = (main.txDigital === true) !== (sub.txDigital === true)
+    ? (main.txDigital === true ? 'A' : 'B')
+    : (source.selectedSide === 'B' ? 'B' : 'A')
   const mainMeter = main.txDigital === true
-    ? (dmrRxActive ? DMR_RX_METER : 0)
+    ? (dmrRxActive && dmrCallSide === 'A' ? DMR_RX_METER : 0)
     : meterFor(signalFresh && source.signal?.mainOpen === true, source.signal?.mainRssi)
   const subMeter = sub.txDigital === true
-    ? (dmrRxActive ? DMR_RX_METER : 0)
+    ? (dmrRxActive && dmrCallSide === 'B' ? DMR_RX_METER : 0)
     : meterFor(signalFresh && source.signal?.subOpen === true, source.signal?.subRssi)
   const mainVfoMode = vfoModeForSide(main)
   const subVfoMode = vfoModeForSide(sub)
+  const transmitting = connected && !!source.pttActive
   return {
     connected,
     connecting: !!source.connecting,
@@ -2943,9 +2963,11 @@ function anytoneToState(source) {
     subTxFreq: txFrequencyForSide(sub),
     mainMode: modeForSide(main),
     subMode: modeForSide(sub),
-    mainSmeter: connected ? mainMeter : null,
-    subSmeter: connected ? subMeter : null,
-    txState: connected && !!source.pttActive,
+    // While transmitting (PTT active) the radio isn't receiving, so the RX
+    // S-meter is meaningless — zero both meters until PTT releases.
+    mainSmeter: connected ? (transmitting ? 0 : mainMeter) : null,
+    subSmeter: connected ? (transmitting ? 0 : subMeter) : null,
+    txState: transmitting,
     mox: false,
     split: false,
     memorySplit: false,
@@ -3011,6 +3033,12 @@ function anytoneToState(source) {
     vox: null,
     voxGain: null,
     txVfo: source.selectedSide === 'B' ? 1 : 0,
+    // TX Prohibit (channel byte 11 bit 5) on the side PTT would key (the selected
+    // side) — the UI greys out PTT when set so we don't try to TX on an RX-only
+    // channel. Per-side too, for completeness.
+    mainTxProhibit: main.channelSettingsRaw?.txProhibit === 1,
+    subTxProhibit: sub.channelSettingsRaw?.txProhibit === 1,
+    txProhibited: connected && (source.selectedSide === 'B' ? sub : main).channelSettingsRaw?.txProhibit === 1,
     rxMode: source.dualWatch === true ? 'dual' : 'single',
     mainVfoMode,
     subVfoMode,

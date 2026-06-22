@@ -33,7 +33,7 @@
         <button
           class="btn btn-ghost"
           :class="{ 'btn-tx--active': audioMicActive }"
-          :disabled="!audioReadyForTx || !state.connected || audioTxActive || audioTxBusy"
+          :disabled="!audioReadyForTx || !state.connected || audioTxActive || audioTxBusy || (txProhibited && !audioMicActive)"
           :title="audioMicTitle"
           @click="toggleAudioMic"
         >{{ audioMicLabel }}</button>
@@ -96,11 +96,6 @@
             </div>
             <div class="vfo-control-row">
               <span class="band-sel vfo-readout zone-readout" :title="zoneBadgeTitle('1')">{{ zoneBadgeValue('1') }}</span>
-              <span
-                class="mode-sel vfo-readout"
-                :style="modeBadgeStyle(state.subMode)"
-                title="Mode read-only"
-              >{{ state.subMode ?? '--' }}</span>
             </div>
             <div class="vfo-step-row">
               <div class="channel-control">
@@ -113,7 +108,8 @@
               </div>
             </div>
           </div>
-          <div v-if="(state.subMode === 'DMR' && (state.subContactName || state.subContactTg)) || vfoDmrLiveTalkgroup('1') || vfoDmrCallerDisplay('1')" class="sql-row">
+          <div class="sql-row">
+            <span class="sql-badge sql-badge--mode" :style="modeBadgeStyle(state.subMode)" title="Mode (read-only)">{{ state.subMode ?? '--' }}</span>
             <span v-if="state.subMode === 'DMR' && (state.subContactName || state.subContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
               TG {{ state.subContactName || state.subContactTg }}<span v-if="state.subContactName && state.subContactTg" class="sql-tone">{{ state.subContactTg }}</span>
             </span>
@@ -133,7 +129,7 @@
             <div class="freq-sep" / -->
             <div
               class="freq-tuner freq-sub"
-              :class="{ 'freq-tx': state.txState || state.mox, 'freq-tuner--editable': isFrequencyEditable('1') }"
+              :class="{ 'freq-tx': (state.txState || state.mox) && state.txVfo === 1, 'freq-tuner--editable': isFrequencyEditable('1') }"
               :title="frequencyEditTitle('1')"
               :role="isFrequencyEditable('1') ? 'button' : undefined"
               :tabindex="isFrequencyEditable('1') ? 0 : undefined"
@@ -151,7 +147,7 @@
             <span class="split-freq-label">TX</span>
             <div
               class="split-freq-tuner"
-              :class="{ 'split-freq-tuner--editable': isFrequencyEditable('1') }"
+              :class="{ 'split-freq-tuner--editable': isFrequencyEditable('1'), 'split-freq-tuner--prohibited': state.subTxProhibit }"
               :title="txFrequencyEditTitle('1')"
               :role="isFrequencyEditable('1') ? 'button' : undefined"
               :tabindex="isFrequencyEditable('1') ? 0 : undefined"
@@ -223,11 +219,6 @@
             </div>
             <div class="vfo-control-row">
               <span class="band-sel vfo-readout zone-readout" :title="zoneBadgeTitle('0')">{{ zoneBadgeValue('0') }}</span>
-              <span
-                class="mode-sel vfo-readout"
-                :style="modeBadgeStyle(state.mainMode)"
-                title="Mode read-only"
-              >{{ state.mainMode ?? '--' }}</span>
             </div>
             <div class="vfo-step-row">
               <div class="channel-control">
@@ -240,7 +231,8 @@
               </div>
             </div>
           </div>
-          <div v-if="(state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)) || vfoDmrLiveTalkgroup('0') || vfoDmrCallerDisplay('0')" class="sql-row">
+          <div class="sql-row">
+            <span class="sql-badge sql-badge--mode" :style="modeBadgeStyle(state.mainMode)" title="Mode (read-only)">{{ state.mainMode ?? '--' }}</span>
             <span v-if="state.mainMode === 'DMR' && (state.mainContactName || state.mainContactTg)" class="sql-badge sql-badge--contact" title="DMR contact / talkgroup">
               TG {{ state.mainContactName || state.mainContactTg }}<span v-if="state.mainContactName && state.mainContactTg" class="sql-tone">{{ state.mainContactTg }}</span>
             </span>
@@ -260,7 +252,7 @@
             <div class="freq-sep" / -->
             <div
               class="freq-tuner"
-              :class="{ 'freq-tx': state.txState || state.mox, 'freq-tuner--editable': isFrequencyEditable('0') }"
+              :class="{ 'freq-tx': (state.txState || state.mox) && state.txVfo === 0, 'freq-tuner--editable': isFrequencyEditable('0') }"
               :title="frequencyEditTitle('0')"
               :role="isFrequencyEditable('0') ? 'button' : undefined"
               :tabindex="isFrequencyEditable('0') ? 0 : undefined"
@@ -278,7 +270,7 @@
             <span class="split-freq-label">TX</span>
             <div
               class="split-freq-tuner"
-              :class="{ 'split-freq-tuner--editable': isFrequencyEditable('0') }"
+              :class="{ 'split-freq-tuner--editable': isFrequencyEditable('0'), 'split-freq-tuner--prohibited': state.mainTxProhibit }"
               :title="txFrequencyEditTitle('0')"
               :role="isFrequencyEditable('0') ? 'button' : undefined"
               :tabindex="isFrequencyEditable('0') ? 0 : undefined"
@@ -634,7 +626,7 @@
         'floating-ptt--busy': audioTxBusy,
         'floating-ptt--active': pttConfirmedActive,
       }"
-      :disabled="!audioReadyForTx || !state.connected || audioTxActive || audioTxBusy"
+      :disabled="!audioReadyForTx || !state.connected || audioTxActive || audioTxBusy || txProhibited"
       :title="audioTxTitle"
       :aria-pressed="pttConfirmedActive"
       aria-label="Hold to transmit"
@@ -1398,6 +1390,9 @@ interface TransceiverState {
   vox: boolean | null
   voxGain: number | null
   txVfo: 0 | 1 | null
+  txProhibited: boolean
+  mainTxProhibit: boolean
+  subTxProhibit: boolean
   rxMode: 'dual' | 'single' | null
   mainVfoMode: string | null
   subVfoMode: string | null
@@ -1532,6 +1527,9 @@ const defaultState = (): TransceiverState => ({
   vox: null,
   voxGain: null,
   txVfo: null,
+  txProhibited: false,
+  mainTxProhibit: false,
+  subTxProhibit: false,
   rxMode: null,
   mainVfoMode: null,
   subVfoMode: null,
@@ -2413,11 +2411,13 @@ const audioToggleLabel = computed(() => {
 })
 
 const audioPlaybackToggleLabel = computed(() => {
-  if (audioBusy.value && audioReceiveMode.value === 'playback') return 'HTTP…'
-  return audioReceiveMode.value === 'playback' ? 'Stop HTTP' : 'HTTP Audio'
+  if (audioBusy.value && audioReceiveMode.value === 'playback') return 'Playback…'
+  return audioReceiveMode.value === 'playback' ? 'Stop Playback' : 'Playback Only'
 })
 
 const audioReadyForTx = computed(() => audioReceiveMode.value === 'webrtc' && audioListening.value && isAudioPeerReadyForTx())
+// TX Prohibit on the selected channel — block all PTT/mic paths and grey them out.
+const txProhibited = computed(() => state.value.txProhibited === true)
 
 const audioMediaTitle = computed(() => {
   return mediaVfoSummary(activeVfo.value)
@@ -2448,6 +2448,7 @@ const audioPlaybackTitle = computed(() => {
 })
 
 const audioTxTitle = computed(() => {
+  if (txProhibited.value) return 'TX is prohibited on this channel (RX only) — change the channel to transmit'
   if (!state.value.connected) return 'Connect to the radio before transmitting'
   if (audioReceiveMode.value === 'playback') return 'Playback-only HTTP audio does not support microphone/PTT'
   if (audioListening.value && audioWebRtcState.value === 'reconnecting') return 'Audio is reconnecting before transmit is available'
@@ -2463,6 +2464,7 @@ const audioMicLabel = computed(() => {
 })
 
 const audioMicTitle = computed(() => {
+  if (txProhibited.value) return 'TX is prohibited on this channel (RX only) — change the channel to transmit'
   if (!state.value.connected) return 'Connect to the radio before enabling the microphone'
   if (audioReceiveMode.value === 'playback') return 'Playback-only HTTP audio does not support microphone/PTT'
   if (!audioListening.value) return 'Enable audio before enabling the microphone'
@@ -2599,6 +2601,7 @@ const webrtcDiagnosticsJson = computed(() => JSON.stringify(webrtcDiagnostics.va
 const webrtcDiagnosticRecent = computed(() => webrtcDiagnostics.value.slice(-40).reverse())
 
 const floatingPttMain = computed(() => {
+  if (txProhibited.value) return 'NO TX'
   if (pttConfirmedActive.value) return 'SPEAK'
   if (audioTxBusy.value) return 'WAIT'
   if (audioReceiveMode.value === 'playback') return 'RX'
@@ -2609,6 +2612,7 @@ const floatingPttMain = computed(() => {
 })
 
 const floatingPttSub = computed(() => {
+  if (txProhibited.value) return 'TX prohibited'
   if (pttConfirmedActive.value) return 'TX ON'
   if (audioTxBusy.value) return 'arming'
   if (audioReceiveMode.value === 'playback') return 'playback only'
@@ -3669,8 +3673,14 @@ const MODE_COLORS: Record<string, string> = {
 }
 
 function modeBadgeStyle(mode: string | null) {
-  const color = mode ? (MODE_COLORS[mode] ?? '#6b7280') : '#6b7280'
-  return { background: color }
+  const hex = mode ? (MODE_COLORS[mode] ?? '#6b7280') : '#6b7280'
+  // Match the other sql-badges: translucent fill + solid border + colored text,
+  // tinted by the mode's color (digital vs analog).
+  const h = hex.replace('#', '')
+  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h
+  const n = parseInt(full, 16)
+  const rgb = `${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}`
+  return { background: `rgba(${rgb}, .14)`, borderColor: `rgba(${rgb}, .72)`, color: hex }
 }
 
 // MD command mode list: { code: CAT hex char, label: mode name }
@@ -8313,10 +8323,6 @@ body {
 .vfo-card--selectable {
   cursor: pointer;
 }
-.vfo-card--selectable:hover {
-  border-color: #38bdf8;
-  box-shadow: 0 0 0 1px #38bdf8 inset;
-}
 
 .rx-audio-row {
   display: flex;
@@ -8763,6 +8769,14 @@ body {
 
 .split-freq-tuner .freq-group {
   cursor: default;
+}
+
+/* TX Prohibit on this side: strike through the TX frequency — you can't TX here. */
+.split-freq-tuner--prohibited .freq-group,
+.split-freq-tuner--prohibited .freq-dot {
+  text-decoration: line-through;
+  text-decoration-thickness: 2px;
+  opacity: .65;
 }
 
 .split-freq-tuner:hover .freq-group {
