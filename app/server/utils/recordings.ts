@@ -593,10 +593,23 @@ class RecordingsManager {
     const memoryChannel = status?.[`${prefix}MemoryChannel`] ?? null
     const memoryTag = status?.[`${prefix}MemoryTag`] ?? null
     const mhz = typeof freq === 'number' ? (freq / 1_000_000).toFixed(3) : null
-    const laneKey = memoryChannel ? `mem:${memoryChannel}` : `${side}:${freq ?? 'unknown'}:${mode ?? 'unknown'}`
-    const laneLabel = memoryChannel
-      ? [`MEM ${memoryChannel}`, memoryTag].filter(Boolean).join(' ')
-      : [side.toUpperCase(), mhz, mode].filter(Boolean).join(' ')
+    // During a native scan the radio's `04 2d 01` read returns the right channel NAME
+    // but an unreliable NUMBER (the number field stays as the side's base channel, so
+    // it collides across different scanned channels). So don't trust the number while
+    // scanning, and key the timeline lane by the channel NAME — which is stable in and
+    // out of a scan, keeping every recording of one channel on a single line.
+    const scanning = !!status?.scanActive
+    const laneChannel = scanning ? null : memoryChannel
+    const laneKey = memoryTag
+      ? `tag:${String(memoryTag).toLowerCase()}`
+      : laneChannel
+        ? `mem:${laneChannel}`
+        : `${side}:${freq ?? 'unknown'}:${mode ?? 'unknown'}`
+    const laneLabel = memoryTag
+      ? (laneChannel ? `MEM ${laneChannel} ${memoryTag}` : memoryTag)
+      : laneChannel
+        ? `MEM ${laneChannel}`
+        : [side.toUpperCase(), mhz, mode].filter(Boolean).join(' ')
     const scanGroupNames = await this.scanGroupNamesForChannel(memoryChannel, status)
 
     return {

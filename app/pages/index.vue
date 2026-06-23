@@ -106,6 +106,9 @@
                 <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_DN', '1')" title="Zone down" aria-label="Zone down">Zone −</button>
                 <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_UP', '1')" title="Zone up" aria-label="Zone up">Zone +</button>
               </div>
+              <div class="channel-control browse-control">
+                <button class="channel-step-btn channel-step-btn--label browse-btn" :disabled="!state.connected" @click.stop="openChannelPicker('1')" title="Go to a channel in a zone" aria-label="Go to channel">Go to</button>
+              </div>
             </div>
           </div>
           <div class="sql-row">
@@ -171,6 +174,15 @@
           <LevelBar v-if="(state.sqlRfMode===1)||((state.sqlRfMode===2)&&(!isRfGainMode(state.subMode)))" :value="state.sqSub" label="SQUELCH" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
           <!-- Per-channel settings (2f writes) for SUB/B — editing selects this side first. -->
           <section v-if="state.connected && state.subChannelSettings.length" class="status-section channel-settings">
+            <div
+              class="ctl-box scan-ctl"
+              :class="{ 'scan-ctl--scanning': isScanningVfo('1') }"
+              role="button" tabindex="0"
+              :title="isScanningVfo('1') ? 'Stop scan' : 'Start a scan'"
+              @click.stop="onScanButton('1')" @keydown.enter.space.prevent="onScanButton('1')"
+            >
+              <StatusBadge label="Scan" :value="isScanningVfo('1') ? 'Stop' : 'Start'" :active="isScanningVfo('1')" color-active="#10b981" />
+            </div>
             <div class="ctl-box" :class="{ 'ctl-box--open': vfoMemoryModeBusy === '1' }" role="button" tabindex="0" :title="vfoMemoryModeTitle('1')" @click.stop="toggleVfoMemoryMode('1')" @keydown.enter.space.prevent="toggleVfoMemoryMode('1')">
               <StatusBadge label="VFO/MEM" :value="vfoMemoryModeButtonLabel('1')" :active="vfoMemoryModeBusy === '1'" color-active="#58a6ff" />
             </div>
@@ -228,6 +240,9 @@
               <div class="channel-control zone-control">
                 <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_DN', '0')" title="Zone down" aria-label="Zone down">Zone −</button>
                 <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_UP', '0')" title="Zone up" aria-label="Zone up">Zone +</button>
+              </div>
+              <div class="channel-control browse-control">
+                <button class="channel-step-btn channel-step-btn--label browse-btn" :disabled="!state.connected" @click.stop="openChannelPicker('0')" title="Go to a channel in a zone" aria-label="Go to channel">Go to</button>
               </div>
             </div>
           </div>
@@ -294,6 +309,15 @@
           <LevelBar v-if="(state.sqlRfMode===1)||((state.sqlRfMode===2)&&(!isRfGainMode(state.mainMode)))" :value="state.sqMain" label="SQUELCH" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
           <!-- Per-channel settings (2f writes) for MAIN/A — editing selects this side first. -->
           <section v-if="state.connected && state.mainChannelSettings.length" class="status-section channel-settings">
+            <div
+              class="ctl-box scan-ctl"
+              :class="{ 'scan-ctl--scanning': isScanningVfo('0') }"
+              role="button" tabindex="0"
+              :title="isScanningVfo('0') ? 'Stop scan' : 'Start a scan'"
+              @click.stop="onScanButton('0')" @keydown.enter.space.prevent="onScanButton('0')"
+            >
+              <StatusBadge label="Scan" :value="isScanningVfo('0') ? 'Stop' : 'Start'" :active="isScanningVfo('0')" color-active="#10b981" />
+            </div>
             <div class="ctl-box" :class="{ 'ctl-box--open': vfoMemoryModeBusy === '0' }" role="button" tabindex="0" :title="vfoMemoryModeTitle('0')" @click.stop="toggleVfoMemoryMode('0')" @keydown.enter.space.prevent="toggleVfoMemoryMode('0')">
               <StatusBadge label="VFO/MEM" :value="vfoMemoryModeButtonLabel('0')" :active="vfoMemoryModeBusy === '0'" color-active="#58a6ff" />
             </div>
@@ -350,55 +374,6 @@
               <StatusBadge v-else :label="s.label" :value="s.display" />
             </template>
           </template>
-        </div>
-      </section>
-
-      <!-- ── Zones / Channels (click a zone to reveal its channels inline) ── -->
-      <section class="zones-panel">
-        <div class="zones-header">
-          <span class="scope-title">Zones / Channels</span>
-          <span v-if="zoneList.length" class="zones-count">{{ zoneList.length }}</span>
-          <span class="zones-target">Target {{ activeVfo === '0' ? 'MAIN' : 'SUB' }}</span>
-          <button class="btn btn-ghost btn-sm zones-refresh-btn" :disabled="zonesBusy || !state.connected" @click="loadZones(true)">{{ zonesBusy ? '…' : 'Refresh' }}</button>
-        </div>
-        <div v-if="zonesBusy && !zoneList.length" class="zones-empty">Enumerating zones…</div>
-        <div v-else-if="!zoneList.length" class="zones-empty">No zones</div>
-        <div v-else class="zone-accordion">
-          <div
-            v-for="zone in zoneList"
-            :key="zone.index"
-            class="zone-group"
-            :class="{ 'zone-group--open': expandedZone && expandedZone.index === zone.index }"
-          >
-            <button
-              type="button"
-              class="zone-row"
-              :class="{ 'zone-row--active': activeZoneName === zone.name }"
-              @click="toggleZone(zone.index)"
-            >
-              <span class="zone-row-caret">{{ expandedZone && expandedZone.index === zone.index ? '▾' : '▸' }}</span>
-              <span class="zone-row-name">{{ zone.name }}</span>
-              <span v-if="activeZoneName === zone.name" class="zone-row-badge">active</span>
-              <span class="zone-row-count">{{ zone.channels.length }} ch</span>
-            </button>
-            <div v-if="expandedZone && expandedZone.index === zone.index" class="zone-channels channels-list">
-              <div v-if="!zone.channels.length" class="zones-empty zones-empty--sm">No channels in this zone</div>
-              <button
-                v-for="ch in zone.channels"
-                :key="ch.index"
-                type="button"
-                class="ch-badge"
-                :class="{ 'ch-badge--active': activeZoneName === zone.name && activeChannelNumber === ch.channelNumber }"
-                :disabled="channelJumpBusy != null"
-                :title="`Go to ${zone.name} · MEM ${String(ch.channelNumber).padStart(5, '0')} · ${ch.name}`"
-                @click="jumpToChannel(zone.index, ch.index)"
-              >
-                <span class="ch-freq">{{ ch.name }}</span>
-                <span v-if="channelJumpBusy === `${zone.index}:${ch.index}`" class="ch-sql">…</span>
-                <span v-else class="ch-sql">{{ String(ch.channelNumber).padStart(5, '0') }}</span>
-              </button>
-            </div>
-          </div>
         </div>
       </section>
 
@@ -525,7 +500,7 @@
           </div>
           <div v-if="selectedRecording" class="recording-inspector">
             <div class="recording-inspector-meta">
-              <span class="recording-inspector-title">{{ selectedRecording.laneLabel }}</span>
+              <span class="recording-inspector-title">{{ clipLaneLabel(selectedRecording) }}</span>
               <span>{{ formatRecordingDateTime(selectedRecording.startedAt) }}</span>
               <span>{{ formatRecordingDuration(selectedRecording.durationMs) }}</span>
               <span v-if="selectedRecording.kind === 'tx'" class="recording-kind-pill recording-kind-pill--tx">TX</span>
@@ -881,6 +856,112 @@
               Restore channel contact
             </button>
             <p class="manual-dial-note">The next PTT calls the dialed target instead of the channel's programmed contact, until restored.</p>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ── Scan-group picker modal (teleported to body) ── -->
+    <Teleport to="body">
+      <div
+        v-if="scanPopupVfo !== null"
+        class="tone-modal-backdrop"
+        @click.self="closeScanPopup"
+      >
+        <div class="tone-modal setting-modal scan-modal" role="dialog" aria-modal="true" aria-label="Start scan">
+          <div class="tone-modal-header">
+            <span class="tone-modal-title">Scan — {{ scanPopupVfo === '0' ? 'MAIN' : 'SUB' }}</span>
+            <button class="tone-modal-close" @click="closeScanPopup" aria-label="Close">✕</button>
+          </div>
+          <div class="scan-modal-body">
+            <div class="scan-modal-actions">
+              <span class="scan-modal-hint">Pick a scan group to scan</span>
+              <button class="btn btn-ghost btn-sm" :disabled="scanBusy || !state.connected" @click="loadScanLists(true)">{{ scanBusy ? '…' : 'Refresh' }}</button>
+            </div>
+            <div v-if="scanBusy && !scanLists.length" class="zones-empty">Enumerating scan lists…</div>
+            <div v-else-if="!scanLists.length" class="zones-empty">No scan lists</div>
+            <div v-else class="scan-modal-list">
+              <div v-for="list in scanLists" :key="list.index" class="scan-group">
+                <div class="scan-group-row" :class="{ 'scan-group-row--sel': scanPopupSelected === list.index }">
+                  <button type="button" class="scan-group-main" @click="scanPopupSelected = scanPopupSelected === list.index ? null : list.index">
+                    <span class="zone-row-caret">{{ scanPopupSelected === list.index ? '▾' : '▸' }}</span>
+                    <span class="zone-row-name">{{ list.name }}</span>
+                    <span class="zone-row-count">{{ list.channels.length }} ch</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-primary scan-group-go"
+                    :disabled="scanBusy || !state.connected || !list.channels.length"
+                    @click="startScanFromPopup(list.index)"
+                  >Scan</button>
+                </div>
+                <div v-if="scanPopupSelected === list.index" class="scan-group-channels channels-list">
+                  <div v-if="!list.channels.length" class="zones-empty zones-empty--sm">No channels in this list</div>
+                  <div
+                    v-for="ch in list.channels"
+                    :key="ch.channelNumber"
+                    class="ch-badge ch-badge--static"
+                    :title="`MEM ${String(ch.channelNumber).padStart(5, '0')} · ${ch.name}`"
+                  >
+                    <span class="ch-freq">{{ ch.name }}</span>
+                    <span class="ch-sql">{{ String(ch.channelNumber).padStart(5, '0') }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ── Zone/channel picker modal (teleported to body) ── -->
+    <Teleport to="body">
+      <div
+        v-if="zonePickerVfo !== null"
+        class="tone-modal-backdrop"
+        @click.self="closeChannelPicker"
+      >
+        <div class="tone-modal setting-modal scan-modal" role="dialog" aria-modal="true" aria-label="Browse channels">
+          <div class="tone-modal-header">
+            <span class="tone-modal-title">Channels — {{ zonePickerVfo === '0' ? 'MAIN' : 'SUB' }}</span>
+            <button class="tone-modal-close" @click="closeChannelPicker" aria-label="Close">✕</button>
+          </div>
+          <div class="scan-modal-body">
+            <div class="scan-modal-actions">
+              <span class="scan-modal-hint">Pick a zone, then a channel</span>
+              <button class="btn btn-ghost btn-sm" :disabled="zonesBusy || !state.connected" @click="loadZones(true)">{{ zonesBusy ? '…' : 'Refresh' }}</button>
+            </div>
+            <div v-if="zonesBusy && !zoneList.length" class="zones-empty">Enumerating zones…</div>
+            <div v-else-if="!zoneList.length" class="zones-empty">No zones</div>
+            <div v-else class="scan-modal-list">
+              <div v-for="zone in zoneList" :key="zone.index" class="scan-group">
+                <div class="scan-group-row" :class="{ 'scan-group-row--sel': activeZoneName === zone.name }">
+                  <button type="button" class="scan-group-main" @click="zonePickerExpanded = zonePickerExpanded === zone.index ? null : zone.index">
+                    <span class="zone-row-caret">{{ zonePickerExpanded === zone.index ? '▾' : '▸' }}</span>
+                    <span class="zone-row-name">{{ zone.name }}</span>
+                    <span v-if="activeZoneName === zone.name" class="zone-row-badge">active</span>
+                    <span class="zone-row-count">{{ zone.channels.length }} ch</span>
+                  </button>
+                </div>
+                <div v-if="zonePickerExpanded === zone.index" class="scan-group-channels channels-list">
+                  <div v-if="!zone.channels.length" class="zones-empty zones-empty--sm">No channels in this zone</div>
+                  <button
+                    v-for="ch in zone.channels"
+                    :key="ch.index"
+                    type="button"
+                    class="ch-badge"
+                    :class="{ 'ch-badge--active': activeZoneName === zone.name && activeChannelNumber === ch.channelNumber }"
+                    :disabled="channelJumpBusy != null"
+                    :title="`Go to ${zone.name} · MEM ${String(ch.channelNumber).padStart(5, '0')} · ${ch.name}`"
+                    @click="pickChannel(zone.index, ch.index)"
+                  >
+                    <span class="ch-freq">{{ ch.name }}</span>
+                    <span v-if="channelJumpBusy === `${zone.index}:${ch.index}`" class="ch-sql">…</span>
+                    <span v-else class="ch-sql">{{ String(ch.channelNumber).padStart(5, '0') }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1330,6 +1411,9 @@ interface ToneState {
 // Zone/channel picker entries from the backend enumeration endpoints.
 interface ChannelEntry { index: number; channelNumber: number; name: string }
 interface ZoneEntry { index: number; name: string; channels: ChannelEntry[] }
+// Native scan list (04 4b directory). channels carry the resolved member names.
+interface ScanChannelEntry { channelNumber: number; channelIndex: number; name: string }
+interface ScanListEntry { index: number; name: string; channels: ScanChannelEntry[] }
 
 interface TransceiverState {
   connected: boolean
@@ -1461,6 +1545,11 @@ interface TransceiverState {
   subZone: string | null
   mainZonePosition: number | null
   subZonePosition: number | null
+  // Native scan (radio scan list). scanVfo = side the scan runs on ('0' MAIN / '1' SUB).
+  scanActive: boolean
+  scanGroup: string | null
+  scanVfo: '0' | '1' | null
+  scanLocked: boolean
   rfAttenuator: boolean
   preAmpHf: number | null
   preAmpVhf: boolean | null
@@ -1583,6 +1672,10 @@ const defaultState = (): TransceiverState => ({
   subZone: null,
   mainZonePosition: null,
   subZonePosition: null,
+  scanActive: false,
+  scanGroup: null,
+  scanVfo: null,
+  scanLocked: false,
   rfAttenuator: false,
   preAmpHf: null,
   preAmpVhf: null,
@@ -2655,6 +2748,12 @@ function pseudoScanVfoIsScanning(vfo: '0' | '1') {
 
 function memoryDisplay(vfo: '0' | '1') {
   if (pseudoScanVfoIsScanning(vfo)) return 'SCANNING'
+  // Native scan: while scanning this side, show "Scanning · <group>" until it locks
+  // on a channel, then show that channel's real name (fall through to the normal path,
+  // which the backend's lock read has refreshed). Reverts here when the lock drops.
+  if (state.value.scanActive && state.value.scanVfo === vfo && !state.value.scanLocked) {
+    return state.value.scanGroup ? `Scanning · ${state.value.scanGroup}` : 'Scanning'
+  }
 
   const mode = vfoMemoryMode(vfo)
   if (!mode || isVfoLikeMode(mode)) return 'VFO mode'
@@ -2857,7 +2956,6 @@ async function sendZoneStep(command: 'ZONE_UP' | 'ZONE_DN', vfo: '0' | '1' = act
 // Full zone→channels map, enumerated by the server at connect (and on Refresh).
 const zoneList = ref<ZoneEntry[]>([])
 const zonesBusy = ref(false)
-const expandedZoneIndex = ref<number | null>(null) // which zone's channels are shown
 const channelJumpBusy = ref<string | null>(null)    // "zone:pos" being jumped to
 
 // The active side's current zone name / memory number, for highlighting.
@@ -2866,12 +2964,6 @@ const activeChannelNumber = computed<number | null>(() => {
   // state field may be a memory number or (fallback) a zone-name string; coerce.
   const v = activeVfo.value === '0' ? state.value.mainMemoryChannel : state.value.subMemoryChannel
   return v == null ? null : Number(v)
-})
-
-// The zone whose channels are shown: the user-expanded one, else the active zone.
-const expandedZone = computed<ZoneEntry | null>(() => {
-  if (expandedZoneIndex.value != null) return zoneList.value.find(z => z.index === expandedZoneIndex.value) ?? null
-  return zoneList.value.find(z => z.name === activeZoneName.value) ?? null
 })
 
 async function loadZones(force = false) {
@@ -2887,28 +2979,124 @@ async function loadZones(force = false) {
   }
 }
 
-// Expand a zone to reveal its channels (cached — no radio call). Toggles closed if
-// the same zone is tapped again; tapping the active zone clears back to the default.
-function toggleZone(zoneIndex: number) {
-  expandedZoneIndex.value = expandedZoneIndex.value === zoneIndex ? null : zoneIndex
-}
 
 // Jump the active side directly to a zone + in-zone channel position (ZC). One tap
 // navigates to the channel's zone and the channel.
-async function jumpToChannel(zoneIndex: number, position: number) {
+async function jumpToChannel(zoneIndex: number, position: number, vfo: '0' | '1' = activeVfo.value) {
   const key = `${zoneIndex}:${position}`
   if (channelJumpBusy.value != null) return
   channelJumpBusy.value = key
   try {
-    const side = activeVfo.value === '1' ? 'B' : 'A'
-    const data = await $fetch<CommandResponse>('/api/command', { method: 'POST', body: { command: `ZC:${side}:${zoneIndex}:${position}`, vfo: activeVfo.value } })
+    const side = vfo === '1' ? 'B' : 'A'
+    const data = await $fetch<CommandResponse>('/api/command', { method: 'POST', body: { command: `ZC:${side}:${zoneIndex}:${position}`, vfo } })
     if (data.state) applyState(data.state)
-    else await refreshVfoStatus(activeVfo.value)
+    else await refreshVfoStatus(vfo)
     updateAudioMediaSession()
   } catch (e: any) {
     lastError.value = e.message
   } finally {
     channelJumpBusy.value = null
+  }
+}
+
+// ---- Zone/channel picker popup (card "Browse" button) ----
+const zonePickerVfo = ref<'0' | '1' | null>(null)   // open picker's side
+const zonePickerExpanded = ref<number | null>(null) // expanded zone in the picker
+
+function openChannelPicker(vfo: '0' | '1') {
+  zonePickerVfo.value = vfo
+  // Default to expanding the side's current zone so its channels are visible first.
+  const activeZone = zoneList.value.find(z => z.name === (vfo === '0' ? state.value.mainZone : state.value.subZone))
+  zonePickerExpanded.value = activeZone?.index ?? null
+  if (!zoneList.value.length) void loadZones()
+}
+function closeChannelPicker() {
+  zonePickerVfo.value = null
+  zonePickerExpanded.value = null
+}
+// Jump to the chosen channel on the picker's side, then close the popup.
+async function pickChannel(zoneIndex: number, position: number) {
+  const vfo = zonePickerVfo.value ?? activeVfo.value
+  await jumpToChannel(zoneIndex, position, vfo)
+  closeChannelPicker()
+}
+
+// ----------- Scan lists (the radio's native scan lists; 04 4b) -----------
+// Enumerated by the server at connect (and on Refresh). The live scan state
+// (scanActive/scanVfo/scanLocked/scanGroup) comes from the backend over SSE and
+// drives the per-side Scan button + the channel card; this side only holds the
+// popup/picker state and the in-flight busy flag.
+const scanLists = ref<ScanListEntry[]>([])
+const scanBusy = ref(false)
+const scanPopupVfo = ref<'0' | '1' | null>(null)     // open scan picker's side
+const scanPopupSelected = ref<number | null>(null)   // expanded group in the picker
+
+// Is the radio currently scanning on this side? (backend-authoritative)
+function isScanningVfo(vfo: '0' | '1'): boolean {
+  return state.value.scanActive && state.value.scanVfo === vfo
+}
+
+async function loadScanLists(force = false) {
+  if (scanBusy.value) return
+  scanBusy.value = true
+  try {
+    const data = await $fetch<{ scanLists: ScanListEntry[] }>(`/api/scan-lists${force ? '?force=1' : ''}`)
+    scanLists.value = data.scanLists ?? []
+  } catch (e: any) {
+    lastError.value = e.message
+  } finally {
+    scanBusy.value = false
+  }
+}
+
+// Per-side Scan button: stop if already scanning this side, else open the picker.
+function onScanButton(vfo: '0' | '1') {
+  if (isScanningVfo(vfo)) void stopScan()
+  else openScanPopup(vfo)
+}
+
+function openScanPopup(vfo: '0' | '1') {
+  scanPopupVfo.value = vfo
+  scanPopupSelected.value = null
+  if (!scanLists.value.length) void loadScanLists()
+}
+function closeScanPopup() {
+  scanPopupVfo.value = null
+  scanPopupSelected.value = null
+}
+
+// Picker "Scan": start scanning the chosen group on the popup's side, then close.
+async function startScanFromPopup(index: number) {
+  const vfo = scanPopupVfo.value
+  closeScanPopup()
+  await startScan(index, vfo)
+}
+
+// Start a scan of group <index> on side vfo (SCAN_START; the backend selects the side).
+async function startScan(index: number, vfo: '0' | '1' | null = null) {
+  if (scanBusy.value) return
+  scanBusy.value = true
+  try {
+    const data = await $fetch<CommandResponse>('/api/command', { method: 'POST', body: { command: `SCAN_START:${index}`, vfo: vfo ?? activeVfo.value } })
+    if (data.state) applyState(data.state)
+  } catch (e: any) {
+    lastError.value = e.message
+  } finally {
+    scanBusy.value = false
+  }
+}
+
+// Stop the active scan (SCAN_STOP).
+async function stopScan() {
+  if (scanBusy.value) return
+  scanBusy.value = true
+  try {
+    const data = await $fetch<CommandResponse>('/api/command', { method: 'POST', body: { command: 'SCAN_STOP' } })
+    if (data.state) applyState(data.state)
+  } catch (e: any) {
+    lastError.value = e.message
+  } finally {
+    scanBusy.value = false
   }
 }
 
@@ -3262,6 +3450,9 @@ function sqlTypeLabel(type: number | null): string {
 
 /** Zone badge: name plus 1-based channel scroll position within the zone. */
 function zoneBadgeValue(vfo: '0' | '1'): string {
+  // During a scan the channel can cross zones, so the zone field just reads "Scanning"
+  // the whole time (even while locked on a channel).
+  if (state.value.scanActive && state.value.scanVfo === vfo) return 'Scanning'
   if (!isMemoryLikeVfoMode(vfoMemoryMode(vfo))) return 'Direct Frequency'
   const zone = vfo === '0' ? state.value.mainZone : state.value.subZone
   const position = vfo === '0' ? state.value.mainZonePosition : state.value.subZonePosition
@@ -7056,10 +7247,28 @@ const recordingTailSkipLabel = computed(() => {
   return seconds === 0 ? 'Off' : `${seconds.toFixed(seconds % 1 === 0 ? 0 : 2)}s`
 })
 
+// Derive the timeline lane from the clip's CHANNEL NAME, not its stored laneKey: the
+// stored key is `mem:<number>`, and during a scan the radio reports an unreliable
+// number (the same number for different channels), so old/scan clips collided onto one
+// mislabeled line. The name is reliable, so group + label by it (works for existing
+// recordings too, regardless of what was stored at record time).
+function clipLaneKey(clip: RecordingClip): string {
+  if (clip.memoryTag) return `tag:${clip.memoryTag.toLowerCase()}`
+  if (clip.memoryChannel) return `mem:${clip.memoryChannel}`
+  return `${clip.side}:${clip.freq ?? 'unknown'}:${clip.mode ?? 'unknown'}`
+}
+function clipLaneLabel(clip: RecordingClip): string {
+  if (clip.memoryTag) return clip.memoryTag
+  if (clip.memoryChannel) return `MEM ${clip.memoryChannel}`
+  const mhz = typeof clip.freq === 'number' ? (clip.freq / 1_000_000).toFixed(3) : null
+  return [clip.side.toUpperCase(), mhz, clip.mode].filter(Boolean).join(' ') || 'Unknown'
+}
+
 const recordingChannelOptions = computed<RecordingLane[]>(() => {
   const lanes = new Map<string, RecordingLane>()
   for (const clip of recordings.value) {
-    if (!lanes.has(clip.laneKey)) lanes.set(clip.laneKey, { key: clip.laneKey, label: clip.laneLabel, clips: [] })
+    const key = clipLaneKey(clip)
+    if (!lanes.has(key)) lanes.set(key, { key, label: clipLaneLabel(clip), clips: [] })
   }
   return [...lanes.values()].sort((a, b) => a.label.localeCompare(b.label))
 })
@@ -7072,16 +7281,17 @@ const filteredRecordingClips = computed(() => {
     const clipEnd = clip.endedAt ?? Date.now()
     if (clip.startedAt > to || clipEnd < from) return false
     if (minDurationMs > 0 && recordingClipDurationMs(clip) < minDurationMs) return false
-    return recordingChannelFilter.value === 'all' || clip.laneKey === recordingChannelFilter.value
+    return recordingChannelFilter.value === 'all' || clipLaneKey(clip) === recordingChannelFilter.value
   })
 })
 
 const recordingLanes = computed<RecordingLane[]>(() => {
   const lanes = new Map<string, RecordingLane>()
   for (const clip of filteredRecordingClips.value) {
-    const lane = lanes.get(clip.laneKey) ?? { key: clip.laneKey, label: clip.laneLabel, clips: [] }
+    const key = clipLaneKey(clip)
+    const lane = lanes.get(key) ?? { key, label: clipLaneLabel(clip), clips: [] }
     lane.clips.push(clip)
-    lanes.set(clip.laneKey, lane)
+    lanes.set(key, lane)
   }
   return [...lanes.values()].sort((a, b) => a.label.localeCompare(b.label))
 })
@@ -7102,7 +7312,7 @@ const recordingPlaybackStatus = computed(() => {
   const clip = recordingPlaybackClip.value
   const time = formatRecordingDateTime(recordingPlayheadTime.value)
   if (recordingPlaybackLoading.value) return 'Loading...'
-  if (recordingPlaybackPlaying.value && clip) return `Playing ${clip.laneLabel} @ ${time}`
+  if (recordingPlaybackPlaying.value && clip) return `Playing ${clipLaneLabel(clip)} @ ${time}`
   return `Cursor ${time}`
 })
 
@@ -7445,7 +7655,7 @@ function recordingBlockLabel(clip: RecordingClip): string {
 
 function recordingClipTitle(clip: RecordingClip): string {
   return [
-    clip.laneLabel,
+    clipLaneLabel(clip),
     clip.kind === 'tx' ? 'TX' : null,
     formatRecordingDateTime(clip.startedAt),
     formatRecordingDuration(clip.durationMs),
@@ -7763,8 +7973,11 @@ watch(selectedTransport, () => { if (!state.value.connected) void loadBtStatus()
 watch(() => state.value.connected, (connected) => {
   // The server enumerates every zone's channels during startup; just fetch the
   // ready-made map once connected.
-  if (connected) void loadZones()
-  else { zoneList.value = []; expandedZoneIndex.value = null }
+  if (connected) { void loadZones(); void loadScanLists() }
+  else {
+    zoneList.value = []; closeChannelPicker()
+    scanLists.value = []; closeScanPopup()
+  }
 })
 
 watch(audioListening, () => {
@@ -8915,6 +9128,15 @@ body {
 }
 .vfo-step-row .zone-control {
   margin-left: 0;
+}
+/* The single "Browse" control sizes to its content rather than taking a full third. */
+.vfo-step-row .browse-control {
+  flex: 0 1 auto;
+}
+.vfo-step-row .browse-control .channel-step-btn {
+  flex: 0 0 auto;
+  padding-left: 14px;
+  padding-right: 14px;
 }
 .channel-step-btn {
   display: inline-flex;
@@ -10748,4 +10970,37 @@ button.recordings-lane-label:hover {
   background: var(--surface, #0d1117);
   border-top: 1px solid var(--border);
 }
+
+/* ── Scan ── the Scan button lives in each card's channel-settings row; while the
+   radio is scanning that side it pulses green. */
+.scan-ctl--scanning {
+  border-color: rgba(16, 185, 129, .65) !important;
+  animation: scanPulse 1.4s ease-in-out infinite;
+}
+@keyframes scanPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(16, 185, 129, .45); }
+  50%      { box-shadow: 0 0 0 4px rgba(16, 185, 129, 0); }
+}
+/* Scan-group picker modal. */
+.scan-modal { padding-bottom: 6px; }
+.scan-modal-body { display: flex; flex-direction: column; gap: 12px; padding: 10px 16px 16px; }
+.scan-modal-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.scan-modal-hint { font-size: 12px; color: var(--text-muted, #8b949e); }
+.scan-modal-list { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; padding: 2px; }
+.scan-group { display: flex; flex-direction: column; }
+.scan-group-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 8px;
+  background: var(--surface2, #161b22); border: 1px solid var(--border);
+}
+.scan-group-row--sel { border-color: rgba(88, 166, 255, .5); }
+.scan-group-main {
+  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;
+  padding: 0; background: transparent; border: 0; color: inherit; font: inherit;
+  text-align: left; cursor: pointer;
+}
+.scan-group-go { flex: 0 0 auto; }
+.scan-group-channels { padding: 6px 4px 8px 8px; }
+/* Scan members are read-only (no per-channel jump like zones), so dim the cursor. */
+.ch-badge--static { cursor: default; }
 </style>

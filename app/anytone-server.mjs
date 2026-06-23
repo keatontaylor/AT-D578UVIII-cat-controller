@@ -552,6 +552,55 @@ function parseZoneMembers(frame) {
   return { name, members }
 }
 
+// Native scan-list directory (04 4b). Request: `04 4b <listIndex 0-based> 02 03 00`.
+// The response uses the SAME on-wire layout as the 04 4a zone directory — 16-byte
+// ASCII list name at offset 17, then LE16 global channel indices from offset 34
+// terminated by 0xffff. Confirmed live 2026-06-22: FAVORITES decoded to the exact
+// member set the following 04 2e name lookups resolved. Slot states observed:
+//   - real list  → full frame with a printable name
+//   - empty list → short frame (len < 36, no members section) — slot exists, unused
+//   - unused slot→ full frame whose name field is all 0xff
+const SCAN_LIST_BROWSE_MAX = 50   // D578UV scan-list ceiling; we sweep until the empty run
+const SCAN_LIST_EMPTY_RUN = 4     // stop after this many consecutive unused slots
+function scanListBrowseFrame(listIndex) {
+  return Buffer.from([0x04, 0x4b, listIndex & 0xff, 0x02, 0x03, 0x00])
+}
+function parseScanList(frame) {
+  if (!frame || frame.length < 4 || frame[0] !== 0x04 || frame[1] !== 0x4b) return null
+  if (frame.length < 36) return { name: '', members: [] }   // defined-but-empty slot
+  if (frame[17] === 0xff) return null                        // unused slot (0xff name)
+  const name = cleanFixedString(Buffer.from(frame.subarray(17, 33)))
+  const members = []
+  for (let i = 34; i + 1 < frame.length; i += 2) {
+    const v = frame[i] | (frame[i + 1] << 8)
+    if (v === 0xffff) break
+    members.push({ position: members.length, channelIndex: v, channelNumber: v + 1 })
+  }
+  return { name, members }
+}
+
+// Scan control frames, reconstructed from a BT-01 capture (2026-06-22).
+//   SELECT a list:  `2f 2b <listIndex> <20-byte ctx tail>`  (23 B) — listIndex is the
+//                   same 0-based value the 04 4b directory uses (capture: 08 = FAVORITES).
+//   START / STOP:   `57 48 <01|00> 00 00 <20-byte ctx tail> <100-byte working buffer>`
+//                   (145 B) — byte 2 is the on/off flag (capture started with 01). The
+//                   working-buffer pointers are the radio's own state; we replay the
+//                   captured block (a frame the radio already accepted) and let the
+//                   preceding 2f 2b select redirect which list scans.
+// The 20-byte ctx tail is the standard radio-context block appended to many writes
+// (identical to the 08 19 side-select tail). NOT yet field-validated end to end —
+// the green RX LED on the radio is the only success signal over BT.
+const SCAN_CTX_TAIL = Buffer.from('881f00207102000851060008450400084d060008', 'hex')
+const SCAN_START_FRAME = Buffer.from('5748010000881f00207102000851060008450400084d06000859030008e10c000800000000000000000000000000000000870b00080d04000800000000d5090008f90b00088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b0200088b020008', 'hex')
+function scanSelectFrame(listIndex) {
+  return Buffer.concat([Buffer.from([0x2f, 0x2b, listIndex & 0xff]), SCAN_CTX_TAIL])
+}
+function scanStartFrame(on) {
+  const f = Buffer.from(SCAN_START_FRAME)
+  f[2] = on ? 0x01 : 0x00
+  return f
+}
+
 const COM_MODE = Buffer.from([0x01, ...Buffer.from('D578UV COM MODE', 'ascii')])
 const COM_CHECK_END = Buffer.from([0x64, ...Buffer.from('COM CHECK END', 'ascii')])
 
@@ -784,6 +833,16 @@ const READ_ZONE_A = Buffer.from('042907000000', 'hex')
 const READ_ZONE_B = Buffer.from('042a07000000', 'hex')
 const READ_CHANNEL_A = Buffer.from('042c07000000', 'hex')
 const READ_CHANNEL_B = Buffer.from('042d07000000', 'hex')
+// Scan-follow reads. During a native scan the BT-01 head reads the scanned channel
+// with `04 2c/2d 01 00 00 00` (capture 2026-06-22 — byte2 is 01, not the 07 of the
+// base READ_CHANNEL_*). It does this NOT on a timer but in response to the radio's
+// `5a 00 00 08` scan-moved status frame; we mirror that, throttled, in dispatch.
+const SCAN_POLL_A = Buffer.from('042c01000000', 'hex')
+const SCAN_POLL_B = Buffer.from('042d01000000', 'hex')
+// On a squelch-open during a scan, wait this long before reading the channel: only if
+// the squelch is STILL open then has the scan actually locked (vs. briefly grazing a
+// channel). This is the "hang ~1s for the squelch to settle, only read if it locks".
+const SCAN_LOCK_CONFIRM_MS = 1000
 // Active-zone directory (follows the selected side): the member channel list of
 // whatever zone is active on the selected side. See parseZoneMembers.
 const READ_ZONE_DIR = Buffer.from('044a07000000', 'hex')
@@ -872,6 +931,17 @@ class AnyToneBackend extends EventEmitter {
     this.zoneChannelsCache = null
     this.zoneEnumVersion = 0
     this.zoneEnumInProgress = false
+    // The radio's native scan lists (04 4b directory → 04 2e names). Same lifecycle
+    // as zoneChannelsCache: built at connect, survives an SPP auto-reconnect, dropped
+    // on full disconnect. `version` bumps when it changes so the UI re-fetches.
+    this.scanListCache = null
+    this.scanEnumVersion = 0
+    this.scanEnumInProgress = false
+    this.scanActiveIndex = null     // last scan list started via SCAN_START (optimistic)
+    this.scanSide = 'A'             // side the scan runs on (for the UI scan badge)
+    this.scanRxWasOpen = false      // squelch-open edge tracker for the lock read
+    this.scanLockTimer = null       // pending confirm-lock timer
+    this.scanLockRead = false       // already read the current lock (one read per lock)
     this.lastValidFrameAt = null
     this.keepaliveTimer = null
     this.busy = Promise.resolve()
@@ -920,7 +990,16 @@ class AnyToneBackend extends EventEmitter {
   }
 
   getState() {
-    return anytoneToState(this.state)
+    const s = anytoneToState(this.state)
+    // Native-scan UI fields (held on the backend instance, not this.state): the card
+    // shows "Scanning · <group>" + a "Scanning" zone while active, and the real channel
+    // name only while locked. scanVfo is the side the scan runs on ('0' MAIN / '1' SUB).
+    const active = this.scanActiveIndex != null
+    s.scanActive = active
+    s.scanGroup = active ? (this.scanListCache?.find(l => l.index === this.scanActiveIndex)?.name ?? null) : null
+    s.scanVfo = active ? (this.scanSide === 'B' ? '1' : '0') : null
+    s.scanLocked = active && this.scanLockRead
+    return s
   }
 
   // Bring the radio's BT link to a ready state, fully automatic over BlueZ D-Bus:
@@ -1041,6 +1120,7 @@ class AnyToneBackend extends EventEmitter {
     this.rxBuffer = Buffer.alloc(0)
     // Full teardown (not an auto-reconnect): drop the codeplug zone/channel cache.
     this.zoneChannelsCache = null
+    this.scanListCache = null
     this.clearPending('disconnect')
     const wasBt = this.transport.id === 'bt' || !!this.rfcomm
     if (this.rfcomm && !this.rfcomm.killed) this.rfcomm.kill('SIGTERM')
@@ -1163,6 +1243,11 @@ class AnyToneBackend extends EventEmitter {
       // auto-reconnect keeps the static codeplug cache). Best-effort.
       if (!this.zoneChannelsCache) {
         await this.enumerateAllZonesInline().catch(err => this.log(`startup zone enumeration: ${err?.message ?? err}`))
+      }
+      // Then the native scan lists (04 4b), reusing the zone names just cached. Same
+      // quiet-link rationale; survives an auto-reconnect via the cache guard.
+      if (!this.scanListCache) {
+        await this.enumerateAllScanListsInline().catch(err => this.log(`startup scan-list enumeration: ${err?.message ?? err}`))
       }
       // Enable the radio's unsolicited 5a/5b/5e push stream (BT only). Sent LAST so
       // its echo can't bleed into the clean 04 05 read. The pushes are ACKed in
@@ -1351,6 +1436,18 @@ class AnyToneBackend extends EventEmitter {
     // and corrupting the per-side smeter mapping.
     const liveStatus = decoded.type === 'signal' || decoded.type === 'rx-status' || decoded.type === 'async-status'
     if (matched || liveStatus) applyDecoded(this.state, decoded, now)
+    // Scan-follow: read the channel ONLY on a confirmed lock — never on every hop —
+    // so the audio-shared BT link stays quiet during free scanning. When the squelch/
+    // RX gate opens, arm a ~1s timer; if it is STILL open then, the scan actually
+    // locked on a channel → read once. A transient open that closes first reads
+    // nothing, and a sustained lock reads once and then stays quiet until the channel
+    // goes idle (squelch closes) and locks again.
+    if (this.scanActiveIndex != null) {
+      const rxOpen = !!(this.state.signal?.squelchOpen || this.state.signal?.dmrRxOpen)
+      if (rxOpen && !this.scanRxWasOpen) this.armScanLockRead()
+      else if (!rxOpen && this.scanRxWasOpen) { this.cancelScanLockRead(); this.scanLockRead = false }
+      this.scanRxWasOpen = rxOpen
+    }
     // Feed any raw-capture taps (the /raw/query, /raw/send experimental reads).
     for (const tap of this.frameTaps) tap.frames.push(frame)
     if (matched) { clearTimeout(matched.timer); matched.resolve({ frame, decoded }) }
@@ -1451,6 +1548,7 @@ class AnyToneBackend extends EventEmitter {
   // re-read the settings/zone blocks — the head doesn't, and settings are confirmed
   // at write time by their ACK (the 04 05 read here used to race + clobber).
   async selectSide(side) {
+    this.clearScanFollow()
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
       await this.selectSideInTransaction(side)
@@ -1487,6 +1585,7 @@ class AnyToneBackend extends EventEmitter {
   // so we re-read this side's zone + channel inline and emit, giving an immediate
   // event-driven UI update with no polling.
   async selectZone(zoneIndex) {
+    this.clearScanFollow()
     const side = this.state.selectedSide === 'B' ? 'B' : 'A'
     const idx = Math.max(0, Number(zoneIndex) | 0)
     const reads = side === 'B' ? [READ_ZONE_B, READ_CHANNEL_B] : [READ_ZONE_A, READ_CHANNEL_A]
@@ -1512,6 +1611,7 @@ class AnyToneBackend extends EventEmitter {
   // Zone +/- buttons act on their own side (mirrors stepChannel). The host owns
   // all wrap math because 08 39 does not safely wrap out-of-range indices.
   async stepZone(direction, targetSide = null) {
+    this.clearScanFollow()
     const side = targetSide === 'B' ? 'B' : targetSide === 'A' ? 'A' : (this.state.selectedSide === 'B' ? 'B' : 'A')
     if (this.state.selectedSide !== side) await this.selectSide(side)
     const sideState = this.state.sides?.[side]
@@ -1561,6 +1661,7 @@ class AnyToneBackend extends EventEmitter {
   // state without a follow-up poll. If a target side is supplied, select it first
   // inside the same transaction because the selector only commits on the active side.
   async stepChannel(direction, targetSide = null) {
+    this.clearScanFollow()
     const side = targetSide === 'B' ? 'B' : targetSide === 'A' ? 'A' : (this.state.selectedSide === 'B' ? 'B' : 'A')
     const cur = this.state.sides?.[side]?.channelPosition
     if (cur == null) throw new Error('current channel position unknown — read state before stepping')
@@ -1595,6 +1696,7 @@ class AnyToneBackend extends EventEmitter {
   // the authoritative target); direction is derived from the current position so
   // the radio's up/down wrap behaviour stays consistent with stepChannel.
   async selectChannel(targetIndex, targetSide = null) {
+    this.clearScanFollow()
     const side = targetSide || this.state.selectedSide || 'A'
     const idx = Math.max(0, Number(targetIndex) | 0)
     const cur = this.state.sides?.[side]?.channelPosition ?? 0
@@ -1617,6 +1719,7 @@ class AnyToneBackend extends EventEmitter {
   // "click a channel" path). Switches the side active if needed, selects the zone
   // (08 39), then the channel (04 2c/2d). One user action → zone + channel.
   async selectZoneChannel(zoneIndex, position, targetSide = null) {
+    this.clearScanFollow()
     const side = targetSide === 'B' ? 'B' : targetSide === 'A' ? 'A' : (this.state.selectedSide === 'B' ? 'B' : 'A')
     if (this.state.selectedSide !== side) await this.selectSide(side)
     await this.selectZone(zoneIndex)
@@ -1708,6 +1811,157 @@ class AnyToneBackend extends EventEmitter {
     }
     this.emitState()
     return this.zoneChannelsCache ?? []
+  }
+
+  // Enumerate the radio's native scan lists into scanListCache — pure reads, like the
+  // zone enumeration. For each list index 1..MAX: 04 4b reads the name + member channel
+  // indices; member names resolve from the zone cache (same global-index space) with a
+  // 04 2e fallback for any channel not in a zone. Empty/unused slots are skipped; the
+  // sweep stops after SCAN_LIST_EMPTY_RUN consecutive unused slots. NOT enqueued — runs
+  // inside runStartup's enqueue block (and inside enumerateAllScanLists' wrapper).
+  async enumerateAllScanListsInline() {
+    // channelNumber→name lookup from the zone cache so we reuse names already read.
+    const nameByNumber = new Map()
+    for (const z of (this.zoneChannelsCache ?? [])) {
+      for (const ch of z.channels) if (!nameByNumber.has(ch.channelNumber)) nameByNumber.set(ch.channelNumber, ch.name)
+    }
+    const lists = []
+    let emptyRun = 0
+    // Scan lists are 0-indexed: index 0 is a real list (the first one). Sweeping from 1
+    // dropped it. The index doubles as the 2f 2b select / SCAN_START value.
+    for (let i = 0; i <= SCAN_LIST_BROWSE_MAX; i += 1) {
+      if (!this.port?.isOpen) break
+      const r = await this.sendCommand(scanListBrowseFrame(i), { match: matchHead(0x04, 0x4b), timeoutMs: 700, label: `scan list ${i}` }).catch(() => null)
+      const parsed = r ? parseScanList(r.frame) : null
+      if (!parsed) {                       // unused slot (0xff name) or no response
+        emptyRun += 1
+        if (emptyRun >= SCAN_LIST_EMPTY_RUN) break
+        continue
+      }
+      emptyRun = 0
+      if (!parsed.name && parsed.members.length === 0) continue   // defined-but-empty, skip
+      const channels = []
+      for (const m of parsed.members) {
+        let name = nameByNumber.get(m.channelNumber)
+        if (name == null) {
+          const nr = await this.sendCommand(channelNameBrowseFrame(m.channelIndex), { match: matchHead(0x04, 0x2e), timeoutMs: 700, label: `ch name ${m.channelIndex}` }).catch(() => null)
+          name = (nr ? parseChannelBrowseName(nr.frame) : null) || `MEM ${String(m.channelNumber).padStart(5, '0')}`
+          nameByNumber.set(m.channelNumber, name)
+          await delay(10)
+        }
+        channels.push({ position: m.position, channelNumber: m.channelNumber, channelIndex: m.channelIndex, name })
+      }
+      lists.push({ index: i, name: parsed.name || `LIST ${i}`, channels })
+      await delay(10)
+    }
+    this.scanListCache = lists
+    this.scanEnumVersion += 1
+    this.log(`enumerated ${lists.length} scan lists (04 4b)`)
+  }
+
+  // Enqueued wrapper for a post-connect refresh (the Scan pane "Refresh" button).
+  async enumerateAllScanLists({ force = false } = {}) {
+    if (this.scanEnumInProgress) return this.scanListCache ?? []
+    if (!force && this.scanListCache) return this.scanListCache
+    this.scanEnumInProgress = true
+    try {
+      await this.enqueue(() => this.enumerateAllScanListsInline())
+    } finally {
+      this.scanEnumInProgress = false
+    }
+    this.emitState()
+    return this.scanListCache ?? []
+  }
+
+  // Start scanning a native scan list: select it (2f 2b <index>) then enable scan
+  // (57 48 01 …). Serialized via enqueue; each frame waits for its ACK (03 2f / 03 57).
+  // listIndex is the 0-based 04 4b directory index (what the UI/enumeration uses).
+  // The UI follows the scan via readLockedChannel() on a confirmed lock — see dispatch.
+  // `side` ('A'/'B') selects the side to scan first (the radio scans the active side).
+  async startScan(listIndex, side = null) {
+    if (side && side !== this.state.selectedSide) await this.selectSide(side)
+    await this.enqueue(async () => {
+      if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
+      await this.sendCommand(scanSelectFrame(listIndex), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, timeoutMs: 900, label: `scan select ${listIndex}` })
+      await delay(60)
+      await this.sendCommand(scanStartFrame(true), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x57, timeoutMs: 900, label: 'scan start' })
+    })
+    this.scanActiveIndex = listIndex
+    this.scanSide = this.state.selectedSide === 'B' ? 'B' : 'A'
+    this.scanRxWasOpen = false
+    this.scanLockRead = false
+    this.emitState()
+    return this.getState()
+  }
+
+  // Read the locked channel (04 2c/2d 01 — byte2 01, the head's scan-read frame) on
+  // the scan side, THEN flip scanLocked. Order matters: flipping first would make the
+  // card fall through to the channelName still in state (the PREVIOUS channel) for the
+  // ~150ms until the read lands — the visible name blip. By reading first and only
+  // flipping after the response applies, the card swaps straight to the right name.
+  // One read per lock (guarded by scanLockRead). Fire-and-forget; never blocks dispatch.
+  readLockedChannel() {
+    if (this.scanActiveIndex == null || !this.port?.isOpen) return
+    const side = this.scanSide === 'B' ? 'B' : 'A'
+    const frame = side === 'B' ? SCAN_POLL_B : SCAN_POLL_A
+    this.enqueue(async () => {
+      if (this.scanActiveIndex == null || !this.port?.isOpen || this.scanLockRead) return
+      await this.sendCommand(frame, { match: matchChannel(side), timeoutMs: 600, label: `scan lock read ${side}` }).catch(() => {})
+      if (this.scanActiveIndex != null && !this.scanLockRead) { this.scanLockRead = true; this.emitState() }
+    }).catch(() => {})
+  }
+
+  // Armed on the squelch-open edge during a scan. Reads once, but ONLY if the squelch
+  // is still open after SCAN_LOCK_CONFIRM_MS (the scan actually locked, not a brief
+  // graze). scanLockRead then suppresses further reads for this lock until the squelch
+  // closes (cleared in dispatch), so a long dwell reads exactly once.
+  armScanLockRead() {
+    if (this.scanLockTimer || this.scanLockRead) return
+    this.scanLockTimer = setTimeout(() => {
+      this.scanLockTimer = null
+      const stillOpen = !!(this.state.signal?.squelchOpen || this.state.signal?.dmrRxOpen)
+      if (stillOpen && this.scanActiveIndex != null && !this.scanLockRead) {
+        this.readLockedChannel()         // read the channel, then flip scanLocked (no blip)
+      }
+    }, SCAN_LOCK_CONFIRM_MS)
+  }
+
+  cancelScanLockRead() {
+    if (this.scanLockTimer) { clearTimeout(this.scanLockTimer); this.scanLockTimer = null }
+  }
+
+  // Stop the active scan (57 48 00 …) and re-read the restored channel on both sides.
+  // The radio returns to its pre-scan channel but does NOT push it. Crucially we read
+  // the LIVE `04 2c/2d 01` variant (SCAN_POLL_*), NOT the base `…07` read: after a
+  // scan the 07 register is stale (it holds the scan working slot and returns garbage —
+  // a different channel for both sides), while 01 holds the correctly-restored VFO. The
+  // BT-01 reads exactly `04 2d 01` here. scanActiveIndex is cleared first so the reads
+  // apply as normal reads, not scan-follow.
+  async stopScan() {
+    const side = this.scanSide === 'B' ? 'B' : 'A'
+    this.clearScanFollow()
+    await this.enqueue(async () => {
+      if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
+      await this.sendCommand(scanStartFrame(false), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x57, timeoutMs: 900, label: 'scan stop' })
+      await delay(150)
+      // Mirror the BT-01 exactly: read ONLY the scan side's live `04 2c/2d 01` register.
+      // (Reading the base `…07` register here returned a garbage channel and is the
+      // path that previously corrupted state; the non-scan side never changed.)
+      const frame = side === 'B' ? SCAN_POLL_B : SCAN_POLL_A
+      await this.sendCommand(frame, { match: matchChannel(side), timeoutMs: 700, label: `post-scan re-read ${side}` }).catch(() => {})
+    })
+    this.emitState()
+    return this.getState()
+  }
+
+  // Explicit navigation cancels the UI-tracked scan: once the user jumps to a
+  // channel/zone the radio is no longer scanning, so the dispatch trigger must stop
+  // firing scan-follow channel reads (gated on scanActiveIndex). Idempotent.
+  clearScanFollow() {
+    this.scanActiveIndex = null
+    this.scanRxWasOpen = false
+    this.scanLockRead = false
+    this.cancelScanLockRead()
   }
 
   // Write a RADIO_SETTINGS value via its 08 <subcmd> opcode. `value` is the radio's
@@ -3404,6 +3658,14 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { zones, version: backend.zoneEnumVersion })
     } catch (err) { return sendJson(res, 500, { error: err?.message ?? String(err) }) }
   }
+  // Native scan lists (04 4b directory → 04 2e names), cached at connect. `?force=1`
+  // re-enumerates (the Scan pane Refresh button). Returns { scanLists, version }.
+  if (req.method === 'GET' && (url.pathname === '/scan-lists' || url.pathname === '/anytone/scan-lists')) {
+    try {
+      if (url.searchParams.get('force') === '1') await backend.enumerateAllScanLists({ force: true })
+      return sendJson(res, 200, { scanLists: backend.scanListCache ?? [], version: backend.scanEnumVersion })
+    } catch (err) { return sendJson(res, 500, { error: err?.message ?? String(err) }) }
+  }
   // Global menu setting write (mic/speaker gain, NR, DigiMon). { key, value }
   // where value is the radio's on-screen value. Write-only on the radio side;
   // readback comes from the settings-block decode once Phase A maps the offsets.
@@ -3618,6 +3880,19 @@ async function handleRequest(req, res) {
     if (chSet) {
       const side = chSet[1] || commandSide
       const state = await backend.selectChannel(Number(chSet[2]), side)
+      return sendJson(res, 200, { response: '', state })
+    }
+    // SCAN_START:<index> / SCAN_STOP — native scan control. SELECT (2f 2b) + START
+    // (57 48) frames reconstructed from a BT-01 capture; index is the 0-based 04 4b
+    // directory index. Trigger lives in the user's hands so they can validate against
+    // the radio's green RX LED (no reliable scan flag is pushed over BT).
+    const scanStartCmd = command.match(/^SCAN_START[ _:=-]?(\d+)$/)
+    if (scanStartCmd) {
+      const state = await backend.startScan(Number(scanStartCmd[1]), commandSide)
+      return sendJson(res, 200, { response: '', state })
+    }
+    if (command === 'SCAN_STOP') {
+      const state = await backend.stopScan()
       return sendJson(res, 200, { response: '', state })
     }
     const keyMatch = command.match(/^KEY[ _:-]?(.+)$/)
