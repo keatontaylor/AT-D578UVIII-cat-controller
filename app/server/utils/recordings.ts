@@ -390,8 +390,16 @@ class RecordingsManager {
   private async handleSide(side: 'main' | 'sub', open: boolean, status: any, meter: number | null, squelch: number | null) {
     const active = this.active.get(side)
     if (active?.clip.kind === 'rx' && recordingSideChanged(active.clip, status)) {
-      this.stopActive(side)
-      return
+      // During a SCAN the channel/freq/mode change because the scan moved/locked, not
+      // because the user retuned — don't cut the clip (that broke recording during a
+      // scan entirely). Keep recording and refresh the clip's channel metadata so it
+      // ends up tagged with the channel the scan locked on.
+      if (status?.scanActive) {
+        this.refreshClipChannel(active.clip, side, status)
+      } else {
+        this.stopActive(side)
+        return
+      }
     }
     if (open) {
       if (active?.closeTimer) {
@@ -406,6 +414,23 @@ class RecordingsManager {
       if (!active && meter != null && this.ensureCaptureSubscription()) await this.startClip(side, status, meter, squelch)
     } else {
       this.deferStopClip(side)
+    }
+  }
+
+  // Update an in-flight scan clip's channel metadata to the side's current channel,
+  // so a clip that started before the scan-lock read resolved gets retagged with the
+  // channel it actually locked on. Lanes are derived from the NAME (frontend +
+  // buildClip), so keep memoryTag authoritative; the stored lane fields mirror it.
+  private refreshClipChannel(clip: RecordingClip, side: 'main' | 'sub', status: any) {
+    const prefix = side === 'main' ? 'main' : 'sub'
+    clip.freq = status?.[`${prefix}Freq`] ?? clip.freq
+    clip.mode = status?.[`${prefix}Mode`] ?? clip.mode
+    clip.vfoMode = status?.[`${prefix}VfoMode`] ?? clip.vfoMode
+    clip.memoryChannel = status?.[`${prefix}MemoryChannel`] ?? clip.memoryChannel
+    clip.memoryTag = status?.[`${prefix}MemoryTag`] ?? clip.memoryTag
+    if (clip.memoryTag) {
+      clip.laneKey = `tag:${String(clip.memoryTag).toLowerCase()}`
+      clip.laneLabel = clip.memoryTag
     }
   }
 
