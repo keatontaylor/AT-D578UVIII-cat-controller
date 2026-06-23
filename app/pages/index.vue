@@ -83,7 +83,7 @@
             'vfo-card--inactive':  state.rxMode === 'single' && state.txVfo === 0 && state.split,
             'vfo-card--rx-only':   state.rxMode === 'dual' && state.txVfo === 0,
             'vfo-card--switchable': state.rxMode === 'single' && state.txVfo === 0 && !state.split,
-            'vfo-card--selectable': state.connected && state.txVfo !== 1,
+            'vfo-card--selectable': state.connected && state.txVfo !== 1 && !scanLocked,
           }"
           @click="switchToVfoFromCard('1', $event)"
         >
@@ -99,15 +99,15 @@
             </div>
             <div class="vfo-step-row">
               <div class="channel-control">
-                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected" @click.stop="sendTxRxChannelStep('DN', '1')" title="Channel down" aria-label="Channel down">Ch −</button>
-                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected" @click.stop="sendTxRxChannelStep('UP', '1')" title="Channel up" aria-label="Channel up">Ch +</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected || scanLocked" @click.stop="sendTxRxChannelStep('DN', '1')" title="Channel down" aria-label="Channel down">Ch −</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected || scanLocked" @click.stop="sendTxRxChannelStep('UP', '1')" title="Channel up" aria-label="Channel up">Ch +</button>
               </div>
               <div class="channel-control zone-control">
-                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_DN', '1')" title="Zone down" aria-label="Zone down">Zone −</button>
-                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_UP', '1')" title="Zone up" aria-label="Zone up">Zone +</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected || scanLocked" @click.stop="sendZoneStep('ZONE_DN', '1')" title="Zone down" aria-label="Zone down">Zone −</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected || scanLocked" @click.stop="sendZoneStep('ZONE_UP', '1')" title="Zone up" aria-label="Zone up">Zone +</button>
               </div>
               <div class="channel-control browse-control">
-                <button class="channel-step-btn channel-step-btn--label browse-btn" :disabled="!state.connected" @click.stop="openChannelPicker('1')" title="Go to a channel in a zone" aria-label="Go to channel">Go to</button>
+                <button class="channel-step-btn channel-step-btn--label browse-btn" :disabled="!state.connected || scanLocked" @click.stop="openChannelPicker('1')" title="Go to a channel in a zone" aria-label="Go to channel">Go to</button>
               </div>
             </div>
           </div>
@@ -173,7 +173,7 @@
           <LevelBar v-if="(state.sqlRfMode===0)||((state.sqlRfMode===2)&&isRfGainMode(state.subMode))" :value="state.rfGainSub" label="RF GAIN" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
           <LevelBar v-if="(state.sqlRfMode===1)||((state.sqlRfMode===2)&&(!isRfGainMode(state.subMode)))" :value="state.sqSub" label="SQUELCH" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
           <!-- Per-channel settings (2f writes) for SUB/B — editing selects this side first. -->
-          <section v-if="state.connected && state.subChannelSettings.length" class="status-section channel-settings">
+          <section v-if="state.connected && state.subChannelSettings.length" class="status-section channel-settings" :class="{ 'controls-locked': scanLocked }">
             <div
               class="ctl-box scan-ctl"
               :class="{ 'scan-ctl--scanning': isScanningVfo('1') }"
@@ -218,7 +218,7 @@
             'vfo-card--inactive':  state.rxMode === 'single' && state.txVfo === 1 && state.split,
             'vfo-card--rx-only':   state.rxMode === 'dual' && state.txVfo === 1,
             'vfo-card--switchable': state.rxMode === 'single' && state.txVfo === 1 && !state.split,
-            'vfo-card--selectable': state.connected && state.txVfo !== 0,
+            'vfo-card--selectable': state.connected && state.txVfo !== 0 && !scanLocked,
           }"
           @click="switchToVfoFromCard('0', $event)"
         >
@@ -234,15 +234,15 @@
             </div>
             <div class="vfo-step-row">
               <div class="channel-control">
-                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected" @click.stop="sendTxRxChannelStep('DN', '0')" title="Channel down" aria-label="Channel down">Ch −</button>
-                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected" @click.stop="sendTxRxChannelStep('UP', '0')" title="Channel up" aria-label="Channel up">Ch +</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected || scanLocked" @click.stop="sendTxRxChannelStep('DN', '0')" title="Channel down" aria-label="Channel down">Ch −</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="channelStepBusy || !state.connected || scanLocked" @click.stop="sendTxRxChannelStep('UP', '0')" title="Channel up" aria-label="Channel up">Ch +</button>
               </div>
               <div class="channel-control zone-control">
-                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_DN', '0')" title="Zone down" aria-label="Zone down">Zone −</button>
-                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected" @click.stop="sendZoneStep('ZONE_UP', '0')" title="Zone up" aria-label="Zone up">Zone +</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected || scanLocked" @click.stop="sendZoneStep('ZONE_DN', '0')" title="Zone down" aria-label="Zone down">Zone −</button>
+                <button class="channel-step-btn channel-step-btn--label" :disabled="zoneStepBusy || !state.connected || scanLocked" @click.stop="sendZoneStep('ZONE_UP', '0')" title="Zone up" aria-label="Zone up">Zone +</button>
               </div>
               <div class="channel-control browse-control">
-                <button class="channel-step-btn channel-step-btn--label browse-btn" :disabled="!state.connected" @click.stop="openChannelPicker('0')" title="Go to a channel in a zone" aria-label="Go to channel">Go to</button>
+                <button class="channel-step-btn channel-step-btn--label browse-btn" :disabled="!state.connected || scanLocked" @click.stop="openChannelPicker('0')" title="Go to a channel in a zone" aria-label="Go to channel">Go to</button>
               </div>
             </div>
           </div>
@@ -308,7 +308,7 @@
           <LevelBar v-if="(state.sqlRfMode===0)||((state.sqlRfMode===2)&&isRfGainMode(state.mainMode))" :value="state.rfGainMain" label="RF GAIN" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
           <LevelBar v-if="(state.sqlRfMode===1)||((state.sqlRfMode===2)&&(!isRfGainMode(state.mainMode)))" :value="state.sqMain" label="SQUELCH" color="linear-gradient(90deg,#f59e0b,#fcd34d)" />
           <!-- Per-channel settings (2f writes) for MAIN/A — editing selects this side first. -->
-          <section v-if="state.connected && state.mainChannelSettings.length" class="status-section channel-settings">
+          <section v-if="state.connected && state.mainChannelSettings.length" class="status-section channel-settings" :class="{ 'controls-locked': scanLocked }">
             <div
               class="ctl-box scan-ctl"
               :class="{ 'scan-ctl--scanning': isScanningVfo('0') }"
@@ -356,7 +356,7 @@
         <!-- One uniform grid of badge-boxes. Writable settings are click-to-edit
              boxes (popup editor → 08 write); read-only ones (Fan/GPS) are plain
              badges. All driven by the backend RADIO_SETTINGS projection. -->
-        <div class="status-section">
+        <div class="status-section" :class="{ 'controls-locked': scanLocked }">
           <template v-if="state.connected">
             <template v-for="s in state.settings" :key="s.key">
               <div
@@ -2912,6 +2912,7 @@ async function stepRadioMemoryForVfo(vfo: '0' | '1', direction: -1 | 1): Promise
 }
 
 async function sendTxRxChannelStep(command: 'UP' | 'DN', vfo: '0' | '1' = activeVfo.value) {
+  if (scanLocked.value) return
   if (channelStepBusy.value) return
   channelStepBusy.value = true
   try {
@@ -2931,6 +2932,7 @@ async function sendTxRxChannelStep(command: 'UP' | 'DN', vfo: '0' | '1' = active
 }
 
 async function sendZoneStep(command: 'ZONE_UP' | 'ZONE_DN', vfo: '0' | '1' = activeVfo.value) {
+  if (scanLocked.value) return
   if (zoneStepBusy.value) return
   zoneStepBusy.value = true
   try {
@@ -3004,6 +3006,7 @@ const zonePickerVfo = ref<'0' | '1' | null>(null)   // open picker's side
 const zonePickerExpanded = ref<number | null>(null) // expanded zone in the picker
 
 function openChannelPicker(vfo: '0' | '1') {
+  if (scanLocked.value) return
   zonePickerVfo.value = vfo
   // Default to expanding the side's current zone so its channels are visible first.
   const activeZone = zoneList.value.find(z => z.name === (vfo === '0' ? state.value.mainZone : state.value.subZone))
@@ -3035,6 +3038,11 @@ const scanPopupSelected = ref<number | null>(null)   // expanded group in the pi
 function isScanningVfo(vfo: '0' | '1'): boolean {
   return state.value.scanActive && state.value.scanVfo === vfo
 }
+
+// While the radio is scanning it locks out EVERYTHING except PTT (and our Stop): no
+// channel/zone change, no side swap (kills the scan), no settings, no menu. Mirror
+// that — actions guard on this, and the controls are visually disabled.
+const scanLocked = computed(() => state.value.scanActive)
 
 async function loadScanLists(force = false) {
   if (scanBusy.value) return
@@ -3119,6 +3127,7 @@ function settingListFor(side: 'A' | 'B' | null): SettingItem[] {
 const settingPopupItem = computed<SettingItem | null>(() => settingListFor(settingPopupSide.value).find(s => s.key === settingPopup.value) ?? null)
 
 function openSettingPopup(key: string, side: 'A' | 'B' | null = null) {
+  if (scanLocked.value) return
   const item = settingListFor(side).find(s => s.key === key)
   if (!item || !item.writable) return
   settingPopupSide.value = side
@@ -3152,6 +3161,7 @@ async function selectSettingEnum(value: number) {
 }
 
 async function setSetting(key: string, value: number) {
+  if (scanLocked.value) return
   if (settingBusy.value) return
   settingBusy.value = key
   try {
@@ -3184,6 +3194,7 @@ const manualDialBadgeValue = computed(() => {
 })
 
 function openManualDialPopup(vfo: '0' | '1') {
+  if (scanLocked.value) return
   manualDialPopup.value = vfo
   manualDialInput.value = state.value.manualDial?.target ?? ''
   manualDialType.value = state.value.manualDial?.callType ?? 'group'
@@ -3241,6 +3252,7 @@ const tonePopupTitle = computed(() => {
 })
 
 function openTonePopup(vfo: '0' | '1', field: 'rx' | 'tx') {
+  if (scanLocked.value) return
   tonePopup.value = { vfo, field }
   const cur = vfoTone(vfo, field)
   toneDraftType.value = cur?.type ?? 'off'
@@ -3705,6 +3717,7 @@ function frequencyInputValue(hz: number | null): string {
 
 function frequencyEditBlockedReason(): string | null {
   if (!state.value.connected) return 'Connect to the radio before changing frequency'
+  if (scanLocked.value) return 'Stop the scan before changing frequency'
   if (radioTxActive.value) return 'Cannot change frequency while transmitting'
   if (state.value.pseudoScanActive) return 'Stop pseudo scan before changing frequency'
   if (state.value.radioMemoryScanActive) return 'Wait for memory scan to finish before changing frequency'
@@ -3720,6 +3733,7 @@ function frequencyEditTitle(_vfo: '0' | '1'): string {
 }
 
 function openFrequencyEditor(vfo: '0' | '1') {
+  if (scanLocked.value) return
   const blocked = frequencyEditBlockedReason()
   if (blocked) {
     lastError.value = blocked
@@ -3795,6 +3809,7 @@ function txFrequencyEditTitle(_vfo: '0' | '1'): string {
 }
 
 function openTxFrequencyEditor(vfo: '0' | '1') {
+  if (scanLocked.value) return
   const blocked = frequencyEditBlockedReason()
   if (blocked) {
     lastError.value = blocked
@@ -6752,6 +6767,7 @@ const VFO_CARD_CONTROL_SELECTOR = [
 ].join(',')
 
 function switchToVfoFromCard(vfo: '0' | '1', event: MouseEvent) {
+  if (scanLocked.value) return   // side swap kills the scan on the radio
   if (state.value.txVfo === Number(vfo)) return
 
   const target = event.target instanceof Element ? event.target : null
@@ -7746,6 +7762,7 @@ function vfoMemoryModeTitle(vfo: '0' | '1'): string {
 }
 
 async function toggleVfoMemoryMode(vfo: '0' | '1') {
+  if (scanLocked.value) return
   if (vfoMemoryModeBusy.value) return
   if (!state.value.connected) {
     lastError.value = 'Connect to the radio before changing VFO/memory mode'
@@ -11003,4 +11020,9 @@ button.recordings-lane-label:hover {
 .scan-group-channels { padding: 6px 4px 8px 8px; }
 /* Scan members are read-only (no per-channel jump like zones), so dim the cursor. */
 .ch-badge--static { cursor: default; }
+/* While scanning, the radio locks out everything but PTT (and our Stop). Dim +
+   disable the channel-settings items EXCEPT the Scan button, and the Radio Settings
+   grid. (Step/Zone/Go-to buttons use :disabled directly.) */
+.channel-settings.controls-locked > .ctl-box:not(.scan-ctl) { opacity: .4; pointer-events: none; }
+.status-section.controls-locked:not(.channel-settings) { opacity: .4; pointer-events: none; }
 </style>
