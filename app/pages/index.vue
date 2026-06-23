@@ -176,9 +176,9 @@
           <section v-if="state.connected && state.subChannelSettings.length" class="status-section channel-settings" :class="{ 'controls-locked': scanLocked }">
             <div
               class="ctl-box scan-ctl"
-              :class="{ 'scan-ctl--scanning': isScanningVfo('1') }"
+              :class="{ 'scan-ctl--scanning': isScanningVfo('1'), 'scan-ctl--disabled': scanButtonDisabled('1') }"
               role="button" tabindex="0"
-              :title="isScanningVfo('1') ? 'Stop scan' : 'Start a scan'"
+              :title="scanButtonDisabled('1') ? 'Scanning on the other side' : isScanningVfo('1') ? 'Stop scan' : 'Start a scan'"
               @click.stop="onScanButton('1')" @keydown.enter.space.prevent="onScanButton('1')"
             >
               <StatusBadge label="Scan" :value="isScanningVfo('1') ? 'Stop' : 'Start'" :active="isScanningVfo('1')" color-active="#10b981" />
@@ -311,9 +311,9 @@
           <section v-if="state.connected && state.mainChannelSettings.length" class="status-section channel-settings" :class="{ 'controls-locked': scanLocked }">
             <div
               class="ctl-box scan-ctl"
-              :class="{ 'scan-ctl--scanning': isScanningVfo('0') }"
+              :class="{ 'scan-ctl--scanning': isScanningVfo('0'), 'scan-ctl--disabled': scanButtonDisabled('0') }"
               role="button" tabindex="0"
-              :title="isScanningVfo('0') ? 'Stop scan' : 'Start a scan'"
+              :title="scanButtonDisabled('0') ? 'Scanning on the other side' : isScanningVfo('0') ? 'Stop scan' : 'Start a scan'"
               @click.stop="onScanButton('0')" @keydown.enter.space.prevent="onScanButton('0')"
             >
               <StatusBadge label="Scan" :value="isScanningVfo('0') ? 'Stop' : 'Start'" :active="isScanningVfo('0')" color-active="#10b981" />
@@ -3060,7 +3060,13 @@ async function loadScanLists(force = false) {
 // Per-side Scan button: stop if already scanning this side, else open the picker.
 function onScanButton(vfo: '0' | '1') {
   if (isScanningVfo(vfo)) void stopScan()
+  else if (scanLocked.value) return   // a scan is running on the other side — can't start another
   else openScanPopup(vfo)
+}
+// The Scan button is disabled on the side that is NOT scanning while a scan runs
+// (you can only Stop from the scanning side, and can't start a second scan).
+function scanButtonDisabled(vfo: '0' | '1'): boolean {
+  return scanLocked.value && !isScanningVfo(vfo)
 }
 
 function openScanPopup(vfo: '0' | '1') {
@@ -11024,5 +11030,8 @@ button.recordings-lane-label:hover {
    disable the channel-settings items EXCEPT the Scan button, and the Radio Settings
    grid. (Step/Zone/Go-to buttons use :disabled directly.) */
 .channel-settings.controls-locked > .ctl-box:not(.scan-ctl) { opacity: .4; pointer-events: none; }
+/* During a scan, the OTHER side's Scan button is disabled (only Stop, on the scanning
+   side, stays live). */
+.scan-ctl--disabled { opacity: .4; pointer-events: none; }
 .status-section.controls-locked:not(.channel-settings) { opacity: .4; pointer-events: none; }
 </style>
