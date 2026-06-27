@@ -4,6 +4,10 @@ Sources: jrobertfisher/AT-D578UV-software-mic, at-578uv-hex-scanner BT-01 captur
 (firmware V10036), and live probing of a test radio
 (firmware V200ET12_AQQX_V10043) over direct SPP — 2026-06-12.
 
+> This doc covers **register/payload semantics**. For the **link-layer transaction
+> discipline** (one-command-in-flight, ACK/retransmit rules, read modes, edge cases,
+> serial-core contract) see [`RADIO_LINK_CONTRACT.md`](RADIO_LINK_CONTRACT.md).
+
 ## Transport
 
 - Radio Classic BT MAC `AA:BB:CC:DD:EE:FF` (example — set yours via `ANYTONE_BT_ADDR`), SPP channel 2, HFP channel 1.

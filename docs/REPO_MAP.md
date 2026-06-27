@@ -24,6 +24,7 @@ anytone/
 │
 ├── channels.CSV / zones.CSV   # personal codeplug export (gitignored)
 ├── docs/PROTOCOL.md           # ★★ exhaustive AnyTone BT protocol RE notes (sanitized)
+├── docs/RADIO_LINK_CONTRACT.md # ★★ link-layer transaction discipline (framing, one-in-flight, ACK/retransmit, serial-core contract)
 ├── captures/                  # runtime protocol captures / async log (GITIGNORED, personal)
 └── docs/                       # public documentation
 ```

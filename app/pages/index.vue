@@ -14,9 +14,16 @@
           </option>
         </select>
 
-        <button class="btn" :class="state.connected ? 'btn-danger' : 'btn-primary'" @click="toggleConnection" :disabled="connecting">
-          {{ connecting ? '…' : state.connected ? 'Disconnect' : 'Connect' }}
+        <button class="btn" :class="state.connected ? 'btn-danger' : 'btn-primary'" @click="toggleConnection(false)" :disabled="connecting">
+          {{ connecting ? '…' : state.connected ? (state.relayMode ? 'Disconnect (Relay)' : 'Disconnect') : 'Connect' }}
         </button>
+        <button
+          v-if="!state.connected && selectedTransport === 'bt'"
+          class="btn btn-ghost"
+          @click="toggleConnection(true)"
+          :disabled="connecting"
+          title="Open the radio link but send no startup or push-acks — a genuine BT-01 over /raw/ws drives the bus (RE capture mode)"
+        >{{ connecting ? '…' : 'Connect (Relay)' }}</button>
       </div>
 
       <div v-show="state.connected" class="audio-listener" :class="{ 'audio-listener--active': audioListening, 'audio-listener--reconnecting': audioWebRtcState === 'reconnecting' }">
@@ -620,7 +627,7 @@
         <span v-if="state.firmware?.dsp">Dsp: {{ state.firmware.dsp }} · </span>
         <span v-if="state.firmware?.sdr">Sdr: {{ state.firmware.sdr }} · </span>
         <span v-if="state.firmware?.spa1">Opt: {{ state.firmware.spa1 }} · </span>
-        <span v-if="state.firmware?.fc80">Fc80: {{ state.firmware.fc80 }} · </span> Last update: {{ lastUpdateTime }}</span>
+        <span v-if="state.firmware?.fc80">Fc80: {{ state.firmware.fc80 }} · </span> Last update: {{ lastUpdateTime }}<span v-if="linkStats" class="footer-link-stats" title="Command retransmits · failed commands · push-acks slower than 500ms"> · Link: {{ linkStats }}</span></span>
     </footer>
 
     <!-- ── CTCSS tone picker modal (teleported to body) ── -->
@@ -1417,6 +1424,7 @@ interface ScanListEntry { index: number; name: string; channels: ScanChannelEntr
 
 interface TransceiverState {
   connected: boolean
+  relayMode?: boolean
   transport: string
   transportLabel: string
   transportMode: string | null
@@ -1559,11 +1567,13 @@ interface TransceiverState {
   firmware: { main: string | null, display: string | null, sdr: string | null, dsp: string | null, spa1: string | null, fc80: string | null } | null,
   antSelect: number | null
   lastUpdate: number
+  metrics?: { cmdSent: number, cmdOk: number, cmdRetransmits: number, cmdFailed: number, pushAcks: number, pushAcksSlow: number, pushAckMaxMs: number } | null
   error: string | null
 }
 
 const defaultState = (): TransceiverState => ({
   connected: false,
+  relayMode: false,
   transport: 'bt',
   transportLabel: 'Bluetooth',
   transportMode: 'EXTERNAL BT MODE',
@@ -1685,6 +1695,7 @@ const defaultState = (): TransceiverState => ({
   firmware: { main: null, display: null, sdr: null, dsp: null, spa1: null, fc80: null },
   antSelect: null,
   lastUpdate: Date.now(),
+  metrics: null,
   error: null,
 })
 
@@ -2481,6 +2492,15 @@ const lastUpdateTime = computed(() => {
   if (!state.value.connected) return '--'
   const d = new Date(state.value.lastUpdate)
   return d.toLocaleTimeString()
+})
+
+// Compact link-health summary for the footer: command retransmits (radio dropped a
+// read/write and we re-sent), failed commands (exhausted retries), and push-acks that
+// breached the ~500ms budget. See docs/RADIO_LINK_CONTRACT.md §0.
+const linkStats = computed(() => {
+  const m = state.value.metrics
+  if (!m || !state.value.connected) return null
+  return `retx ${m.cmdRetransmits} · fail ${m.cmdFailed} · slowACK ${m.pushAcksSlow}`
 })
 
 const audioLabel = computed(() => {
@@ -6408,7 +6428,7 @@ function writeRampedSilence(output: Float32Array, offset: number) {
   audioNeedsRamp = true
 }
 
-async function toggleConnection() {
+async function toggleConnection(relay = false) {
   if (state.value.connected) {
     connecting.value = true
     try {
@@ -6430,7 +6450,7 @@ async function toggleConnection() {
     try {
       const data = await $fetch<{ ok: boolean; state: TransceiverState }>('/api/connect', {
         method: 'POST',
-        body: { transport: selectedTransport.value, address: selectedRadioAddr.value },
+        body: { transport: selectedTransport.value, address: selectedRadioAddr.value, relay },
       })
       applyState(data.state)
       localStorage.setItem('anytone_target', selectedDropdown.value)

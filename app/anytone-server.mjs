@@ -124,13 +124,38 @@ const LINK_STALE_MS = Number(process.env.ANYTONE_LINK_STALE_MS) || 4000
 // kill-switch ANYTONE_PUSH_ACK=0. See docs/BT01_HEAD_BUS_PROTOCOL.md §7.
 const PUSH_ACK = !['0', 'false', 'no', 'off'].includes((process.env.ANYTONE_PUSH_ACK || '1').toLowerCase())
 const ACK_PUSH_OPS = new Set([0x58, 0x59, 0x5c, 0x5e, 0x5f])
+// Command retransmit discipline. The radio DROPS ~3% of reads under load (measured
+// on a clean relay DMR capture); the genuine BT-01 recovers by re-sending the
+// identical frame on a ~1s timeout (measured 800-1100ms band; the radio answers a
+// *received* command in <=240ms, so ~1s of silence means it was dropped). Our old
+// sendCommand rejected on first timeout — silently failing those dropped reads. We
+// now mirror the head: retry retransmit-SAFE commands (idempotent reads + absolute
+// writes; see docs/RADIO_LINK_CONTRACT.md §7-§8). Per-attempt default ~1s, capped
+// attempts then surface the error. Tunable; kill-switch ANYTONE_CMD_RETRANSMIT=0.
+const CMD_RETRANSMIT = !['0', 'false', 'no', 'off'].includes((process.env.ANYTONE_CMD_RETRANSMIT || '1').toLowerCase())
+const CMD_TIMEOUT_MS = Number(process.env.ANYTONE_CMD_TIMEOUT_MS) || 1000
+const CMD_MAX_ATTEMPTS = Math.max(1, Number(process.env.ANYTONE_CMD_ATTEMPTS) || 3)
+// Push-ACK latency budget: the radio re-sends an un-acked push every ~500ms (a
+// rock-solid universal timer, 7k+ samples). An ACK slower than this causes a
+// redundant re-send, so we count breaches as a health signal. See §6.1/§7.3.
+const ACK_LATENCY_BUDGET_MS = Number(process.env.ANYTONE_ACK_BUDGET_MS) || 500
+// Relay mode: open the radio link but inject NOTHING of our own — no startup
+// (WAKE/COM MODE/reads/enumeration/COM CHECK END) and no PUSH_ACK. A genuine BT-01
+// connected via /raw/ws drives COM MODE and sends its own push-acks through the
+// relay, so the wire log stays an uncontaminated head↔radio trace (no LOCAL frames
+// swallowing acks for commands the BT-01 never fully processed). Default OFF;
+// ANYTONE_RELAY_MODE=1 or a per-connect { relay: true } option turns it on.
+const RELAY_MODE = ['1', 'true', 'yes', 'on'].includes((process.env.ANYTONE_RELAY_MODE || '').toLowerCase())
 // Auto-reconnect the SPP control socket when it drops unexpectedly (the DMR-PTT
 // wedge: a digital call makes the radio shed SPP while HFP audio + the BT ACL stay
 // up). Re-opens ONLY the SPP socket — audio is untouched. Default ON. Settle delay
 // dodges the post-drop race that makes an immediate manual reconnect flaky.
 const AUTO_RECONNECT = !['0', 'false', 'no', 'off'].includes((process.env.ANYTONE_AUTO_RECONNECT || '1').toLowerCase())
 const AUTO_RECONNECT_SETTLE_MS = Number(process.env.ANYTONE_AUTO_RECONNECT_SETTLE_MS || 900)
-const AUTO_RECONNECT_MAX = Number(process.env.ANYTONE_AUTO_RECONNECT_MAX || 5)
+// 0 (default) = retry FOREVER. The control link should always come back on its own
+// rather than giving up and forcing a manual reconnect; the backoff caps at 4s so it
+// keeps trying indefinitely at a steady cadence. Set a positive number to bound it.
+const AUTO_RECONNECT_MAX = Number(process.env.ANYTONE_AUTO_RECONNECT_MAX) || 0
 // Streaming is the permanent BT model: COM CHECK END at startup enables the radio's
 // unsolicited 5a/5b/5e push stream, and dispatch() ACKs the 58/59/5c/5e/5f pushes
 // (PUSH_ACK) — which cured the post-TX 5e wedge the old polling model worked around.
@@ -164,6 +189,14 @@ const ASYNC_LOG_TO_FILE = !['0', 'false', 'no', 'off'].includes((process.env.ANY
 // never be committed). Override with ANYTONE_ASYNC_LOG_PATH.
 const ASYNC_LOG_PATH = process.env.ANYTONE_ASYNC_LOG_PATH
   || fileURLToPath(new URL('../captures/unsolicited.ndjson', import.meta.url))
+// Full bidirectional wire log: EVERY frame to (tx) and from (rx) the radio, in
+// causal order, in one append-only NDJSON file — unlike the async log above,
+// which only carries radio→host pushes. Fed from broadcastRaw(), the single
+// choke point both directions pass through. On by default; set
+// ANYTONE_WIRE_LOG_FILE=0 to disable, ANYTONE_WIRE_LOG_PATH to relocate.
+const WIRE_LOG_TO_FILE = !['0', 'false', 'no', 'off'].includes((process.env.ANYTONE_WIRE_LOG_FILE || '1').toLowerCase())
+const WIRE_LOG_PATH = process.env.ANYTONE_WIRE_LOG_PATH
+  || fileURLToPath(new URL('../captures/wire.ndjson', import.meta.url))
 
 const WAKE = Buffer.from([0x61])
 // Side/VFO select write command (from jrobertfisher/at-578uv-hex-scanner).
@@ -914,6 +947,18 @@ class AnyToneBackend extends EventEmitter {
     // status bus, (c) liveness. `pending` holds in-flight command waiters;
     // `lastValidFrameAt` feeds the desync watchdog from the push stream.
     this.pending = []
+    // Link-health counters (docs/RADIO_LINK_CONTRACT.md §0). Exposed at /raw/metrics
+    // so we can build our OWN production distribution of drop/retransmit rate and ACK
+    // latency rather than over-trusting the small relay-capture sample.
+    this.metrics = {
+      cmdSent: 0,            // distinct commands issued (not counting retransmits)
+      cmdOk: 0,             // commands that got a matching response
+      cmdRetransmits: 0,     // extra sends due to per-attempt timeout
+      cmdFailed: 0,          // commands that exhausted all attempts
+      pushAcks: 0,           // 58/59/5c/5e/5f push-acks emitted
+      pushAcksSlow: 0,       // push-acks whose write took > ACK_LATENCY_BUDGET_MS
+      pushAckMaxMs: 0,       // worst observed push-ack write latency
+    }
     this.frameTaps = []            // raw-capture windows for /raw/query and /raw/send
     // Raw head-bus mirror for local BT-01 relay clients:
     // registerCache snapshots the last raw 04-read response per register so the
@@ -946,6 +991,10 @@ class AnyToneBackend extends EventEmitter {
     this.keepaliveTimer = null
     this.busy = Promise.resolve()
     this.connecting = false
+    // Relay passthrough: when true, connect() opens the link but skips runStartup,
+    // and dispatch() does not emit PUSH_ACKs (the genuine BT-01 over /raw/ws owns
+    // all head→radio traffic, including COM MODE and its own push-acks).
+    this.relayMode = RELAY_MODE
     this.pttWatchdog = null
     this.pollPausedForPtt = false
     this.latestDmrContext = null
@@ -999,6 +1048,7 @@ class AnyToneBackend extends EventEmitter {
     s.scanGroup = active ? (this.scanListCache?.find(l => l.index === this.scanActiveIndex)?.name ?? null) : null
     s.scanVfo = active ? (this.scanSide === 'B' ? '1' : '0') : null
     s.scanLocked = active && this.scanLockRead
+    s.metrics = { ...this.metrics }
     return s
   }
 
@@ -1024,6 +1074,8 @@ class AnyToneBackend extends EventEmitter {
     this.setTransport(transport.id)
     // A specific paired radio may be chosen in the dropdown; target it this session.
     if (this.transport.id === 'bt' && options.address) this.btManager.setTarget(options.address)
+    // Per-connect override of relay passthrough (defaults to the env flag).
+    if (options.relay != null) this.relayMode = !!options.relay
     this.connecting = true
     this.patch({ connecting: true, error: null })
     try {
@@ -1034,7 +1086,7 @@ class AnyToneBackend extends EventEmitter {
       this.latestDmrContext = null
       this.latestDmrStatusTail = null
       await this.runStartup()
-      this.patch({ connected: true, connecting: false, error: null })
+      this.patch({ connected: true, connecting: false, error: null, relayMode: this.relayMode })
       // Clear any frame-sync watchdog state from a prior session (singleton).
       Object.assign(this.state, { linkHalted: false, linkHealthy: true, desyncStreak: 0, lastValidPollAt: null })
       // Initial full read happened in runStartup; BT is event-driven from here.
@@ -1054,13 +1106,14 @@ class AnyToneBackend extends EventEmitter {
   // dodge the post-drop race, then exponential backoff). The HFP audio + BT ACL are
   // still up, so we re-open ONLY the SPP socket.
   scheduleSppReconnect(attempt) {
-    if (attempt > AUTO_RECONNECT_MAX) {
+    if (AUTO_RECONNECT_MAX > 0 && attempt > AUTO_RECONNECT_MAX) {
       this.log(`SPP auto-reconnect gave up after ${AUTO_RECONNECT_MAX} attempts`)
       this.patch({ error: 'SPP control link dropped (DMR PTT?) and auto-reconnect failed — reconnect manually.' })
       return
     }
     const delayMs = attempt === 1 ? AUTO_RECONNECT_SETTLE_MS : Math.min(4000, AUTO_RECONNECT_SETTLE_MS * (2 ** (attempt - 1)))
-    this.log(`SPP dropped — auto-reconnect attempt ${attempt}/${AUTO_RECONNECT_MAX} in ${delayMs}ms`)
+    const maxLabel = AUTO_RECONNECT_MAX > 0 ? AUTO_RECONNECT_MAX : '∞'
+    this.log(`SPP dropped — auto-reconnect attempt ${attempt}/${maxLabel} in ${delayMs}ms`)
     setTimeout(() => { void this.attemptSppReconnect(attempt) }, delayMs)
   }
 
@@ -1224,6 +1277,13 @@ class AnyToneBackend extends EventEmitter {
   // channels, clock, status) - done once at connect. BT live RSSI/squelch are
   // push-driven after this; wired polls 04 5a because it has no push stream.
   async runStartup() {
+    // Relay passthrough: the genuine BT-01 (via /raw/ws) drives WAKE/COM MODE and
+    // every read itself. Injecting our own startup here would swallow acks and
+    // contaminate the head↔radio trace, so skip it entirely.
+    if (this.relayMode) {
+      this.log('relay mode: link open, startup suppressed — BT-01 relay drives COM MODE')
+      return
+    }
     await this.enqueue(async () => {
       for (let i = 0; i < 3; i += 1) {
         await this.sendOnly(WAKE)
@@ -1352,6 +1412,9 @@ class AnyToneBackend extends EventEmitter {
   // a client that has gone away (readyState !== OPEN) is dropped from the set so a
   // dead relay can't accumulate or wedge the radio path. Never throws.
   broadcastRaw(dir, frame) {
+    // Unconditional file sink: log both directions regardless of whether any
+    // /raw/ws relay client is attached (the radio path runs headless too).
+    appendWireLog(dir, frame, this.transport.id)
     if (!this.rawStreamClients.size) return
     const msg = JSON.stringify({ dir, hex: Buffer.from(frame).toString('hex'), ts: Date.now() })
     for (const ws of this.rawStreamClients) {
@@ -1364,6 +1427,14 @@ class AnyToneBackend extends EventEmitter {
   // it interleaves safely with backend reads/keepalive and PUSH_ACK writes. No
   // matcher: the radio's response returns asynchronously on the rx firehose.
   async injectRaw(frame) {
+    // Relay mode: the BT-01 keys the radio directly via 0x56 (byte1: 01 keydown,
+    // 00 keyup). Mirror that into pttActive so the WebRTC TX gate feeds mic audio to
+    // the HFP sink ONLY while keyed — feeding it continuously desyncs the radio's
+    // SCO TX buffer (transmits dead air). emitState pushes it to the audio session.
+    if (this.relayMode && frame?.[0] === 0x56 && frame.length > 1) {
+      const keyed = frame[1] === 0x01
+      if (this.state.pttActive !== keyed) this.patch({ pttActive: keyed })
+    }
     return this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
       await this.writeOnly(Buffer.from(frame), { allowBtAdata: true })
@@ -1417,8 +1488,18 @@ class AnyToneBackend extends EventEmitter {
     // 5a/5b. These opcodes only appear as a frame head on a bare push (read
     // responses start 0x04), so the head byte alone identifies them; 5a/5b are
     // intentionally excluded. Fire-and-forget — never block dispatch on the write.
-    if (PUSH_ACK && ACK_PUSH_OPS.has(frame[0])) {
-      this.writeOnly(Buffer.from([0x03, frame[0], 0x00, 0x00])).catch(() => {})
+    // Suppressed in relay mode: the genuine BT-01 sends its own acks through the
+    // relay, and a second LOCAL ack would contaminate the trace.
+    if (PUSH_ACK && !this.relayMode && ACK_PUSH_OPS.has(frame[0])) {
+      // The radio re-sends an un-acked push every ~500ms, so a slow ack causes a
+      // redundant re-send. Track the write latency as a health signal (§7.3).
+      this.metrics.pushAcks += 1
+      const ackStart = now
+      this.writeOnly(Buffer.from([0x03, frame[0], 0x00, 0x00])).then(() => {
+        const took = Date.now() - ackStart
+        if (took > this.metrics.pushAckMaxMs) this.metrics.pushAckMaxMs = took
+        if (took > ACK_LATENCY_BUDGET_MS) this.metrics.pushAcksSlow += 1
+      }, () => {})
     }
     // Classify: a frame matching a pending waiter is a COMMAND RESPONSE; anything
     // else is an UNSOLICITED push. Match first so we can apply state accordingly.
@@ -1435,7 +1516,12 @@ class AnyToneBackend extends EventEmitter {
     // flipping selectedSide (which the radio reports as RX auto-focuses a side)
     // and corrupting the per-side smeter mapping.
     const liveStatus = decoded.type === 'signal' || decoded.type === 'rx-status' || decoded.type === 'async-status'
-    if (matched || liveStatus) applyDecoded(this.state, decoded, now)
+    // Relay mode sends no commands, so the BT-01's own read responses (04 channel/
+    // status/mode/squelch) arrive unmatched and aren't liveStatus. Apply them anyway
+    // so backend state (modes, sqMain/sqSub, selectedSide) tracks the head — the
+    // audio RX squelch follower + UI depend on it. The selectedSide-flip concern that
+    // gates this in normal mode doesn't apply when the head is the sole operator.
+    if (matched || liveStatus || this.relayMode) applyDecoded(this.state, decoded, now)
     // Scan-follow: read the channel ONLY on a confirmed lock — never on every hop —
     // so the audio-shared BT link stays quiet during free scanning. When the squelch/
     // RX gate opens, arm a ~1s timer; if it is STILL open then, the scan actually
@@ -1456,22 +1542,58 @@ class AnyToneBackend extends EventEmitter {
     if (decoded.type === 'async-status') {
       return this.state.dmrActivity?.id !== prevDmrId || this.state.dmrActivity?.active !== prevDmrActive || this.state.dmrActivity?.talkgroup !== prevDmrTg
     }
-    return EMIT_TYPES.has(decoded.type) && (matched != null || liveStatus)
+    return EMIT_TYPES.has(decoded.type) && (matched != null || liveStatus || this.relayMode)
   }
 
-  // Write a frame and resolve when a frame matching `match(decoded, frame)`
-  // arrives, or reject on timeout (replaces the old idle-window readResponse).
-  // Call inside enqueue() so only one command is in flight; async pushes still
-  // flow through dispatch concurrently.
-  sendCommand(frame, { match, timeoutMs = 800, label, onSent } = {}) {
+  // Write a frame and resolve when a frame matching `match(decoded, frame)` arrives,
+  // or RETRANSMIT on a per-attempt timeout and finally reject when attempts run out.
+  // Call inside enqueue() so only one command is in flight; async pushes still flow
+  // through dispatch concurrently. The radio drops ~3% of reads under load, so retry
+  // is required for correctness, not an optimization (docs/RADIO_LINK_CONTRACT.md §7).
+  //
+  // `retransmitSafe` gates whether a timed-out command is re-sent. Default: reads
+  // (opcode 0x04) are idempotent → safe; everything else is unsafe unless the caller
+  // opts in (absolute writes do — see §8). A late response to attempt N arriving
+  // during attempt N+1 still matches the (single) waiter and resolves exactly once;
+  // a duplicate response after that finds no waiter and falls through as a push.
+  sendCommand(frame, { match, timeoutMs = CMD_TIMEOUT_MS, attempts, retransmitSafe, label, onSent } = {}) {
     if (!this.port?.isOpen) return Promise.reject(new Error(`${this.transport.label} link is not connected`))
+    const safe = retransmitSafe != null ? !!retransmitSafe : frame[0] === 0x04
+    const maxAttempts = (CMD_RETRANSMIT && safe) ? (Math.max(1, attempts || CMD_MAX_ATTEMPTS)) : 1
+    this.metrics.cmdSent += 1
     return new Promise((resolve, reject) => {
-      // Register the waiter BEFORE writing so a fast ACK can't race the listener.
-      const waiter = { match: match || (() => true), resolve, reject, timer: null }
+      let attempt = 0
+      let done = false
       const remove = () => { const i = this.pending.indexOf(waiter); if (i >= 0) this.pending.splice(i, 1) }
-      waiter.timer = setTimeout(() => { remove(); reject(new Error(`timeout waiting for ${label ?? hexdump(frame)}`)) }, timeoutMs)
+      const finish = (fn, arg) => { if (done) return; done = true; remove(); clearTimeout(waiter.timer); fn(arg) }
+      // Register the waiter BEFORE writing so a fast ACK can't race the listener.
+      const waiter = {
+        match: match || (() => true),
+        resolve: val => finish(v => { this.metrics.cmdOk += 1; resolve(v) }, val),
+        reject: err => finish(reject, err),
+        timer: null,
+      }
+      const onTimeout = () => {
+        if (done) return
+        if (attempt < maxAttempts) {
+          this.metrics.cmdRetransmits += 1
+          if (label) this.log(`retransmit ${label} (attempt ${attempt + 1}/${maxAttempts})`)
+          send()
+        } else {
+          this.metrics.cmdFailed += 1
+          waiter.reject(new Error(`timeout waiting for ${label ?? hexdump(frame)} after ${attempt} attempt(s)`))
+        }
+      }
+      const send = () => {
+        attempt += 1
+        waiter.timer = setTimeout(onTimeout, timeoutMs)
+        this.writeOnly(frame, { allowBtAdata: true }).then(
+          () => { if (onSent && attempt === 1) onSent() },
+          err => waiter.reject(err),
+        )
+      }
       this.pending.push(waiter)
-      this.writeOnly(frame, { allowBtAdata: true }).then(() => { if (onSent) onSent() }, err => { remove(); clearTimeout(waiter.timer); reject(err) })
+      send()
     })
   }
 
@@ -1481,9 +1603,12 @@ class AnyToneBackend extends EventEmitter {
   }
 
   // Reject any in-flight command waiters and drop capture taps (on link reset).
+  // Snapshot + clear first: waiter.reject() now splices this.pending via finish(),
+  // so iterating the live array would skip entries.
   clearPending(reason) {
-    for (const waiter of this.pending) { clearTimeout(waiter.timer); waiter.reject(new Error(`link reset: ${reason}`)) }
+    const waiters = this.pending
     this.pending = []
+    for (const waiter of waiters) { clearTimeout(waiter.timer); waiter.reject(new Error(`link reset: ${reason}`)) }
     this.frameTaps = []
     // Drop the register snapshot on link reset so the relay never serves a head's
     // startup from stale state; the backend re-reads on reconnect (runStartup).
@@ -1569,7 +1694,7 @@ class AnyToneBackend extends EventEmitter {
     const channelRead = side === 'B' ? READ_CHANNEL_B : READ_CHANNEL_A
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
-      await this.sendCommand(vfoMemoryModeFrame(!!vfoMode), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x57 && f[2] === 0x3d, timeoutMs: 900, label: `set ${side} ${vfoMode ? 'VFO' : 'memory'} mode` })
+      await this.sendCommand(vfoMemoryModeFrame(!!vfoMode), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x57 && f[2] === 0x3d, retransmitSafe: true, timeoutMs: 900, label: `set ${side} ${vfoMode ? 'VFO' : 'memory'} mode` })
       await delay(200)
       await this.sendCommand(channelRead, { match: matchChannel(side), timeoutMs: 800, label: `re-read channel ${side}` }).catch(err => this.log(`VFO/memory re-read ${side}: ${err?.message ?? err}`))
     })
@@ -1882,7 +2007,7 @@ class AnyToneBackend extends EventEmitter {
     if (side && side !== this.state.selectedSide) await this.selectSide(side)
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
-      await this.sendCommand(scanSelectFrame(listIndex), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, timeoutMs: 900, label: `scan select ${listIndex}` })
+      await this.sendCommand(scanSelectFrame(listIndex), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, retransmitSafe: true, timeoutMs: 900, label: `scan select ${listIndex}` })
       await delay(60)
       await this.sendCommand(scanStartFrame(true), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x57, timeoutMs: 900, label: 'scan start' })
     })
@@ -1988,7 +2113,7 @@ class AnyToneBackend extends EventEmitter {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
       // The 08-write family all ACK `03 08 00 00 0b`; serialized via enqueue so the
       // ACK we see belongs to this write.
-      await this.sendCommand(menuWriteFrame(spec.write, raw), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x08, timeoutMs: 800, label: `set ${key}` })
+      await this.sendCommand(menuWriteFrame(spec.write, raw), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x08, retransmitSafe: true, timeoutMs: 800, label: `set ${key}` })
     })
     // ACK received → trust it and apply optimistically.
     this.state.settings = { ...this.state.settings, [key]: raw }
@@ -2020,7 +2145,7 @@ class AnyToneBackend extends EventEmitter {
     const frame = spec.frame ? spec.frame(raw) : channelWriteFrame(spec.write, raw)
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
-      await this.sendCommand(frame, { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, timeoutMs: 800, label: `set channel ${key}` })
+      await this.sendCommand(frame, { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, retransmitSafe: true, timeoutMs: 800, label: `set channel ${key}` })
     })
     // ACK received → apply optimistically to the selected side's channel-settings map.
     const sideName = this.state.selectedSide === 'B' ? 'B' : 'A'
@@ -2048,7 +2173,7 @@ class AnyToneBackend extends EventEmitter {
     if ((side === 'A' || side === 'B') && this.state.selectedSide !== side) await this.selectSide(side)
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
-      await this.sendCommand(channelNameFrame(clean), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, timeoutMs: 800, label: 'set channel name' })
+      await this.sendCommand(channelNameFrame(clean), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, retransmitSafe: true, timeoutMs: 800, label: 'set channel name' })
     })
     const sideName = this.state.selectedSide === 'B' ? 'B' : 'A'
     const sideObj = this.state.sides?.[sideName]
@@ -2067,7 +2192,7 @@ class AnyToneBackend extends EventEmitter {
     if ((side === 'A' || side === 'B') && this.state.selectedSide !== side) await this.selectSide(side)
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
-      await this.sendCommand(receiveFrequencyFrame(freq), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, timeoutMs: 800, label: 'set RX frequency' })
+      await this.sendCommand(receiveFrequencyFrame(freq), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, retransmitSafe: true, timeoutMs: 800, label: 'set RX frequency' })
     })
     const sideName = this.state.selectedSide === 'B' ? 'B' : 'A'
     const sideObj = this.state.sides?.[sideName]
@@ -2085,7 +2210,7 @@ class AnyToneBackend extends EventEmitter {
     if ((side === 'A' || side === 'B') && this.state.selectedSide !== side) await this.selectSide(side)
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
-      await this.sendCommand(transmitFrequencyFrame(freq), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, timeoutMs: 800, label: 'set TX frequency' })
+      await this.sendCommand(transmitFrequencyFrame(freq), { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, retransmitSafe: true, timeoutMs: 800, label: 'set TX frequency' })
     })
     const sideName = this.state.selectedSide === 'B' ? 'B' : 'A'
     const sideObj = this.state.sides?.[sideName]
@@ -2123,7 +2248,7 @@ class AnyToneBackend extends EventEmitter {
     if ((side === 'A' || side === 'B') && this.state.selectedSide !== side) await this.selectSide(side)
     await this.enqueue(async () => {
       if (!this.port?.isOpen) throw new Error(`${this.transport.label} link is not connected`)
-      await this.sendCommand(frame, { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, timeoutMs: 800, label: `set ${field} tone` })
+      await this.sendCommand(frame, { match: (_d, f) => f[0] === 0x03 && f[1] === 0x2f, retransmitSafe: true, timeoutMs: 800, label: `set ${field} tone` })
     })
     // ACK received → apply optimistically to the selected side's tone fields (what
     // toneStateFor reads). No re-read: the radio commits a beat after ACK, so an
@@ -2459,6 +2584,22 @@ function appendAsyncLog(entry) {
   try {
     if (!asyncLogDirReady) { mkdirSync(dirname(ASYNC_LOG_PATH), { recursive: true }); asyncLogDirReady = true }
     appendFileSync(ASYNC_LOG_PATH, `${JSON.stringify(entry)}\n`)
+  } catch { /* ignore */ }
+}
+
+// Append-only NDJSON sink for the full bidirectional wire log. One line per
+// frame: { at, iso, dir: 'tx'|'rx', transport, len, hex }. `tail -f` it to watch
+// the live conversation with the radio. Best effort — a write failure must never
+// disrupt the serial data path.
+let wireLogDirReady = false
+function appendWireLog(dir, frame, transport) {
+  if (!WIRE_LOG_TO_FILE) return
+  try {
+    if (!wireLogDirReady) { mkdirSync(dirname(WIRE_LOG_PATH), { recursive: true }); wireLogDirReady = true }
+    const buf = Buffer.from(frame)
+    const at = Date.now()
+    const entry = { at, iso: new Date(at).toISOString(), dir, transport, len: buf.length, hex: hexdump(buf) }
+    appendFileSync(WIRE_LOG_PATH, `${JSON.stringify(entry)}\n`)
   } catch { /* ignore */ }
 }
 
@@ -3298,6 +3439,9 @@ function anytoneToState(source) {
   return {
     connected,
     connecting: !!source.connecting,
+    // Relay passthrough flag — consumed by the WebRTC TX gate + UI (the BT-01 keys
+    // the radio directly in this mode, so the /api/command TX gate never fires).
+    relayMode: !!source.relayMode,
     // BT connection-chain progress for the UI (adapter/discover/pair/trust/connect/ready).
     btStep: source.btStep ?? null,
     btStepDetail: source.btStepDetail ?? null,
@@ -3570,7 +3714,7 @@ rawWss.on('connection', ws => {
   const registers = {}
   for (const [reg, frame] of backend.registerCache) registers[reg.toString(16).padStart(2, '0')] = frame.toString('hex')
   try {
-    ws.send(JSON.stringify({ type: 'snapshot', connected: backend.state.connected, transport: backend.transport.id, registers }))
+    ws.send(JSON.stringify({ type: 'snapshot', connected: backend.state.connected, transport: backend.transport.id, relayMode: backend.relayMode, registers }))
   } catch {}
   ws.on('message', data => {
     let frame
@@ -3590,7 +3734,7 @@ rawWss.on('connection', ws => {
 
 server.listen(HTTP_PORT, HTTP_HOST, () => {
   console.log(`AnyTone Node server listening on http://${HTTP_HOST}:${HTTP_PORT}`)
-  console.log(`[anytone] transports: bt=${USE_RFCOMM_SOCKET ? 'raw RFCOMM socket' : 'rfcomm TTY'} raw, wired=${wiredSerialPath()} ADATA @ ${WIRED_BAUD_RATE} | bt=streaming+pushACK${PUSH_ACK ? '' : ' (OFF)'}, link-health informational`)
+  console.log(`[anytone] transports: bt=${USE_RFCOMM_SOCKET ? 'raw RFCOMM socket' : 'rfcomm TTY'} raw, wired=${wiredSerialPath()} ADATA @ ${WIRED_BAUD_RATE} | bt=streaming+pushACK${PUSH_ACK ? '' : ' (OFF)'}, link-health informational${RELAY_MODE ? ' | RELAY MODE (no startup, no PUSH_ACK — BT-01 drives the bus)' : ''}`)
   // Load the RadioID DMR user dump for caller lookups (non-fatal if missing).
   try {
     const st = loadRadioid()
@@ -3613,6 +3757,19 @@ async function handleRequest(req, res) {
   const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
   if (req.method === 'GET' && (url.pathname === '/status' || url.pathname === '/anytone/status')) return sendJson(res, 200, backend.getState())
   if (req.method === 'GET' && url.pathname === '/raw/status') return sendJson(res, 200, backend.getState())
+  // Link-health counters (command retransmit/drop rate, push-ack latency). Lets us
+  // build our own production distribution to confirm/tune the ~1s retry timer.
+  if (req.method === 'GET' && url.pathname === '/raw/metrics') {
+    const m = backend.metrics
+    const cmdResolved = m.cmdOk + m.cmdFailed
+    return sendJson(res, 200, {
+      ...m,
+      cmdRetransmitRate: m.cmdSent ? +(m.cmdRetransmits / m.cmdSent).toFixed(4) : 0,
+      cmdFailRate: cmdResolved ? +(m.cmdFailed / cmdResolved).toFixed(4) : 0,
+      pushAckSlowRate: m.pushAcks ? +(m.pushAcksSlow / m.pushAcks).toFixed(4) : 0,
+      config: { CMD_RETRANSMIT, CMD_TIMEOUT_MS, CMD_MAX_ATTEMPTS, ACK_LATENCY_BUDGET_MS },
+    })
+  }
   if (req.method === 'GET' && url.pathname === '/raw/registers') {
     // Snapshot of the last raw 04-read response per register, keyed by hex code
     // (e.g. "05","29","2c"). The relay seeds a head's startup from this.

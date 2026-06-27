@@ -9,6 +9,11 @@ a Raspberry Pi between a real BT-01 and a real radio and relaying/logging the SP
 > alias `CALLSGN`, TG `9990`). Real personal values live only in gitignored
 > `captures/`.
 
+> For the **link-layer transaction discipline** (one-command-in-flight, the ACK
+> exception, retransmission, read modes, edge cases, and the serial-core contract),
+> see [`RADIO_LINK_CONTRACT.md`](RADIO_LINK_CONTRACT.md). This doc is the opcode/push
+> catalogue; that one is the rules for *how* to exchange these frames safely.
+
 ## 1. Transport
 
 - The radio and the BT-01 each expose a `BRCM SPP SERVER` on **RFCOMM channel 2**.

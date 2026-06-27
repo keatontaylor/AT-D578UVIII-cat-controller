@@ -49,6 +49,11 @@ interface WebRtcSession {
   rxInputChannelCount: number
   rxOutputChannelCount: number
   rxMix: WebRtcRxMix
+  // Backend relay passthrough: when true, the BT-01 keys the radio directly (not via
+  // /api/command). Learned from the SSE state stream via the squelch follower, which
+  // also mirrors the BT-01's PTT (state.txState) into the shared TX gate.
+  relayMode: boolean
+  relayPttKeyed: boolean
 }
 
 export interface WebRtcRxMix {
@@ -153,6 +158,8 @@ export async function createWebRtcAudioSession(offer: OfferBody, config = getAud
     closeTimer: null,
     closed: false,
     squelchFollower: null,
+    relayMode: false,
+    relayPttKeyed: false,
     rxSquelchState: defaultReceiveSquelchState(),
     rxSquelchEnabled: config.squelchGate,
     rxSquelchGains: [1],
@@ -302,6 +309,8 @@ export function getWebRtcAudioSessionStatus() {
       id: session.id,
       connectionState: session.pc.connectionState,
       iceConnectionState: session.pc.iceConnectionState,
+      relayMode: session.relayMode,
+      txPttActive: txPttState.active,
       txFrames: session.txFrames,
       txBytes: session.txBytes,
       txPeak: session.txPeak,
@@ -405,7 +414,9 @@ function startTxPlayback(session: WebRtcSession, track: any) {
       try { listener(buffer) } catch {}
     }
     // PTT gate: while unkeyed, don't open or feed the sink, so BlueALSA/ffmpeg
-    // cannot carry stale buffered state into the next key-up.
+    // cannot carry stale buffered state into the next key-up. In relay mode txPttState
+    // is driven by the BT-01's own 0x56 PTT (mirrored into state.txState, applied via
+    // the squelch follower below) instead of /api/command — same gating either way.
     if (TX_PTT_GATE && !txPttState.active) {
       session.txGatedFrames = (session.txGatedFrames || 0) + 1
       return
@@ -538,11 +549,27 @@ function stopTxOutput(session: WebRtcSession) {
 
 function startRxSquelch(session: WebRtcSession) {
   // The same follower supplies txVfo for active-channel selection; squelch gating is optional.
-  const serialServerUrl = process.env.NUXT_SERIAL_SERVER_URL || 'http://127.0.0.1:3001'
+  // Must match the rest of the app (nuxt.config serialServerUrl = ANYTONE_SERVER_URL,
+  // default :3010). The old NUXT_SERIAL_SERVER_URL/:3001 default pointed at nothing, so
+  // the follower never received state — squelch defaulted open and relayMode never
+  // propagated to the TX gate.
+  const serialServerUrl = process.env.NUXT_SERIAL_SERVER_URL || process.env.ANYTONE_SERVER_URL || 'http://127.0.0.1:3010'
   session.squelchFollower = createReceiveSquelchFollower({
     serialServerUrl,
-    onUpdate: (state) => {
+    onUpdate: (state, fullState) => {
       session.rxSquelchState = state
+      const relay = !!fullState?.relayMode
+      session.relayMode = relay
+      // In relay mode the BT-01 keys the radio directly; the backend mirrors that into
+      // txState. Drive the shared TX PTT gate from it (on change only) so mic audio
+      // feeds the HFP sink only while keyed — identical to the /api/command path.
+      if (relay) {
+        const keyed = !!fullState?.txState
+        if (session.relayPttKeyed !== keyed) {
+          session.relayPttKeyed = keyed
+          setWebRtcTxPttActive(keyed)
+        }
+      }
     },
   })
 }
