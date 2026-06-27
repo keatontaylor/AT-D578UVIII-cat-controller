@@ -256,10 +256,10 @@ retry is required for correct operation, not an optimization.**
   500 ms push timer it rests on ~13 samples, so confirm/tune from §0 production
   counters. We emulate only the ~1 s timeout regime, NOT the BT-01's <100 ms fast
   double (an unneeded bus-traffic quirk). [CONFIRMED band; default tunable]
-- **up to 3 attempts** (~3 s worst case) then terminal failure. The BT-01 re-sends
-  until answered; a finite cap + surfaced error is our pragmatic deviation. Most drops
-  recover on the **first** retransmit (observed re-sends were single). [PROPOSED — tune
-  from §0 counters]
+- **up to 10 attempts** (~10 s worst case) then terminal failure. The BT-01 re-sends
+  until answered; a finite-but-generous cap + surfaced error is our pragmatic deviation
+  (10 favors riding out a transient drop/flood over giving up early). Most drops recover
+  on the **first** retransmit (observed re-sends were single). [tune from §0 counters]
 - retry only if the command is **retransmit-safe** (§8);
 - a late response to attempt *N* arriving during attempt *N+1*'s window MUST resolve
   the command exactly once (dedup via splice-on-match, §13/E4).
@@ -396,7 +396,7 @@ read-mode test remain as low-priority follow-ups.
 Minimal, evidence-grounded changes — not a from-scratch rewrite. Items 1, 3, 4
 (retry, safety flag, timeout) plus the §0 counters are **shipped**; item 2 (single
 slot) and the read-mode test are deferred. Config knobs: `ANYTONE_CMD_RETRANSMIT`
-(default on), `ANYTONE_CMD_TIMEOUT_MS` (1000), `ANYTONE_CMD_ATTEMPTS` (3),
+(default on), `ANYTONE_CMD_TIMEOUT_MS` (1000), `ANYTONE_CMD_ATTEMPTS` (10),
 `ANYTONE_ACK_BUDGET_MS` (500). PTT is intentionally **excluded** from the generic
 retry (§8 unkey note — watchdog/safety-release covers it).
 

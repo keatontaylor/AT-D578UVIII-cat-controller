@@ -134,7 +134,7 @@ const ACK_PUSH_OPS = new Set([0x58, 0x59, 0x5c, 0x5e, 0x5f])
 // attempts then surface the error. Tunable; kill-switch ANYTONE_CMD_RETRANSMIT=0.
 const CMD_RETRANSMIT = !['0', 'false', 'no', 'off'].includes((process.env.ANYTONE_CMD_RETRANSMIT || '1').toLowerCase())
 const CMD_TIMEOUT_MS = Number(process.env.ANYTONE_CMD_TIMEOUT_MS) || 1000
-const CMD_MAX_ATTEMPTS = Math.max(1, Number(process.env.ANYTONE_CMD_ATTEMPTS) || 3)
+const CMD_MAX_ATTEMPTS = Math.max(1, Number(process.env.ANYTONE_CMD_ATTEMPTS) || 10)
 // Push-ACK latency budget: the radio re-sends an un-acked push every ~500ms (a
 // rock-solid universal timer, 7k+ samples). An ACK slower than this causes a
 // redundant re-send, so we count breaches as a health signal. See §6.1/§7.3.
