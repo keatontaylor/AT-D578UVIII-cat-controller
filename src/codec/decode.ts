@@ -352,8 +352,12 @@ export function decodeSmeter(frame: Uint8Array): Smeter | null {
   }
 }
 
-/** `5b <open> <ck>` async push — global any-squelch-open notification. */
-export function decodeSquelchOpen(frame: Uint8Array): boolean {
+/** `5b <open> <ck>` async push — the AUDIO gate: decoded/squelched voice is flowing to the
+ * speaker/BT path. Live-QSO-pinned 2026-07-13: on DMR it opens ~150 ms AFTER the 58/59 call
+ * presentation (vocoder spin-up) and closes at end of voice — hang time keeps the slot busy for
+ * another ~1.2 s (5e stays RX) until the 5c teardown, so this is audio truth, not channel-busy
+ * and not squelch (per-side squelch bits ride 5a). */
+export function decodeAudioGate(frame: Uint8Array): boolean {
   return (frame[1] ?? 0) !== 0
 }
 

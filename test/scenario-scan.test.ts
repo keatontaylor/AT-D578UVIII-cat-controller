@@ -195,7 +195,7 @@ test('scan + DMR RX on the OTHER side: PAUSED (never a false lock) and the call 
   // the DMR side receives — NO 5b OPEN will be pushed (sim models the measured behavior)
   rig.sim.startDmrCall({ direction: 'rx', colorCode: 10, slot: 2, source: 3223436, dest: 43114, side: 'a' })
   await rig.feedAudio(1500) // well past the lock-confirm window
-  assert.equal(rig.state.squelchOpen, false, 'the 5b gate really never opened (the trap)')
+  assert.equal(rig.state.audioGate, false, 'the 5b gate really never opened (the trap)')
   assert.equal(rig.state.scan.paused, true, 'paused on the 5a evidence alone')
   assert.equal(rig.state.scan.locked, false, 'and never a false lock')
 

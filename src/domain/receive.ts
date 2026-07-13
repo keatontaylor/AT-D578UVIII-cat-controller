@@ -14,7 +14,7 @@ export const modeLabel = (c: ChannelConfig | null): string | null => (c ? MODE_L
 const isDmr = (c: ChannelConfig | null): boolean => !!c && c.type !== 'analog'
 
 export interface ReceiveSnapshot {
-  /** The radio's global audio gate (5b) — whether audio is flowing at all. */
+  /** The effective audio gate (5b audio flowing, or a 5a squelch bit) — see audioGateOpen. */
   open: boolean
   /** The side the current audio is attributed to. */
   side: SideKey
@@ -39,13 +39,14 @@ export interface ReceiveSnapshot {
   talkgroup: number | null
 }
 
-/** The EFFECTIVE audio gate: the radio's global 5b OR either side's 5a squelch-open. Wire-pinned
- * 2026-07-11 (v2-wire-…02-49-22): during a native scan, a DMR call on the NON-scanning side never
- * pushes 5b OPEN (only a redundant CLOSED at call end) — but its 5a per-side open bit + RSSI DO
- * stream. Gate-dependent logic (scan pause, the squelch recorder) must derive openness from both
- * sources, or it goes blind exactly in that state. */
+/** The EFFECTIVE audio gate: the radio's 5b AUDIO gate (decoded voice flowing to the speaker/BT
+ * path — live-QSO-pinned 2026-07-13; not a squelch flag) OR either side's 5a squelch-open.
+ * The 5a fallback is load-bearing: during a native scan, a DMR call on the NON-scanning side
+ * never pushes 5b OPEN (only a redundant CLOSED at call end) — but its 5a per-side open bit +
+ * RSSI DO stream (wire-pinned 2026-07-11). Gate-dependent logic (scan pause, the recorder) must
+ * derive openness from both sources, or it goes blind exactly in that state. */
 export function audioGateOpen(state: RadioState): boolean {
-  return state.squelchOpen || state.signal.aOpen || state.signal.bOpen
+  return state.audioGate || state.signal.aOpen || state.signal.bOpen
 }
 
 /** Resolve the receiving side + channel for the current audio. `open` is the effective audio gate
@@ -69,7 +70,7 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
   // validate a phantom call on this side).
   const dmrOwnBit = dmrSide === 'a' ? state.signal.aOpen : state.signal.bOpen
   const dmrOtherBit = dmrSide === 'a' ? state.signal.bOpen : state.signal.aOpen
-  const dmrCorroborated = dmrSide != null && (dmrOwnBit || (state.squelchOpen && !dmrOtherBit))
+  const dmrCorroborated = dmrSide != null && (dmrOwnBit || (state.audioGate && !dmrOtherBit))
   if (dmrSide != null && dmrCorroborated) {
     side = dmrSide
     source = 'dmr'

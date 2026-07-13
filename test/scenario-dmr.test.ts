@@ -35,10 +35,10 @@ test('a DMR call matching side B lands on B while analog A is selected', async (
   assert.equal(s.dmr!.slot, 2)
   assert.equal(s.dmr!.dest, 43114)
   assert.equal(s.dmr!.alias, 'PARROT')
-  assert.equal(s.squelchOpen, true, 'the 5b gate opened for the call')
+  assert.equal(s.audioGate, true, 'the 5b gate opened for the call')
   // the tuple resolves the call to side B — the exact rule the UI meter/badge and recorder share
   assert.equal(resolveDmrSide(s.dmr!, s.sides.a.channel, s.sides.b.channel, s.selectedSide), 'b')
-  const recv = activeReceive(s, s.squelchOpen)
+  const recv = activeReceive(s, s.audioGate)
   assert.equal(recv.side, 'b')
   assert.equal(recv.channelName, 'MIDSOUTH')
   assert.equal(recv.mode, 'DMR')
@@ -47,7 +47,7 @@ test('a DMR call matching side B lands on B while analog A is selected', async (
   rig.sim.endDmrCall()
   await rig.advance(100)
   assert.equal(rig.state.dmr, null, 'idle push clears the call')
-  assert.equal(rig.state.squelchOpen, false)
+  assert.equal(rig.state.audioGate, false)
   rig.expectConsistent()
   rig.assertClean()
 })
@@ -176,7 +176,9 @@ test('connecting mid-call: the startup reads deliver the FULL caller immediately
     resolveCaller: (id) => (id === 3223436 ? { callsign: 'W1ABC', name: 'John Smith', location: 'Boston, MA' } : null),
     preConnect: (sim) => {
       sim.slot.b = { zone: 0, pos: 2 } // MIDSOUTH parked on B before we ever connect
-      sim.startDmrCall(MIDSOUTH_CALL) // NO alias push — the 58 hasn't come around yet
+      // present:false — the call started before we connected, so the host never RECEIVED the
+      // 58/59 call-start pushes; presentation must come from the 04 5e read, the caller from 04 59
+      sim.startDmrCall({ ...MIDSOUTH_CALL, present: false })
     },
   })
   const d = rig.state.dmr
@@ -205,7 +207,7 @@ test('a STALE last-call record (different dest) cannot paint the live call', asy
   const rig = await Rig.create(t, {
     preConnect: (sim) => {
       sim.slot.b = { zone: 0, pos: 2 }
-      sim.startDmrCall(MIDSOUTH_CALL)
+      sim.startDmrCall({ ...MIDSOUTH_CALL, present: false }) // started before connect (see above)
       sim.lastCall = { dest: 999999, callerId: 1111111, callerName: 'STALE' } // record from another call
     },
   })
@@ -315,6 +317,34 @@ test('recorder: no clip opens from a TX (the gate stays closed while transmittin
   rig.session.unkey()
   await rig.feedAudio(800)
   assert.deepEqual(await rig.clips(), [], 'TX must not be recorded as RX')
+  rig.assertClean()
+})
+
+test('5c hang-time teardown clears the call (the authoritative end)', async (t) => {
+  const rig = await Rig.create(t)
+  await midsouthOnB(rig)
+  rig.sim.startDmrCall({ ...MIDSOUTH_CALL, alias: 'PARROT' })
+  await rig.advance(300)
+  assert.ok(rig.state.dmr, 'call up')
+  assert.equal(rig.state.dmr!.presented, true, '58 presented it')
+  rig.sim.endDmrCall() // 5e idle + gate close + the 5c teardown
+  await rig.advance(200)
+  assert.equal(rig.state.dmr, null, 'teardown cleared the slice')
+  rig.assertClean()
+})
+
+test('raw 59 push presents the call and supplies the caller id (58 lost)', async (t) => {
+  const rig = await Rig.create(t)
+  await midsouthOnB(rig)
+  // voice frames only — no 58 (garbled off the wire); then the 59 push arrives
+  const { dmrVoicePush, lastCallPush } = await import('./sim/frames')
+  rig.sim.injectPush(dmrVoicePush(MIDSOUTH_CALL))
+  await rig.advance(100)
+  assert.equal(rig.state.dmr!.presented, false, 'unpresented decode')
+  rig.sim.injectPush(lastCallPush({ dest: 43114, callerId: 3223436 }))
+  await rig.advance(100)
+  assert.equal(rig.state.dmr!.presented, true, 'the 59 push presents')
+  assert.equal(rig.state.dmr!.callerId, 3223436, 'caller id from the 59 push')
   rig.assertClean()
 })
 

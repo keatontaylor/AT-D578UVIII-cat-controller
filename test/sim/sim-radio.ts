@@ -18,6 +18,7 @@ import type { Transport } from '../../src/transport/types'
 import {
   ack,
   aliasPush,
+  teardownPush,
   channelBlock,
   channelNameBlock,
   clockBlock,
@@ -84,6 +85,10 @@ export interface DmrCallSpec extends DmrCallFields {
   /** The PHYSICAL side carrying the call (default: the selected side). Drives the wire-pinned
    * per-side 5a open/RSSI reporting and the scan-held 5b silence (see gateOpen). */
   readonly side?: SideKey
+  /** Emit the 58 presentation push (default true — the real radio presents every call it
+   * decodes-for-real). false models call-start pushes the host never RECEIVED (started before
+   * connect) — presentation then only arrives via the 04 5e/04 59 startup reads. */
+  readonly present?: boolean
 }
 
 const SIDE_SETTLE_MS = 900 // measured 5a push suspension after an 08 19 ack
@@ -362,10 +367,14 @@ export class SimRadio implements Transport {
     this.pushGateIfChanged(gateWas)
     this.emit(dmrVoicePush(spec))
     this.pushSmeter() // the call side's 5a open/RSSI (streams ~1 s in on the real wire)
-    if (spec.alias) this.emit(aliasPush(spec.source, spec.alias))
+    // CALL PRESENTATION: the real radio pushes 58 for every call it presents (with the caller id;
+    // the name field may be empty/stale) — RX calls only render once this arrives.
+    if (spec.present ?? true) this.emit(aliasPush(spec.source, spec.alias ?? ''))
   }
 
-  /** End the DMR call: 5e idle + gate closes (unless an analog carrier holds it). */
+  /** End the DMR call: 5e idle + gate closes (unless an analog carrier holds it), then the 5c
+   * hang-time teardown (the real radio fires it ~1.2 s after the gate closes; the sim compresses
+   * the wait — reducer behavior is identical). */
   endDmrCall(silent = false): void {
     this.pausedCall = null // however it ends, nothing to resume
     if (!this.dmrCall) return
@@ -376,6 +385,7 @@ export class SimRadio implements Transport {
       this.emit(dmrIdlePush())
       this.pushSmeter() // the call side's 5a open bit drops
       this.pushGateIfChanged(gateWas)
+      this.emit(teardownPush())
     }
   }
 

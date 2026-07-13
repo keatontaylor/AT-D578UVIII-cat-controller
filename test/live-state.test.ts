@@ -26,11 +26,11 @@ function frame(bytes: Uint8Array) {
 
 test('5b drives squelchOpen', () => {
   let s = initialState()
-  assert.equal(s.squelchOpen, false)
+  assert.equal(s.audioGate, false)
   s = applyFrame(s, frame(hexToBytes('5b 01 5c')))
-  assert.equal(s.squelchOpen, true)
+  assert.equal(s.audioGate, true)
   s = applyFrame(s, frame(hexToBytes('5b 00 5b')))
-  assert.equal(s.squelchOpen, false)
+  assert.equal(s.audioGate, false)
 })
 
 test('5a resolves the smeter to physical sides via selectedSide', () => {
@@ -88,8 +88,8 @@ test('04 5b read reply (startup) hydrates squelchOpen like a 5b push', () => {
     const bytes = withChecksum([0x04, 0x5b, open], 4)
     return { head: 0x04, reg: 0x5b, bytes, checksumOk: true }
   }
-  assert.equal(applyFrame(initialState(), read(1)).squelchOpen, true)
-  assert.equal(applyFrame({ ...initialState(), squelchOpen: true }, read(0)).squelchOpen, false)
+  assert.equal(applyFrame(initialState(), read(1)).audioGate, true)
+  assert.equal(applyFrame({ ...initialState(), audioGate: true }, read(0)).audioGate, false)
 })
 
 // Zone count from `04 1b` byte 36 — the BT-01's own bound for zone navigation (it never walks
@@ -174,7 +174,7 @@ test(
     let maxRssi = 0
     for (const fr of f.drain()) {
       state = applyFrame(state, fr)
-      if (state.squelchOpen) sqOpen = true
+      if (state.audioGate) sqOpen = true
       else sqClosed = true
       maxRssi = Math.max(maxRssi, state.signal.aRssi, state.signal.bRssi)
       if (maxRssi > 0) sawRssi = true

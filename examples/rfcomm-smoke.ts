@@ -32,7 +32,7 @@ const session = new Session(
       console.log(
         `[state] fw=${s.firmware ?? '—'} clock=${s.clock ? `${s.clock.hour}:${s.clock.minute}:${s.clock.second}` : '—'}` +
           ` A=${s.sides.a.freqMHz ?? '—'}/${s.sides.a.channelName} B=${s.sides.b.freqMHz ?? '—'}/${s.sides.b.channelName}` +
-          ` sql=${s.squelchOpen ? 'OPEN' : 'closed'} rssi A/B=${s.signal.aRssi}/${s.signal.bRssi}`,
+          ` sql=${s.audioGate ? 'OPEN' : 'closed'} rssi A/B=${s.signal.aRssi}/${s.signal.bRssi}`,
       )
     },
     onFailed: (cmd, reason) => console.warn(`[cmd] op 0x${cmd.op.toString(16)} failed: ${reason}`),

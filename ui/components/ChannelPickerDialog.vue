@@ -30,12 +30,15 @@ const onKey = (e: KeyboardEvent): void => {
 
 onMounted(async () => {
   window.addEventListener('keydown', onKey)
+  // Two distinct loading states, honestly labeled: "Reading zones…" ends the moment the zone
+  // list lands; the pre-expanded zone's channel read then shows ITS indicator ("Reading
+  // channels…") inside the open zone — never zones-label-over-channels-work.
   try {
     zones.value = await radio.zones()
-    if (expanded.value != null) await loadZone(expanded.value)
   } finally {
     loadingZones.value = false
   }
+  if (expanded.value != null) await loadZone(expanded.value).catch(() => {})
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
@@ -50,16 +53,18 @@ async function loadZone(index: number): Promise<void> {
   }
 }
 // Force a fresh enumeration (zones + the open zone's channels); the codeplug is otherwise cached.
+// Same state split as mount: the ↻ spinner covers the zone re-read; the open zone's channel
+// re-read shows its own inline indicator.
 async function refresh(): Promise<void> {
   if (refreshing.value) return
   refreshing.value = true
   channels.value = {}
   try {
     zones.value = await radio.zones(true)
-    if (expanded.value != null) await loadZone(expanded.value)
   } finally {
     refreshing.value = false
   }
+  if (expanded.value != null) await loadZone(expanded.value).catch(() => {})
 }
 async function toggleZone(index: number): Promise<void> {
   if (expanded.value === index) {

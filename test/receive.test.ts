@@ -29,7 +29,7 @@ test('DMR RX call on the NON-selected side attributes the clip to the DMR side',
     st.sides.b.channel = dmr(1, 1, 3100)
     st.dmr = {
       direction: 'rx', colorCode: 1, slot: 1, source: 3100, dest: 3100, private: false,
-      alias: null, callerId: null, callsign: null, name: null, location: null,
+      alias: null, callerId: null, callsign: null, name: null, location: null, presented: true,
     }
   })
   const r = activeReceive(s, true)
@@ -114,10 +114,10 @@ test('source reports HOW the side was attributed (the re-attribution policy key)
     st.selectedSide = 'a'
     st.sides.a.channel = analog
     st.sides.b.channel = dmr(1, 1, 3100)
-    st.squelchOpen = true // gate corroborates the call (audio is really flowing)
+    st.audioGate = true // gate corroborates the call (audio is really flowing)
     st.dmr = {
       direction: 'rx', colorCode: 1, slot: 1, source: 3100, dest: 3100, private: false,
-      alias: null, callerId: null, callsign: null, name: null, location: null,
+      alias: null, callerId: null, callsign: null, name: null, location: null, presented: true,
     }
   })
   assert.equal(activeReceive(dmrCall, true).source, 'dmr')

@@ -91,7 +91,7 @@ test('connect() against the sim hydrates a consistent RadioState', async (t) => 
   assert.equal(s.sides.a.channelCount, 4, 'channel count from 04 27')
   assert.equal(s.clock?.hour, 12)
   assert.equal(s.dmr, null)
-  assert.equal(s.squelchOpen, false)
+  assert.equal(s.audioGate, false)
   assert.equal(rig.session.busy, false, 'nothing left in flight')
   rig.expectConsistent()
   rig.assertClean()

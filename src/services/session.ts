@@ -732,7 +732,7 @@ export class Session {
     // Accept every attribution EXCEPT the lone-DMR INFERENCE. During an analog tail the per-side
     // 5a bit closes a beat before the 5b gate; in that gap activeReceive infers the lone DMR side
     // (gate open, no analog squelch) — which would spuriously flip PAUSE for a mixed FM/DMR pair
-    // (wire-observed 2026-07-11 22:27:37: bOpen false + squelchOpen still true → false pause blip).
+    // (wire-observed 2026-07-11 22:27:37: bOpen false + the 5b audio gate still open → false pause blip).
     // 'selected' stays IN: it attributes to the scanning side, the only evidence when the radio
     // reports a lock via 5b alone (no per-side 5a bit) — needed for the lock to arm.
     const recv = activeReceive(rs, audioGateOpen(rs))

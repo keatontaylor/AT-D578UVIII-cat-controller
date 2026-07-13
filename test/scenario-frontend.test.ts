@@ -281,27 +281,35 @@ test('link drop + auto-reconnect: the client rides disconnected → connected wi
   rig.assertClean()
 })
 
-test('phantom 5e (no gate) renders NO live call on any card; corroboration lights it', async (t) => {
+test('phantom 5e renders NO live call — even with the gate open; PRESENTATION lights it', async (t) => {
   const rig = await FullRig.create(t)
   await midsouthOnB(rig)
 
-  // fully identified 5e frames with NO audio-gate evidence — the scan-sample signature
+  // fully identified 5e frames with NO presentation — the scan-sample signature
   rig.sim.injectPush(dmrVoicePush({ direction: 'rx', colorCode: 10, slot: 2, source: 43114, dest: 43114 }))
   await rig.advance(100)
   {
     const { a, b } = rig.cards
     assert.ok(rig.client.radio.dmr, 'the tuple reached the client state')
-    assert.equal(b.dmrLive, null, 'no badge without audio')
-    assert.equal(b.smeter, 0, 'no meter without audio')
-    assert.equal(b.indicator, null, 'no RX icon without audio')
+    assert.equal(b.dmrLive, null, 'no badge without presentation')
+    assert.equal(b.smeter, 0, 'no meter')
+    assert.equal(b.indicator, null, 'no RX icon')
     assert.equal(a.dmrLive, null)
   }
 
-  // the gate corroborates → the SAME tuple now renders as a live call on the matching card
+  // the audio gate opening is NOT presentation — an unrelated analog carrier could hold the 5b
+  // gate open; under the old audibility rule this exact state lit a phantom call
   rig.sim.injectPush(squelchPush(true))
   await rig.advance(50)
-  assert.equal(rig.cards.b.dmrLive?.label, 'TS2 · CC10 · TG 43114', 'corroborated call lights the badge')
+  assert.equal(rig.cards.b.dmrLive?.label, undefined, 'gate alone must not light an unpresented call')
+
+  // the 58 presentation push (the BT-01 popup, caller id aboard) is what lights it
+  const { aliasPush } = await import('./sim/frames')
+  rig.sim.injectPush(aliasPush(3223436, ''))
+  await rig.advance(50)
+  assert.equal(rig.cards.b.dmrLive?.label, 'TS2 · CC10 · TG 43114', 'presented call lights the badge')
   assert.equal(rig.cards.b.indicator, 'RX')
+  assert.equal(rig.client.radio.dmr!.callerId, 3223436, 'caller id present at the popup moment')
 
   rig.sim.injectPush(squelchPush(false))
   rig.sim.injectPush(dmrIdlePush())

@@ -100,7 +100,7 @@ export const IdentityState = z.object({
 // Live per-side signal, resolved to the physical sides: the 5a frame reports active/inactive RSSI
 // (0-4, the radio's 4-bar meter) + a per-side squelch-open mask RELATIVE to the radio's selected
 // side, and the reducer maps both to a/b via `selectedSide`. aOpen/bOpen are the per-side "RX"
-// indicator (squelch open / audio passing); the global 5b `squelchOpen` is their OR.
+// indicator (squelch open / audio passing); the global 5b audio gate is separate (see audioGate).
 export const SignalState = z.object({
   aRssi: z.number().int().min(0),
   bRssi: z.number().int().min(0),
@@ -123,6 +123,10 @@ export const DmrState = z.object({
   dest: z.number().nullable(),
   /** Group (false) vs private (true) call; null until a voice frame resolves it. */
   private: z.boolean().nullable(),
+  /** The radio PRESENTED this call (58 talker push / matching 59 record / the 04 5e call-state
+   * read) — the BT-01's popup moment, always carrying the caller id. Scan-engine 5e samples and
+   * other decode-only traffic never present; RX calls render ONLY once presented. */
+  presented: z.boolean(),
   /** Caller alias from the 58 talker push (radio's contact-list lookup), when known. */
   alias: z.string().nullable(),
   /** The talker's DMR id (58 push) — the key for the RadioID caller-id lookup. */
@@ -185,7 +189,10 @@ export const RadioState = z.object({
   manualDial: z
     .object({ target: z.number().int().positive(), callType: z.enum(['group', 'private']) })
     .nullable(),
-  squelchOpen: z.boolean(),
+  /** The radio's 5b AUDIO gate: decoded voice is flowing to the speaker/BT path. NOT a
+   * squelch indicator (per-side squelch is signal.aOpen/bOpen) — on DMR it opens ~150 ms
+   * after the call presents and closes at end of voice, BEFORE hang time expires. */
+  audioGate: z.boolean(),
   /** The radio is transmitting — ITS truth, from the 5a state field (byte 7 ∈ {0x86,0x87},
    * live-pinned Sitting 1). Covers PTT initiated anywhere (our app, the radio's mic, a head),
    * unlike `ptt` which tracks only OUR key/unkey lifecycle. */
@@ -225,7 +232,7 @@ export function initialState(): RadioState {
     dmr: null,
     scan: { active: false, listName: null, locked: false, paused: false, pausedChannel: null, lastLock: null },
     manualDial: null,
-    squelchOpen: false,
+    audioGate: false,
     transmitting: false,
     ptt: 'idle',
   }

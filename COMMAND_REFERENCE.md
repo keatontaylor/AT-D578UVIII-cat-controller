@@ -31,11 +31,11 @@ field, no sequence number, no delimiter. (LINK_PROTOCOL §1.)
 | `03` | 5 | ack (R→H) | **inbound command-ACK** `03 <op> 00 <status> <ck>` — checksum-valid; status byte[3]=`00`=success (confirmed for `08`/`64`/`01`/`5a`) |
 | `03` | 4 | ack (H→R) | **outbound push-ACK** `03 <op> 00 00` for required pushes `{5e,58,59,5c,5f}` — fixed 4 bytes, **NOT checksum-valid** (byte[3]=`00`, not the additive sum). Emit literal; do not checksum |
 | `5a` | 16 | free push | RSSI / squelch per side (not acked) |
-| `5b` | 3 | free push | squelch open/close (not acked) |
+| `5b` | 3 | free push | **AUDIO gate** open/close (not acked) — decoded voice flowing to the speaker/BT path, NOT squelch (per-side squelch bits ride `5a`). Live-QSO-pinned 2026-07-13: on DMR opens ~150 ms after the 58/59 presentation, closes at end of voice (hang time keeps the slot busy until `5c`) |
 | `5e` | 18 | **acked push** | DMR call state. byte1 `01`=active/`00`=ending; byte2 `60`/`64`=active `20`/`24`=hang; dest=bytes 8-11 (group→TG, private→own ID), src=bytes 13-16 (caller) |
-| `58` | 112 | **acked push** | talker info: caller ID bytes 6-9, alias ASCII (e.g. `PARROT`); tail target + a call-type bit (`0x80`, *provisional* — one sample) |
-| `59` | 57 | **acked push** | call info: caller DMR ID @off24, alias @off28. byte55 = **per-call sequence counter** (observed 01-04), **NOT call-type** (earlier 01/02 reading was coincidental). **Call-type discriminator: TBD** — needs the DMR slice (likely `5e` dest==own-id ⇒ private) |
-| `5c` | 12 | **acked push** | DMR call metadata — **emitted at call teardown** (`5c 07 …`) |
+| `58` | 112 | **acked push** | **CALL PRESENTATION** (the BT-01 popup; live-QSO-pinned 2026-07-13): byte1 bit7 = TX context; caller/front id BCD @6-9 + the radio's 16-char DISPLAY name @10-25 (usually the destination's contact name, often stale — not a talker alias); counterpart block: optional name2 @87-102, id2 BCD @105-108, undecoded LE16 @109-110. Pushed ONLY for calls the radio presents — never for scan samples / DigiMon-off traffic — and always precedes the audio gate |
+| `59` | 57 | **acked push** | last-call record, = the `04 59` read shifted DOWN one byte: dest BCD @2-5 + name @6-21, caller DMR ID @24-27; the caller-NAME field leads with a NUL (stale residue follows) — ids only. Part of the presentation choreography (fires with the `58`). byte55 = per-call sequence counter (observed 01-04) |
+| `5c` | 12 | **acked push** | **hang-time teardown** (`5c 07 01 …`, fires ~1.2 s after the audio gate closes — the call slot is done; the reducer clears the live call on it). Trailing byte `00` = clean teardown, `09` = re-key inside hang time (*provisional*, two samples) |
 | `5f` | 5 | **acked push** | DMR call metadata — **emitted at call teardown** (`5f 34 …`) |
 
 ## `04 <reg>` read responses — confirmed lengths + meaning
@@ -87,7 +87,7 @@ Lengths verified across many samples (single fixed length unless noted).
 | 52 | 94 | GPS / position (ASCII; all-zero = no fix) | CONFIRMED |
 | 59 | 59 | table (zeros) | confirmed-empty |
 | 5a | 17 | RSSI/squelch snapshot (read form of the `5a` push) | CONFIRMED |
-| 5b | 4 | squelch snapshot | CONFIRMED |
+| 5b | 4 | audio-gate snapshot (read form of the `5b` push) | CONFIRMED |
 | 5e | 19 | link/DMR status snapshot | CONFIRMED |
 
 ## Browse/paged family (the §2 framing exception)

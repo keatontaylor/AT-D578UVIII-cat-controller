@@ -248,7 +248,7 @@ export class Rig {
     const truth = this.sim.groundTruth()
     const s = this.state
     assert.equal(s.selectedSide, truth.selectedSide, 'selectedSide')
-    assert.equal(s.squelchOpen, truth.gateOpen, 'squelchOpen (5b gate)')
+    assert.equal(s.audioGate, truth.gateOpen, 'squelchOpen (5b gate)')
     assert.equal(s.transmitting, truth.transmitting, 'transmitting')
     assert.equal(s.signal.aOpen, truth.rf.a.open, 'signal.aOpen (physical side A)')
     assert.equal(s.signal.bOpen, truth.rf.b.open, 'signal.bOpen (physical side B)')

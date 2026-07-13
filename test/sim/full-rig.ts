@@ -184,7 +184,7 @@ export class FullRig {
     const rs = this.client.radio
     assert.equal(this.client.connection, 'connected', 'client sees connected')
     assert.equal(rs.selectedSide, truth.selectedSide, 'client selectedSide')
-    assert.equal(rs.squelchOpen, truth.gateOpen, 'client squelchOpen')
+    assert.equal(rs.audioGate, truth.gateOpen, 'client squelchOpen')
     assert.equal(rs.signal.aOpen, truth.rf.a.open, 'client aOpen')
     assert.equal(rs.signal.bOpen, truth.rf.b.open, 'client bOpen')
     assert.equal(rs.signal.aRssi, truth.rf.a.rssi, 'client aRssi')

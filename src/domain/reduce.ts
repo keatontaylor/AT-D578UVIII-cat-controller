@@ -19,7 +19,7 @@ import {
   decodeSettingsBlock,
   decodeSmeter,
   decodeSelectedSide,
-  decodeSquelchOpen,
+  decodeAudioGate,
   decodeZoneName,
   decodeZoneNumber,
 } from '../codec/decode'
@@ -184,13 +184,16 @@ function applySmeter(state: RadioState, s: Smeter | null): RadioState {
  * programmed contact. So we LATCH: keep the last-known identity fields and only overwrite them when
  * a newer frame actually carries them. `a === null` is the explicit end-of-call (5e status byte 0)
  * — that, and only that, clears the slice. (Alias rides a separate 58 push and is preserved too.) */
-function applyDmr(state: RadioState, a: DmrActivity | null): RadioState {
+function applyDmr(state: RadioState, a: DmrActivity | null, presented = false): RadioState {
   if (a === null) return state.dmr === null ? state : { ...state, dmr: null }
   const prev = state.dmr
   return {
     ...state,
     dmr: {
       direction: a.direction,
+      // Presentation is sticky for the call's lifetime; async 5e alone never presents (scan
+      // samples), but the 04 5e READ does — it is the radio's own call-state register.
+      presented: (prev?.presented ?? false) || presented,
       colorCode: a.colorCode ?? prev?.colorCode ?? null,
       slot: a.slot ?? prev?.slot ?? null,
       source: a.source ?? prev?.source ?? null,
@@ -211,19 +214,43 @@ export function applyFrame(state: RadioState, frame: DecodedFrame): RadioState {
     case 0x5a:
       return applySmeter(state, decodeSmeter(frame.bytes))
     case 0x5b:
-      return { ...state, squelchOpen: decodeSquelchOpen(frame.bytes) }
+      return { ...state, audioGate: decodeAudioGate(frame.bytes) }
     case 0x5e:
       return applyDmr(state, decodeDmr(frame.bytes))
     case 0x58: {
-      // Talker alias + id for the active call — only meaningful while a call is up. The id keys the
-      // RadioID caller-id lookup, which the session performs and feeds back via a `dmrCaller` event.
+      // CALL PRESENTATION (live-QSO-pinned 2026-07-13): the radio pushes 58 only for calls it
+      // actually presents (the BT-01 popup) — scan samples and DigiMon-off traffic never get one
+      // — and it always precedes the audio gate. It carries the talker id (the RadioID lookup
+      // key, fed back via `dmrCaller`); the name field is the radio's DISPLAY line (usually the
+      // destination's contact name, often stale), so it fills alias only as a fallback.
       if (state.dmr === null) return state
       const a = decodeDmrAlias(frame.bytes)
       if (!a) return state
       const alias = a.alias || state.dmr.alias
       const callerId = a.id ?? state.dmr.callerId
-      if (alias === state.dmr.alias && callerId === state.dmr.callerId) return state
-      return { ...state, dmr: { ...state.dmr, alias, callerId } }
+      if (state.dmr.presented && alias === state.dmr.alias && callerId === state.dmr.callerId) return state
+      return { ...state, dmr: { ...state.dmr, alias, callerId, presented: true } }
+    }
+    case 0x59: {
+      // Raw last-call PUSH — part of the presentation choreography (fires with the 58). Same
+      // layout as the 04 59 read shifted DOWN one byte; pad the front so one decoder serves both.
+      // The caller-NAME field in the push form starts with a NUL (stale residue follows) — only
+      // the ids are usable. Guarded on dest matching the live call, like the read path.
+      if (state.dmr === null || state.dmr.direction !== 'rx') return state
+      const padded = new Uint8Array(frame.bytes.length + 1)
+      padded.set(frame.bytes, 1)
+      const last = decodeLastCall(padded)
+      if (!last || last.dest == null || state.dmr.dest !== last.dest) return state
+      const callerId = state.dmr.callerId ?? last.callerId
+      if (state.dmr.presented && callerId === state.dmr.callerId) return state
+      return { ...state, dmr: { ...state.dmr, callerId, presented: true } }
+    }
+    case 0x5c: {
+      // Hang-time teardown (live-QSO-pinned 2026-07-13: fires ~1.2 s after the audio gate closes,
+      // `5c 07 01 …` — the call slot is DONE). The authoritative end-of-call: clear the slice
+      // rather than waiting to infer it from 5e going idle.
+      if (frame.bytes[1] !== 0x07) return state
+      return state.dmr === null ? state : { ...state, dmr: null }
     }
     case READ_HEAD:
       return frame.reg === undefined ? state : applyRead(state, frame.reg, frame.bytes)
@@ -301,8 +328,8 @@ function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
       if (!last || last.dest == null || state.dmr.dest !== last.dest) return state
       const callerId = state.dmr.callerId ?? last.callerId
       const alias = state.dmr.alias ?? (last.callerName || null)
-      if (callerId === state.dmr.callerId && alias === state.dmr.alias) return state
-      return { ...state, dmr: { ...state.dmr, callerId, alias } }
+      if (state.dmr.presented && callerId === state.dmr.callerId && alias === state.dmr.alias) return state
+      return { ...state, dmr: { ...state.dmr, callerId, alias, presented: true } }
     }
     // `04 5a` / `04 5b` reads (startup enumeration + post-side-swap refresh) carry the same
     // payload as the async pushes, shifted by the `04` prefix — reuse the push decoders so the
@@ -310,9 +337,11 @@ function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
     case 0x5a:
       return applySmeter(state, decodeSmeter(b.slice(1)))
     case 0x5b:
-      return { ...state, squelchOpen: decodeSquelchOpen(b.slice(1)) }
+      return { ...state, audioGate: decodeAudioGate(b.slice(1)) }
     case 0x5e:
-      return applyDmr(state, decodeDmr(b.slice(1)))
+      // The 04 5e READ is the radio's own current-call register — an active call here IS
+      // presented (this is the mid-call-connect path; scan-sample ambiguity is async-only).
+      return applyDmr(state, decodeDmr(b.slice(1)), true)
     default:
       return state
   }

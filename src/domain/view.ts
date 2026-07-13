@@ -29,16 +29,17 @@ export function dmrLocked(rs: RadioState): boolean {
  * field), so the info lands on the DMR channel even when the OTHER (e.g. analog) side is selected.
  * TX is on the selected side by definition; RX is resolved from the tuple. Null until locked.
  *
- * AUDIBILITY GATE (wire-pinned 2026-07-11, captures 20:27–20:37): while a scan runs, the scan
- * engine SAMPLES DMR channels as it hops — it decodes the link-control header and pushes fully
- * identified 5e frames (TS/CC/TG) for traffic it never stops on and never unmutes (no 58/59, no
- * 5b, no 5a open bits, no audio). An RX call therefore only renders as LIVE when the audio gate
- * corroborates it; an uncorroborated tuple is a decoded header, not a reception. */
+ * PRESENTATION GATE (live-QSO-pinned 2026-07-13, superseding the 2026-07-11 audibility gate):
+ * the radio pushes 58/59 ONLY for calls it actually presents — the BT-01 popup, always carrying
+ * the caller id — and never for scan-engine 5e samples or DigiMon-off traffic. An RX call
+ * renders only once PRESENTED (58/59 push, or the 04 5e call-state read at mid-call connect).
+ * This is strictly stronger than the old audio-gate corroboration: it can't be spoofed by an
+ * unrelated analog carrier holding the gate open, and the caller id exists at the popup moment. */
 export function dmrSideFor(rs: RadioState): SideKey | null {
   const d = rs.dmr
   if (!d || !dmrLocked(rs)) return null
   if (d.direction === 'tx') return rs.selectedSide
-  if (!audioGateOpen(rs)) return null
+  if (!d.presented) return null
   return resolveDmrSide(d, rs.sides.a.channel, rs.sides.b.channel, rs.selectedSide)
 }
 

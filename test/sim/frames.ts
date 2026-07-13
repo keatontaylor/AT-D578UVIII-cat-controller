@@ -327,11 +327,31 @@ export function aliasPush(id: number, alias: string): Uint8Array {
   return sealed(b)
 }
 
+/** `5c 07 01 …` hang-time teardown — the call slot is done (live-QSO-pinned 2026-07-13). */
+export function teardownPush(): Uint8Array {
+  const b = new Uint8Array(12)
+  b[0] = 0x5c
+  b[1] = 0x07
+  b[2] = 0x01
+  return sealed(b)
+}
+
 export interface SimLastCall {
   readonly dest: number
   readonly destName?: string
   readonly callerId: number
   readonly callerName?: string
+}
+
+/** Raw `59` last-call PUSH — the read form shifted down one byte (dest BCD @2-5, caller @24-27;
+ * the push's caller-NAME field leads with a NUL on the real wire, so the sim leaves it empty). */
+export function lastCallPush(f: SimLastCall): Uint8Array {
+  const b = new Uint8Array(57) // wire-pinned push length (frame table head 59)
+  b[0] = 0x59
+  putBcd4(b, 2, f.dest)
+  putAscii(b, 6, f.destName ?? '', 16)
+  putBcd4(b, 24, f.callerId)
+  return sealed(b)
 }
 
 /** `04 59` persisted last-call record (59 B): dest BCD @3-6 + name @7-22, caller BCD @25-28 +

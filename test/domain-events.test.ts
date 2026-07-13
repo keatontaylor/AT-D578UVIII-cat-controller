@@ -142,5 +142,5 @@ test('no-op events return the SAME reference (dispatch skips the broadcast)', ()
 
 test('frame events delegate to the frame reducer (one entry point for everything)', () => {
   const s = applyEvent(initialState(), { kind: 'frame', frame: frame('5b 01 5c') })
-  assert.equal(s.squelchOpen, true)
+  assert.equal(s.audioGate, true)
 })
