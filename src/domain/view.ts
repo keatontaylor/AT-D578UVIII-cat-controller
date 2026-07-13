@@ -125,8 +125,12 @@ export function vfoMemLabel(mode: ChannelMode): string {
  * the "paused" status itself is the zone line's job). Never a placeholder: an unconfirmed pause
  * stays "Scanning…" until the pause-confirm read names the parked channel. */
 export function memoryDisplay(mode: ChannelMode, channelName: string, scan: Scan | null): string {
-  if (scan?.active && !scan.locked) {
-    return scan.paused && scan.pausedChannel ? scan.pausedChannel : 'Scanning…'
+  if (scan?.active) {
+    if (scan.locked) {
+      if (scan.lockedChannel === null) return 'Scanning…' // locked, read-back not landed — no stale name
+    } else {
+      return scan.paused && scan.pausedChannel ? scan.pausedChannel : 'Scanning…'
+    }
   }
   return mode === 'memory' ? channelName || '--' : mode === 'vfo' ? 'VFO' : '--'
 }
@@ -183,11 +187,14 @@ export function rxTxIndicator(transmitting: boolean, open: boolean): 'TX' | 'RX'
 // Two honest states: SWEEPING (position unknown → placeholder frequency, scan status in the zone
 // line) and LOCKED (lock-follow read the real channel → full values, same as today).
 
-/** True while the frequency/values are UNKNOWN: scan hopping, or paused but the parked-channel
- * read hasn't landed yet. A CONFIRMED pause (pausedChannel named) means the pause-confirm read
- * put the real parked channel in the side slice — those values are current, show them. */
+/** True while the frequency/values are UNKNOWN: scan hopping; paused but the parked-channel
+ * read hasn't landed; or LOCKED but the lock-follow read hasn't landed (scan.locked flips at
+ * lock-confirm, ~1 read round-trip BEFORE the channel data is current — rendering then would
+ * flash the previous channel's values). Named channels mean the read put real data in the side
+ * slice — show it. */
 export function scanSweeping(scan: Scan | null | undefined): boolean {
-  if (!scan?.active || scan.locked) return false
+  if (!scan?.active) return false
+  if (scan.locked) return scan.lockedChannel === null
   return !(scan.paused && scan.pausedChannel !== null)
 }
 

@@ -37,6 +37,10 @@ export interface ReceiveSnapshot {
    * channel — null otherwise. In digital-monitor mode this differs from the channel's programmed
    * contact, so it's what the recorder keys lanes by (one lane per TG). */
   talkgroup: number | null
+  /** FALSE while the attributed side's channel identity is known-stale: the side is mid-scan and
+   * the lock-follow read hasn't landed (scan.lockedChannel null). The recorder holds its live
+   * announcement (and trusts the late-fill) until this flips true. */
+  identityResolved: boolean
 }
 
 /** The EFFECTIVE audio gate: the radio's 5b AUDIO gate (decoded voice flowing to the speaker/BT
@@ -56,6 +60,9 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
   const a = state.sides.a
   const b = state.sides.b
   const dmr = state.dmr
+  // identity is unresolved when the audio is attributed to the SCANNING side (the selected side
+  // scans) and the lock-follow read hasn't named the channel yet — hopping or locked-unread
+  const scanUnread = state.scan.active && (state.scan.locked ? state.scan.lockedChannel === null : !state.scan.paused || state.scan.pausedChannel === null)
 
   let side: SideKey = state.selectedSide
   let source: ReceiveSnapshot['source'] = 'selected'
@@ -112,5 +119,6 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
     freqMHz: s.freqMHz,
     mode: modeLabel(s.channel),
     talkgroup,
+    identityResolved: !(scanUnread && side === state.selectedSide),
   }
 }

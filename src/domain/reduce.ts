@@ -75,8 +75,15 @@ function patchSide(state: RadioState, side: SideKey, patch: Partial<Side>): Radi
  * channel read leaves the scan slice alone. */
 function reconcilePausedChannel(state: RadioState, side: SideKey): RadioState {
   const scan = state.scan
-  if (!scan.active || !scan.paused || scan.locked || state.selectedSide !== side) return state
+  if (!scan.active || state.selectedSide !== side) return state
   const name = state.sides[side].channelName || null
+  // LOCKED: this block is the lock-follow read landing — the side slice is now CURRENT; naming
+  // lockedChannel is what releases the sweeping placeholder and the recorder's held announcement.
+  if (scan.locked) {
+    if (name === scan.lockedChannel) return state
+    return { ...state, scan: { ...scan, lockedChannel: name } }
+  }
+  if (!scan.paused) return state
   if (name === scan.pausedChannel) return state
   return { ...state, scan: { ...scan, pausedChannel: name } }
 }
@@ -160,8 +167,8 @@ function applySmeter(state: RadioState, s: Smeter | null): RadioState {
   let scan = state.scan
   if (s.scanning !== scan.active) {
     scan = s.scanning
-      ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, lastLock: null }
-      : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, lastLock: null }
+      ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, lockedChannel: null, lastLock: null }
+      : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, lockedChannel: null, lastLock: null }
   }
   return {
     ...state,
@@ -467,7 +474,7 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
 
     case 'scan':
       // Start/stop resets the lock + pause (a fresh scan hasn't locked or paused yet).
-      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, lastLock: null } }
+      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, lockedChannel: null, lastLock: null } }
 
     case 'scanLock': {
       if (state.scan.locked === event.locked) return state
@@ -478,7 +485,8 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
         const side = state.sides[state.selectedSide]
         if (side.channelName) lastLock = { name: side.channelName, freqMHz: side.freqMHz, at: Date.now() }
       }
-      return { ...state, scan: { ...state.scan, locked: event.locked, lastLock } }
+      // a fresh lock is UNREAD until the lock-follow read names lockedChannel; a drop clears it
+      return { ...state, scan: { ...state.scan, locked: event.locked, lockedChannel: null, lastLock } }
     }
 
     case 'scanPause':

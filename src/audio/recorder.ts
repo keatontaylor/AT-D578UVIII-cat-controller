@@ -43,6 +43,11 @@ export type LiveClip = Omit<ClipMeta, 'durationMs'>
 export type RadioContext = () => {
   squelchOpen: boolean
   side: 'a' | 'b'
+  /** FALSE while the attributed channel identity is known-stale (mid-scan, lock-follow read not
+   * landed): the `opened` announcement is HELD until it resolves (or the fallback timer fires) so
+   * the live timeline never shows a recording under the WRONG channel. Recording itself is never
+   * delayed — only the announcement. Absent = resolved (the TX recorder). */
+  identityResolved?: boolean
   source?: 'dmr' | 'analog' | 'inferred' | 'selected'
   /** Raw per-side squelch bits (RX recorder only) — lets the dual-RX split test whether the
    * CLIP's attributed side is still receiving, not just where the current audio points. */
@@ -65,6 +70,10 @@ export type RecorderEvent =
   | { type: 'status'; status: { enabled: boolean; tailMs: number; minDurationMs: number } }
 
 const DEFAULTS: SegmenterConfig = { frameMs: 10, tailMs: 600, minDurationMs: 800 }
+/** Held-announcement cap: the scan lock-follow read resolves in ~1 RTT (ACK'd + retransmitted);
+ * if it hasn't after this long, announce with what we have — a live recording must never stay
+ * invisible because a read is struggling. */
+const ANNOUNCE_FALLBACK_MS = 2500
 
 /** 44-byte canonical WAV header for `dataBytes` of PCM S16LE. PURE — unit-tested. */
 export function wavHeader(dataBytes: number, sampleRate = RX_SAMPLE_RATE, channels = RX_CHANNELS): Buffer {
@@ -106,6 +115,9 @@ export class Recorder {
     bytes: number
     meta: Omit<ClipMeta, 'durationMs'>
     openSource: 'dmr' | 'analog' | 'inferred' | 'selected' | undefined
+    /** The single `opened` announcement went out (held while identity is unresolved). */
+    announced: boolean
+    announceTimer?: ReturnType<typeof setTimeout> | undefined
     /** Last time the clip's OWN side showed receive evidence — drives the dual-RX split. */
     sideActiveAt: number
   } | null = null
@@ -144,9 +156,11 @@ export class Recorder {
   }
 
   /** The clip currently being written (metadata sans duration), or null — lets a client that
-   * (re)connects mid-recording hydrate its live state instead of relying on missed pushes. */
+   * (re)connects mid-recording hydrate its live state instead of relying on missed pushes.
+   * A clip whose announcement is still HELD (identity unresolved) is invisible here too — the
+   * hydration path must not leak the wrong-channel label the push path is holding back. */
   get live(): LiveClip | null {
-    return this.clip?.meta ?? null
+    return this.clip?.announced ? this.clip.meta : null
   }
 
   /** Remove orphaned WAVs (no sidecar): a clip that was open when the process died left a
@@ -270,6 +284,10 @@ export class Recorder {
         }
       }
     }
+    // A held announcement goes out the moment identity resolves — the late-fill above has just
+    // re-stamped the metadata from the same context, so the live block appears with the RIGHT
+    // channel (the whole point of holding it).
+    if (c && !c.announced && ctx.identityResolved !== false) this.announce(c)
   }
 
   private openClip(ctx: ReturnType<RadioContext>): void {
@@ -294,8 +312,30 @@ export class Recorder {
       },
       openSource: ctx.source,
       sideActiveAt: Date.now(),
+      announced: false,
     }
-    this.emit({ type: 'opened', clip: this.clip.meta })
+    if (ctx.identityResolved === false) {
+      // Identity is known-stale (scan lock read in flight): HOLD the live announcement — the
+      // late-fill below re-stamps the metadata when the read lands and we announce then, with
+      // the RIGHT channel. The read is ACK'd + retransmitted, so this resolves in ~1 RTT; the
+      // fallback keeps the indicator honest if the link is exceptionally unhealthy.
+      const clip = this.clip
+      clip.announceTimer = setTimeout(() => this.announce(clip), ANNOUNCE_FALLBACK_MS)
+      ;(clip.announceTimer as { unref?: () => void }).unref?.()
+    } else {
+      this.announce(this.clip)
+    }
+  }
+
+  /** Emit the (single) `opened` announcement for a clip with its CURRENT metadata. */
+  private announce(clip: NonNullable<Recorder['clip']>): void {
+    if (clip.announced) return
+    clip.announced = true
+    if (clip.announceTimer) {
+      clearTimeout(clip.announceTimer)
+      clip.announceTimer = undefined
+    }
+    this.emit({ type: 'opened', clip: clip.meta })
   }
 
   private appendFrame(frame: Buffer): void {
@@ -308,10 +348,16 @@ export class Recorder {
     const clip = this.clip
     this.clip = null
     if (!clip) return
+    // A still-held announcement dies with the clip: the saved event (with FINAL metadata) is the
+    // first the timeline hears of it — never a wrong-channel live block, never a stale opened.
+    if (clip.announceTimer) {
+      clearTimeout(clip.announceTimer)
+      clip.announceTimer = undefined
+    }
     await new Promise<void>((resolve) => clip.stream.end(resolve))
     if (!keep) {
       await fsp.rm(clip.wav, { force: true }).catch(() => {})
-      this.emit({ type: 'discarded', id: clip.id }) // the live block must leave the timeline
+      if (clip.announced) this.emit({ type: 'discarded', id: clip.id }) // the live block must leave the timeline
       return
     }
     // Patch the RIFF/data sizes now that the length is known, and write the JSON sidecar.

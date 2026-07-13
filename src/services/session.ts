@@ -761,8 +761,11 @@ export class Session {
               this.scanPauseTimer = null
             }
             this.scanLockRead = true
-            this.link.submit(readRegister(this.scanSide === 'b' ? 0x2d : 0x2c, 0x01))
+            // LOCK first, then the read: the reply's channel block names scan.lockedChannel,
+            // which only reconciles while locked — a (sim-)synchronous reply arriving inside
+            // submit() must already see the locked state, or the freshness marker never fills.
             this.dispatch({ kind: 'scanLock', locked: true })
+            this.link.submit(readRegister(this.scanSide === 'b' ? 0x2d : 0x2c, 0x01))
           }
         }, SCAN_LOCK_CONFIRM_MS)
         this.scanLockTimer.unref?.()

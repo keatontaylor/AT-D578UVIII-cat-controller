@@ -244,3 +244,61 @@ test('setEnabled(false) with a clip open finalizes it (the graceful-shutdown pat
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// ── held announcement (scan lock-follow): the live indicator must never show the WRONG channel ──
+
+test('unresolved identity HOLDS opened; it announces with the RIGHT channel once resolved', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-'))
+  try {
+    const { source, push } = scriptedSource()
+    let open = true
+    let resolved = false
+    let name = 'STALE PREV CH' // what the slice says while the 04 2d read is in flight
+    const rec = new Recorder(source as unknown as RxCapture, dir, () => ({
+      ...ctx(), squelchOpen: open, identityResolved: resolved, channelName: name,
+    }))
+    const events: RecorderEvent[] = []
+    rec.subscribe((e) => events.push(e))
+    await rec.setEnabled(true)
+    push(30) // clip opens — announcement held
+    assert.ok(!events.some((e) => e.type === 'opened'), 'no live block while identity is unresolved')
+    assert.equal(rec.live, null, 'the hydration path holds it too')
+    // the lock-follow read lands: identity resolves with the REAL channel
+    name = 'LOCKED CH'
+    resolved = true
+    push(70)
+    const opened = events.find((e) => e.type === 'opened') as { clip: { channelName: string } } | undefined
+    assert.ok(opened, 'announced once resolved')
+    assert.equal(opened!.clip.channelName, 'LOCKED CH', 'announced with the read-back channel, never the stale one')
+    open = false
+    push(70)
+    await new Promise((r) => setTimeout(r, 50))
+    const saved = events.find((e) => e.type === 'saved') as { clip: { channelName: string } }
+    assert.equal(saved.clip.channelName, 'LOCKED CH')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a clip that closes before resolving stays silent: saved is its first announcement', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-'))
+  try {
+    const { source, push } = scriptedSource()
+    let open = true
+    const rec = new Recorder(source as unknown as RxCapture, dir, () => ({
+      ...ctx(), squelchOpen: open, identityResolved: false, channelName: 'STALE',
+    }))
+    const events: RecorderEvent[] = []
+    rec.subscribe((e) => events.push(e))
+    await rec.setEnabled(true)
+    push(100) // ≥ minDurationMs — will be kept
+    open = false
+    push(70)
+    await new Promise((r) => setTimeout(r, 50))
+    assert.ok(!events.some((e) => e.type === 'opened'), 'never announced live')
+    assert.ok(!events.some((e) => e.type === 'discarded'), 'nothing to retract either')
+    assert.ok(events.some((e) => e.type === 'saved'), 'the saved event (final metadata) is the first word')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

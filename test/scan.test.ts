@@ -169,7 +169,7 @@ test('scan-lock: RX on the NON-scanning side pauses the scan (no false lock)', a
 // ── scan-time display honesty: sweeping placeholder, zone status line, last-lock history ──
 import { applyEvent } from '../src/domain/reduce'
 import { initialState } from '../src/domain/state'
-import { scanLastLock, scanSweeping, vfoView, zoneReadout } from '../src/domain/view'
+import { memoryDisplay, scanLastLock, scanSweeping, vfoView, zoneReadout } from '../src/domain/view'
 
 test('scan display: sweeping hides values, lock shows them, unlock records history', () => {
   let rs = initialState()
@@ -188,9 +188,16 @@ test('scan display: sweeping hides values, lock shows them, unlock records histo
   assert.equal(swept.sweeping, true)
   assert.equal(swept.zoneReadout.tone, 'scanning')
 
-  // lock lands (lock-follow read put the real channel in the side slice) → values are live again
-  rs = { ...rs, sides: { ...rs.sides, a: { ...rs.sides.a, channelName: 'PAPA BRIDGE', freqMHz: 146.76 } } }
+  // lock CONFIRMED but the lock-follow read hasn't landed: still sweeping — the slice holds the
+  // PREVIOUS channel and must not flash (the two-phase lock: locked says stopped, lockedChannel
+  // says the data is current)
   rs = applyEvent(rs, { kind: 'scanLock', locked: true })
+  assert.equal(scanSweeping(rs.scan), true, 'locked-unread → placeholder holds')
+  assert.equal(memoryDisplay('memory', rs.sides.a.channelName, rs.scan), 'Scanning…')
+
+  // the read lands (channel block for the scanning side) → lockedChannel named → values live
+  rs = { ...rs, sides: { ...rs.sides, a: { ...rs.sides.a, channelName: 'PAPA BRIDGE', freqMHz: 146.76 } } }
+  rs = { ...rs, scan: { ...rs.scan, lockedChannel: 'PAPA BRIDGE' } }
   assert.equal(scanSweeping(rs.scan), false)
   assert.deepEqual(zoneReadout('LOCAL', 'memory', rs.scan), { text: 'LOCKED · FIRE', tone: 'locked' })
   assert.equal(scanLastLock(rs.scan), null, 'no history chip while locked — the value IS current')

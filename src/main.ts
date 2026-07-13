@@ -188,6 +188,7 @@ const recorder = new Recorder(
       bOpen: recv.bOpen,
       channelName: recv.channelName,
       freqMHz: recv.freqMHz,
+      identityResolved: recv.identityResolved,
       mode: recv.mode,
       talkgroup: recv.talkgroup,
     }
