@@ -126,8 +126,8 @@ export function vfoMemLabel(mode: ChannelMode): string {
  * stays "Scanning…" until the pause-confirm read names the parked channel. */
 export function memoryDisplay(mode: ChannelMode, channelName: string, scan: Scan | null): string {
   if (scan?.active) {
-    if (scan.locked) {
-      if (scan.lockedChannel === null) return 'Scanning…' // locked, read-back not landed — no stale name
+    if (scan.locked || scan.dwell) {
+      if (scan.lockedChannel === null) return 'Scanning…' // read-back not landed — no stale name
     } else {
       return scan.paused && scan.pausedChannel ? scan.pausedChannel : 'Scanning…'
     }
@@ -168,7 +168,7 @@ export function dmrCallerBadge(dmr: Dmr | null | undefined): string | null {
 /** Scan badge: LOCK / PAUSE / SCAN (+ the list name), or null when no scan runs. */
 export function scanBadge(scan: Scan | null | undefined): { label: string; locked: boolean; paused: boolean } | null {
   if (!scan?.active) return null
-  const word = scan.locked ? 'LOCK' : scan.paused ? 'PAUSE' : 'SCAN'
+  const word = scan.locked ? 'LOCK' : scan.dwell ? 'DWELL' : scan.paused ? 'PAUSE' : 'SCAN'
   return {
     label: `${word}${scan.listName ? ' · ' + scan.listName : ''}`,
     locked: scan.locked,
@@ -194,7 +194,8 @@ export function rxTxIndicator(transmitting: boolean, open: boolean): 'TX' | 'RX'
  * slice — show it. */
 export function scanSweeping(scan: Scan | null | undefined): boolean {
   if (!scan?.active) return false
-  if (scan.locked) return scan.lockedChannel === null
+  // locked or DWELLING (parked post-signal): the read-back channel is where the radio still sits
+  if (scan.locked || scan.dwell) return scan.lockedChannel === null
   return !(scan.paused && scan.pausedChannel !== null)
 }
 
@@ -204,9 +205,11 @@ export function zoneReadout(
   zoneName: string,
   mode: ChannelMode,
   scan: Scan | null | undefined,
-): { text: string; tone: 'scanning' | 'locked' | 'paused' | null } {
+): { text: string; tone: 'scanning' | 'locked' | 'dwell' | 'paused' | null } {
   if (scan?.active) {
     if (scan.locked) return { text: `LOCKED${scan.listName ? ' · ' + scan.listName : ''}`, tone: 'locked' }
+    // DWELL: signal ended, the radio is waiting out the dropout delay on this channel
+    if (scan.dwell) return { text: `DWELL${scan.listName ? ' · ' + scan.listName : ''}`, tone: 'dwell' }
     if (scan.paused) return { text: `PAUSED${scan.listName ? ' · ' + scan.listName : ''}`, tone: 'paused' }
     return { text: `SCANNING${scan.listName ? ' · ' + scan.listName : ''}`, tone: 'scanning' }
   }
@@ -218,7 +221,8 @@ export function zoneReadout(
  * it last locked on (name · freq), or null. Age is the caller's to render — it ticks, and the
  * view model stays a pure function of state. */
 export function scanLastLock(scan: Scan | null | undefined): { name: string; freqMHz: number | null; at: number } | null {
-  return scan?.active && !scan.locked && scan.lastLock ? scan.lastLock : null
+  // hidden during lock AND dwell — the channel it refers to is still the one on display
+  return scan?.active && !scan.locked && !scan.dwell && scan.lastLock ? scan.lastLock : null
 }
 
 // ── the composed per-card render model — the integration suite's single entry point ──
@@ -249,7 +253,7 @@ export interface VfoView {
   readonly scanBadge: { label: string; locked: boolean; paused: boolean } | null
   /** Frequency/values are unknown (scan hopping): the card shows placeholders, not stale digits. */
   readonly sweeping: boolean
-  readonly zoneReadout: { text: string; tone: 'scanning' | 'locked' | 'paused' | null }
+  readonly zoneReadout: { text: string; tone: 'scanning' | 'locked' | 'dwell' | 'paused' | null }
   readonly scanLastLock: { name: string; freqMHz: number | null; at: number } | null
 }
 

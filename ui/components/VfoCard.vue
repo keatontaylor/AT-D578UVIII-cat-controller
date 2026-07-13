@@ -268,7 +268,7 @@ function clearDial(): void {
         <span
           class="band-sel vfo-readout zone-readout"
           :class="zoneView.tone ? `zone-readout--${zoneView.tone}` : undefined"
-          :title="zoneView.tone === 'scanning' ? 'Scanning — position unknown until it locks' : zoneView.tone === 'paused' ? 'Scan paused — the other side is receiving' : zoneView.tone === 'locked' ? 'Scan locked on a busy channel' : mode === 'vfo' ? 'Direct frequency entry — no zone' : zoneName"
+          :title="zoneView.tone === 'scanning' ? 'Scanning — position unknown until it locks' : zoneView.tone === 'dwell' ? 'Signal ended — waiting out the dropout delay before the scan resumes' : zoneView.tone === 'paused' ? 'Scan paused — the other side is receiving' : zoneView.tone === 'locked' ? 'Scan locked on a busy channel' : mode === 'vfo' ? 'Direct frequency entry — no zone' : zoneName"
         >{{ zoneView.text }}</span>
       </div>
       <div class="vfo-step-row">

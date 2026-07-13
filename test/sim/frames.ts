@@ -235,6 +235,8 @@ export interface SmeterFields {
   readonly transmitting?: boolean
   /** Native scan running (byte 12 = 0x02) — the radio's own scan truth, corpus-pinned. */
   readonly scanning?: boolean
+  /** Scan PARKED on a channel (byte 3 bit 0x20) — lock + dropout-delay dwell (live-pinned). */
+  readonly parked?: boolean
 }
 
 /** `5a` async smeter push (16 B): selected RSSI @1, other @2, open mask @5 (bit1 selected /
@@ -245,6 +247,7 @@ export function smeterPush(f: SmeterFields): Uint8Array {
   b[0] = 0x5a
   b[1] = f.selectedRssi & 0xff
   b[2] = f.otherRssi & 0xff
+  b[3] = f.parked ? 0x20 : 0x00
   b[5] = (f.selectedOpen ? 0x02 : 0) | (f.otherOpen ? 0x04 : 0)
   b[7] = f.transmitting ? 0x86 : 0x89
   b[12] = f.scanning ? 0x02 : 0x00

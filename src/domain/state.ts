@@ -155,6 +155,12 @@ export const ScanState = z.object({
    * pause). Filled by the pause-confirm live-register read; null until that read lands — the
    * pre-scan channel name is stale while hopping and must not be presented as the parked one. */
   pausedChannel: z.string().nullable(),
+  /** Radio truth: the scan is PARKED on a channel (5a byte-3 bit 0x20) — spans the lock AND the
+   * post-signal dropout-delay window; clears at the exact hop resume. */
+  parked: z.boolean(),
+  /** DWELL: parked with the signal gone — the radio is waiting out the dropout delay before
+   * resuming. The locked channel's data is still CURRENT (it is still sitting on it). */
+  dwell: z.boolean(),
   /** The channel the LOCK-FOLLOW READ named (04 2c/2d reply after the lock confirm) — null until
    * that read lands. The lock boolean says the scan STOPPED; only this says the side slice's
    * channel data is CURRENT. Freshness gates: the card keeps its sweeping placeholder, and the
@@ -235,7 +241,7 @@ export function initialState(): RadioState {
     pendingSettings: {},
     signal: { aRssi: 0, bRssi: 0, aOpen: false, bOpen: false },
     dmr: null,
-    scan: { active: false, listName: null, locked: false, paused: false, pausedChannel: null, lockedChannel: null, lastLock: null },
+    scan: { active: false, listName: null, locked: false, paused: false, pausedChannel: null, parked: false, dwell: false, lockedChannel: null, lastLock: null },
     manualDial: null,
     audioGate: false,
     transmitting: false,

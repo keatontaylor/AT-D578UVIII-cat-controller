@@ -30,7 +30,7 @@ field, no sequence number, no delimiter. (LINK_PROTOCOL §1.)
 |---|---|---|---|
 | `03` | 5 | ack (R→H) | **inbound command-ACK** `03 <op> 00 <status> <ck>` — checksum-valid; status byte[3]=`00`=success (confirmed for `08`/`64`/`01`/`5a`) |
 | `03` | 4 | ack (H→R) | **outbound push-ACK** `03 <op> 00 00` for required pushes `{5e,58,59,5c,5f}` — fixed 4 bytes, **NOT checksum-valid** (byte[3]=`00`, not the additive sum). Emit literal; do not checksum |
-| `5a` | 16 | free push | RSSI / squelch per side (not acked) |
+| `5a` | 16 | free push | RSSI / squelch per side (not acked). byte 3 bit `0x20` = scan **PARKED** (live-pinned 2026-07-13): sets when the hop stops on a carrier (before the audio gate), holds through signal + the dropout-delay DWELL, clears at the exact hop resume. byte 12 `0x02` = scan running |
 | `5b` | 3 | free push | **AUDIO gate** open/close (not acked) — decoded voice flowing to the speaker/BT path, NOT squelch (per-side squelch bits ride `5a`). Live-QSO-pinned 2026-07-13: on DMR opens ~150 ms after the 58/59 presentation, closes at end of voice (hang time keeps the slot busy until `5c`) |
 | `5e` | 18 | **acked push** | DMR call state. byte1 `01`=active/`00`=ending; byte2 `60`/`64`=active `20`/`24`=hang; dest=bytes 8-11 (group→TG, private→own ID), src=bytes 13-16 (caller) |
 | `58` | 112 | **acked push** | **CALL PRESENTATION** (the BT-01 popup; live-QSO-pinned 2026-07-13): byte1 bit7 = TX context; caller/front id BCD @6-9 + the radio's 16-char DISPLAY name @10-25 (usually the destination's contact name, often stale — not a talker alias); counterpart block: optional name2 @87-102, id2 BCD @105-108, undecoded LE16 @109-110. Pushed ONLY for calls the radio presents — never for scan samples / DigiMon-off traffic — and always precedes the audio gate |
@@ -78,7 +78,7 @@ Lengths verified across many samples (single fixed length unless noted).
 | 37,38 | 103 | DMR TX contact A/B (name + BCD id) | partial |
 | 45 | 81 | (seen rarely) | OPEN |
 | 4a | 135 | **active-zone scan directory** (follows selected side) | CONFIRMED |
-| 4b | **18 / 135** | scan-list directory browse (**18 = empty slot**, 135 = populated) | CONFIRMED |
+| 4b | **18 / 135** | scan-list directory browse (**18 = empty slot**, 135 = populated). Bytes 6-13 = four LE16 timers in 0.1 s: Look Back A / Look Back B / Dropout Delay / Dwell (e.g. `14 00 1e 00 1f 00 1f 00` = 2.0/3.0/3.1/3.1 s — live-matched to CPS config 2026-07-13) | CONFIRMED |
 | 4d | 29 | config/status | OPEN |
 | 4e | 7 | tiny status word (`00 88 00 00`) | **OPEN** |
 | 4f | 70 | WX/fixed channel? (`16 25 50` = 162.550 BCD) | HYPOTHESIS |

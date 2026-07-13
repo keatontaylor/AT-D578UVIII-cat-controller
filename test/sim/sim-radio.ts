@@ -425,11 +425,14 @@ export class SimRadio implements Transport {
     this.pushSmeter()
   }
 
-  /** The landed scan channel goes quiet: carrier drops and hopping resumes. */
+  /** The landed scan channel goes quiet: carrier drops and hopping resumes. (The real radio
+   * DWELLS for the dropout delay between those two — model that phase with clearCarrier alone,
+   * landed still set, then this to lift the park.) */
   scanResume(): void {
     if (!this.scanning) return
     this.clearCarrier(this.scanning.side)
     this.scanning.landed = null
+    this.pushSmeter() // the park bit clearing IS the resume signal
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
@@ -520,6 +523,7 @@ export class SimRadio implements Transport {
       otherOpen: this.sideOpen(other),
       transmitting: this.transmitting,
       scanning: this.scanning !== null, // 5a byte 12 — the radio reports its own scan truth
+      parked: this.scanning?.landed != null, // byte 3 bit 0x20 — parked through lock + dwell
     }
   }
 

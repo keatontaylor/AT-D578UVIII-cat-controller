@@ -313,6 +313,8 @@ export interface Smeter {
   /** A native scan is RUNNING (the radio's own truth — covers scans started on the radio's front
    * panel, and scans already running when we connect: the startup `04 5a` read carries it). */
   readonly scanning: boolean
+  /** Scan parked on a channel (byte 3 bit 0x20) — spans lock + the dropout-delay DWELL. */
+  readonly parked: boolean
 }
 
 // byte 7 of the 5a push is a radio-state bitfield. Live-pinned (Sitting 1, 2026-07-03): 0x86 and
@@ -335,6 +337,11 @@ const OPEN_OTHER = 0x04
 // the very next push after the 03 57 ack. This is how the BT-01 knows a scan is already running
 // when it connects — the startup `04 5a` read carries it (@13 there).
 const SCANNING = 0x02
+// `5a` byte 3 bit 0x20 — scan PARKED on a channel (live-pinned 2026-07-13, locks 07:04/07:08):
+// sets when the hop stops on a carrier (even ~0.5 s BEFORE the audio gate opens — the pre-open
+// check), holds through the signal AND the post-signal dropout-delay window, and clears at the
+// exact hop resume (measured 3.03 s / 3.08 s after gate close vs the list's configured 3.1 s).
+const PARKED = 0x20
 
 /** `5a` async push (16 bytes) — RX level + squelch state RELATIVE to the selected side. Offsets are
  * the `04 5a` read form shifted down by 1 (no `04` prefix): selected RSSI @1, other @2, open mask
@@ -349,6 +356,7 @@ export function decodeSmeter(frame: Uint8Array): Smeter | null {
     otherOpen: (mask & OPEN_OTHER) !== 0,
     transmitting: TX_STATE_VALUES.has(frame[7]!),
     scanning: (frame[12]! & SCANNING) !== 0,
+    parked: (frame[3]! & PARKED) !== 0,
   }
 }
 

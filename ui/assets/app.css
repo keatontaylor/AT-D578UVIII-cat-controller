@@ -1293,6 +1293,8 @@ body {
   animation: sql-badge-live-pulse 1.4s ease-in-out infinite;
 }
 .zone-readout--locked { color: #7ee787; }
+/* DWELL: parked post-signal, waiting out the dropout delay — amber, steady (about to move on) */
+.zone-readout--dwell { color: #d29922; }
 .zone-readout--paused { color: #b6bec8; }
 
 .channel-step-btn--label {

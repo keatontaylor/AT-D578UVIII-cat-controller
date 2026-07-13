@@ -64,9 +64,11 @@ test('channelBlock round-trips through decodeChannel (analog + DMR)', () => {
 
 test('smeter and DMR pushes round-trip through their decoders', () => {
   const s = decodeSmeter(smeterPush({ selectedRssi: 4, otherRssi: 2, selectedOpen: true, otherOpen: false, transmitting: true }))
-  assert.deepEqual(s, { selectedRssi: 4, otherRssi: 2, selectedOpen: true, otherOpen: false, transmitting: true, scanning: false })
+  assert.deepEqual(s, { selectedRssi: 4, otherRssi: 2, selectedOpen: true, otherOpen: false, transmitting: true, scanning: false, parked: false })
   const scanning = decodeSmeter(smeterPush({ selectedRssi: 0, otherRssi: 0, selectedOpen: false, otherOpen: false, scanning: true }))
   assert.equal(scanning?.scanning, true, 'the byte-12 scan flag round-trips')
+  const parked = decodeSmeter(smeterPush({ selectedRssi: 0, otherRssi: 0, selectedOpen: false, otherOpen: false, scanning: true, parked: true }))
+  assert.equal(parked?.parked, true, 'the byte-3 park bit round-trips')
   const d = decodeDmr(dmrVoicePush({ direction: 'rx', colorCode: 10, slot: 2, source: 3223436, dest: 43114 }))
   assert.equal(d?.direction, 'rx')
   assert.equal(d?.colorCode, 10)

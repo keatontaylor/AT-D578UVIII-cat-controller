@@ -51,6 +51,9 @@ export type DomainEvent =
   | { kind: 'volume'; side: SideKey; level: number }
   | { kind: 'scan'; active: boolean; listName: string | null }
   | { kind: 'scanLock'; locked: boolean }
+  | { kind: 'scanDwell' }
+  | { kind: 'scanRelock' }
+  | { kind: 'scanResume' }
   | { kind: 'scanPause'; paused: boolean }
   | { kind: 'manualDial'; dial: { target: number; callType: 'group' | 'private' } | null }
   | { kind: 'dmrCaller'; callerId: number; callsign: string | null; name: string | null; location: string | null }
@@ -165,10 +168,15 @@ function applySmeter(state: RadioState, s: Smeter | null): RadioState {
   // OFF transition resets the slice exactly like a stop ack. Corpus: the flag flips on the very
   // next push after the ack, so the two sources never fight.
   let scan = state.scan
+  // While scanning, mirror the radio's PARK truth (byte-3 bit) — the session's dwell/resume
+  // state machine keys off it.
+  if (s.scanning === scan.active && scan.active && scan.parked !== s.parked) {
+    scan = { ...scan, parked: s.parked }
+  }
   if (s.scanning !== scan.active) {
     scan = s.scanning
-      ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, lockedChannel: null, lastLock: null }
-      : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, lockedChannel: null, lastLock: null }
+      ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, parked: s.parked, dwell: false, lockedChannel: null, lastLock: null }
+      : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, parked: false, dwell: false, lockedChannel: null, lastLock: null }
   }
   return {
     ...state,
@@ -474,7 +482,7 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
 
     case 'scan':
       // Start/stop resets the lock + pause (a fresh scan hasn't locked or paused yet).
-      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, lockedChannel: null, lastLock: null } }
+      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, parked: false, dwell: false, lockedChannel: null, lastLock: null } }
 
     case 'scanLock': {
       if (state.scan.locked === event.locked) return state
@@ -486,7 +494,31 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
         if (side.channelName) lastLock = { name: side.channelName, freqMHz: side.freqMHz, at: Date.now() }
       }
       // a fresh lock is UNREAD until the lock-follow read names lockedChannel; a drop clears it
-      return { ...state, scan: { ...state.scan, locked: event.locked, lockedChannel: null, lastLock } }
+      return { ...state, scan: { ...state.scan, locked: event.locked, dwell: false, lockedChannel: null, lastLock } }
+    }
+
+    case 'scanDwell':
+      // Signal ended but the radio is still PARKED (dropout delay): the locked channel's values
+      // stay current and displayed — only the badge/status changes.
+      if (!state.scan.locked && state.scan.dwell) return state
+      return { ...state, scan: { ...state.scan, locked: false, dwell: true } }
+
+    case 'scanRelock':
+      // Re-key inside the dropout window: the radio re-opens the SAME channel without hopping —
+      // lockedChannel is KEPT (no placeholder flash); the session re-reads to reconcile anyway.
+      if (state.scan.locked) return state
+      return { ...state, scan: { ...state.scan, locked: true, dwell: false } }
+
+    case 'scanResume': {
+      // The park lifted — the hop resumed. The channel it sat on becomes the "Last:" history.
+      const scan = state.scan
+      if (!scan.locked && !scan.dwell && scan.lockedChannel === null) return state
+      let lastLock = scan.lastLock
+      const side = state.sides[state.selectedSide]
+      if (scan.lockedChannel && side.channelName) {
+        lastLock = { name: side.channelName, freqMHz: side.freqMHz, at: Date.now() }
+      }
+      return { ...state, scan: { ...scan, locked: false, dwell: false, lockedChannel: null, lastLock } }
     }
 
     case 'scanPause':

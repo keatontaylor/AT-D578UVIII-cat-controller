@@ -28,9 +28,30 @@ test('scan lock: the confirm timer reads the locked channel while the radio is q
   assert.equal(rig.state.sides.a.freqMHz, 462.6)
   rig.expectConsistent()
 
-  rig.sim.scanResume() // channel goes quiet → unlock, ready for the next hit
+  // signal drops but the radio stays PARKED (dropout delay) → DWELL: values stay current
+  rig.sim.clearCarrier('a')
   await rig.advance(100)
   assert.equal(rig.state.scan.locked, false)
+  assert.equal(rig.state.scan.dwell, true, 'parked post-signal = dwell')
+  assert.equal(rig.state.scan.lockedChannel, 'GMRS 17', 'the channel is STILL current through the dwell')
+
+  // re-key inside the dropout window: relock instantly, same channel, no confirm wait
+  rig.sim.setCarrier('a', 3)
+  await rig.advance(100)
+  assert.equal(rig.state.scan.locked, true, 're-key inside dwell relocks immediately')
+  assert.equal(rig.state.scan.dwell, false)
+  assert.equal(rig.state.scan.lockedChannel, 'GMRS 17', 'no placeholder flash on relock')
+
+  // signal ends again, then the park lifts → the hop RESUMES; the channel becomes history
+  rig.sim.clearCarrier('a')
+  await rig.advance(100)
+  assert.equal(rig.state.scan.dwell, true)
+  rig.sim.scanResume() // park bit clears — the radio's own resume signal
+  await rig.advance(100)
+  assert.equal(rig.state.scan.locked, false)
+  assert.equal(rig.state.scan.dwell, false)
+  assert.equal(rig.state.scan.lockedChannel, null)
+  assert.equal(rig.state.scan.lastLock?.name, 'GMRS 17', 'the dwelled channel became the Last: history')
   assert.equal(rig.state.scan.active, true, 'still scanning')
   rig.assertClean()
 })

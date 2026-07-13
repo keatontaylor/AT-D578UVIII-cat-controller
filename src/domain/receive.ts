@@ -62,7 +62,7 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
   const dmr = state.dmr
   // identity is unresolved when the audio is attributed to the SCANNING side (the selected side
   // scans) and the lock-follow read hasn't named the channel yet — hopping or locked-unread
-  const scanUnread = state.scan.active && (state.scan.locked ? state.scan.lockedChannel === null : !state.scan.paused || state.scan.pausedChannel === null)
+  const scanUnread = state.scan.active && (state.scan.locked || state.scan.dwell ? state.scan.lockedChannel === null : !state.scan.paused || state.scan.pausedChannel === null)
 
   let side: SideKey = state.selectedSide
   let source: ReceiveSnapshot['source'] = 'selected'

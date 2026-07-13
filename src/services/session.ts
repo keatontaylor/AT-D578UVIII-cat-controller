@@ -749,7 +749,15 @@ export class Session {
     this.setScanPaused(this.sideReceiving(otherSide))
 
     if (this.sideReceiving(scanSide)) {
-      if (!this.scanLockRead && this.scanLockTimer == null) {
+      if (this.current.scan.dwell) {
+        // Re-key INSIDE the dropout window: the radio re-opens the same channel without hopping
+        // (that is what the dwell is for) — relock immediately, no confirm window. lockedChannel
+        // is kept (no placeholder flash) but we re-read anyway: if a fast hop slipped between 5a
+        // pushes the reply reconciles the name ~1 RTT later.
+        this.dispatch({ kind: 'scanRelock' })
+        this.scanLockRead = true
+        this.link.submit(readRegister(this.scanSide === 'b' ? 0x2d : 0x2c, 0x01))
+      } else if (!this.scanLockRead && this.scanLockTimer == null) {
         this.scanLockTimer = setTimeout(() => {
           this.scanLockTimer = null
           if (this.scanSide != null && this.sideReceiving(this.scanSide) && !this.scanLockRead) {
@@ -777,12 +785,20 @@ export class Session {
         this.scanLockTimer = null
       }
       if (this.scanLockRead) {
-        this.scanLockRead = false
-        this.dispatch({ kind: 'scanLock', locked: false })
-        // Lock dropped while the pause still holds: the scan stays PARKED (the other side pins
-        // it) — refresh the parked-channel read so pausedChannel is named even when the pause
-        // predates the lock (its original confirm read may never have fired).
-        if (this.scanPaused && this.scanPauseTimer == null) this.armScanPauseRead()
+        if (this.current.scan.parked) {
+          // Signal gone but the radio is still PARKED — the dropout-delay DWELL. The channel
+          // data stays current (still sitting on it); scanLockRead stays armed so a re-key
+          // relocks and the park-clear below resumes.
+          this.dispatch({ kind: 'scanDwell' })
+        } else {
+          // Park lifted (or the fixture predates the byte-3 bit): the hop resumed.
+          this.scanLockRead = false
+          this.dispatch({ kind: 'scanResume' })
+          // Resume while the pause still holds: the scan stays parked by the OTHER side —
+          // refresh the parked-channel read so pausedChannel is named even when the pause
+          // predates the lock (its original confirm read may never have fired).
+          if (this.scanPaused && this.scanPauseTimer == null) this.armScanPauseRead()
+        }
       }
     }
   }
