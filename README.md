@@ -1,109 +1,64 @@
-# AnyTone AT-D578UV Bluetooth Controller
+# AnyTone D578 Controller — Redesign (v2) Doc Set
 
-Web-based remote controller for an **AnyTone AT-D578UV** mobile radio over
-**Bluetooth Classic** (SPP control + HFP audio), running on a Raspberry Pi / Linux
-host. Shows live state (frequency, zone/channel, S-meter, squelch), controls PTT
-and active side (A/B), streams two-way audio over WebRTC, and records
-squelch-opened RX audio.
+This folder is the **foundational specification** for a clean re-implementation of the
+AnyTone D578UV Bluetooth controller. It is the output of a long design pass over the
+existing proof-of-concept (`app/anytone-server.mjs` + `app/pages/index.vue`), distilled
+into normative contracts so the rewrite can be built against a *spec*, not by archaeology.
 
-## One-line install (Raspberry Pi / Debian)
+> **Status: DRAFT for review.** Nothing here is committed to code yet. Review, push back,
+> and we refine before a line is written.
 
-For a full production setup on a Linux host — system deps, Node 20, build,
-Bluetooth audio, and a boot-time systemd service — run the installer:
+## Philosophy
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/keatontaylor/AT-D578UVIII-cat-controller/main/install.sh | bash
-```
+1. **Treat the current codebase as a PoC, not garbage.** It encodes a large amount of
+   hard-won, validated behavior. We **harvest** it as the reference implementation and
+   behavioral oracle — every guard and edge case becomes a numbered requirement or a test,
+   not a deleted line.
+2. **Spec-first, then code.** These docs are the requirements. The protocol is now
+   well-understood (it was reverse-engineered live and documented); the rewrite implements
+   a known contract rather than re-deriving one.
+3. **Capture-verified, not blind.** We have a corpus of real wire captures
+   (`captures/wire.ndjson`). The rewrite's link/codec layers are validated by **replaying
+   captured traffic and asserting identical framing/decoding** (golden-master /
+   characterization tests). This is what turns a risky rewrite into a verifiable one.
+4. **Invariants, not incidents.** Contracts describe what is *always true* (positive rules),
+   not a catalogue of bugs we hit. Where a historical "edge case" was really a symptom of an
+   incomplete model, it collapses into the correct rule. (e.g. the "5e wedge" is just *"these
+   message classes require an ACK"*; "codeplug corruption" is just *"one frame on the wire at
+   a time, with a gap"*.)
+5. **Transplant the gnarly glue, rewrite the protocol.** The radio *protocol* is the
+   well-understood part (safe to rewrite). The BT/audio *orchestration* (BlueZ, BlueALSA,
+   HFP/SCO, ffmpeg, WebRTC) is under-documented system glue — we **port it behind a clean
+   interface** rather than re-deriving it.
+6. **Small, single-responsibility modules.** Files are sized so a human *and* an LLM can hold
+   one in working memory. No 10k-line monoliths. This is a first-class requirement
+   (see REQUIREMENTS §NF), not a nicety.
 
-It is idempotent (safe to re-run) and also works from inside an existing clone
-(`./install.sh`). It installs Bluetooth/BlueALSA, ffmpeg/ALSA, nginx and build
-tools, ensures Node ≥ 20 via NodeSource, runs `npm install && npm run build`,
-seeds `.env` from the example, configures the isolated AnyTone BlueALSA HFP
-service, installs scoped sudoers, and enables the `anytone` systemd service plus
-the nginx proxy. Afterward, edit `.env` (set `ANYTONE_BT_ADDR`) and
-`sudo systemctl restart anytone`. See
-[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) for the manual route.
+## How to read this set
 
-## Quick start (development)
-
-Prerequisite: **Node.js ≥ 20**. (Connecting to a radio additionally needs a Linux
-host with BlueZ + BlueALSA + `ffmpeg` — see [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)
-— but the UI runs without any of that.)
-
-From the **repo root**:
-
-```bash
-npm install      # installs the app (delegates to app/)
-npm run dev      # backend (:3010) + UI (:3030) together
-```
-
-Open **http://localhost:3030/**. The servers start without a radio (the UI shows
-disconnected) — that's expected. To connect real hardware, set your radio's MAC:
-`cp .env.example .env` and edit `ANYTONE_BT_ADDR`.
-
-Common commands (all from the repo root):
-
-| Command | Does |
+| Doc | What it covers |
 |---|---|
-| `npm run dev` | backend + UI dev (hot-reload UI), open `http://localhost:3030/` |
-| `npm run dev:backend` / `npm run dev:frontend` | run one side only |
-| `npm run build` then `npm run start` | production build, then run the built app |
-| `npm run typecheck` | `vue-tsc` over the project |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | Numbered functional + non-functional requirements; scope and non-goals |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Single-process layered design, the one state object, module boundaries |
+| [LINK_PROTOCOL.md](LINK_PROTOCOL.md) | **Normative** radio link contract — framing, transactions, ACK classes, ARQ |
+| [UI_PROTOCOL.md](UI_PROTOCOL.md) | The WebSocket command bus, command lifecycle, desired/reported state, PTT lifecycle |
+| [CONNECTION_AND_COMPONENTS.md](CONNECTION_AND_COMPONENTS.md) | Connection establishment sequence + external-component inventory |
+| [COMMAND_REFERENCE.md](COMMAND_REFERENCE.md) | Frame format + opcode/register catalogue (decode completion tracked here) |
+| [TESTING.md](TESTING.md) | Capture-replay / golden-master test strategy (how NF4 is actually done) |
 
-More detail: [docs/RUNNING.md](docs/RUNNING.md). Configuration (ports, hosts, base
-URL, radio MAC) is all via env vars — [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
-and [`.env.example`](.env.example). Nothing personal is required; the app does
-**not** need any CSV file to run.
+## Evidence grading (used throughout)
 
-**Deployment is optional and not required to run locally.** systemd, nginx,
-Docker, pm2, etc. are all supported but none are assumed — see
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) and the templates in [`deploy/`](deploy/).
+Every behavioral claim carries a grade. Do not promote a grade without new evidence; do not
+build a hard dependency on anything below **DOCUMENTED** without flagging it.
 
-### Privacy / publishing
-Local & personal data (your `.env`, codeplug `*.CSV`, protocol `captures/`, audio
-recordings) is gitignored and must never be committed. See
-[docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md).
-
-## Layout
-
-| Path | What |
+| Grade | Meaning |
 |---|---|
-| `app/` | **Production** Nuxt UI + Node backend (`anytone-server.mjs`). |
-| `examples/` | Generic example config / channel CSV (safe to read). |
-| `docs/` | Architecture, data flow, configuration, audits, protocol. |
-| `captures/` *(gitignored)* | Runtime protocol captures / async-frame log. Personal; never committed. |
-| `channels.CSV`, `zones.CSV` *(gitignored)* | Your CPS codeplug export (optional runtime input). |
+| **CONFIRMED** | Reproduced live / measured across many samples |
+| **OBSERVED** | Seen directly in a capture, single session / not stress-tested |
+| **DOCUMENTED** | Recorded in prior RE, not re-verified here |
+| **INFERRED** | Logical deduction from confirmed facts |
+| **HYPOTHESIS** | Working model, not yet validated — *must not be asserted as fact* |
+| **OPEN** | Unknown; data needed |
 
-## Documentation
-
-- [docs/RUNNING.md](docs/RUNNING.md) — run it locally (dev).
-- [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — Node / BlueZ / BlueALSA / ffmpeg.
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — all environment variables.
-- [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) — optional systemd / nginx / Docker.
-- [docs/OPTIONAL_INTEGRATIONS.md](docs/OPTIONAL_INTEGRATIONS.md) — squelch recording (opt-in).
-- [docs/LOCAL_DEVELOPMENT.md](docs/LOCAL_DEVELOPMENT.md) — run locally; what stays local.
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — components & layers.
-- [docs/DATA_FLOW.md](docs/DATA_FLOW.md) — request/response tracing.
-- [docs/REPO_MAP.md](docs/REPO_MAP.md) — file inventory.
-- [docs/ANYTONE_578_NOTES.md](docs/ANYTONE_578_NOTES.md) — implemented vs TODO.
-- [docs/PROTOCOL.md](docs/PROTOCOL.md) — the protocol bible.
-- [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md)
-
-## Status (2026-06-14)
-
-**Working:** connect, live reads, S-meter/squelch, PTT, side select, frequency &
-VFO-mode writes, zone/channel select & stepping over BT, WebRTC audio, squelch
-recording.
-**Not implemented (return HTTP 501, marked `TODO_ANYTONE`):** the inherited
-`preset-execute` / `memory-write` / `pseudo-scan` features (need an unfound
-memory-channel write opcode). See
-[docs/ANYTONE_578_NOTES.md](docs/ANYTONE_578_NOTES.md).
-
-## Requirements & security
-
-Node 20+ for the app; radio control additionally needs Linux with BlueZ
-(`rfcomm`, `bluetoothctl`), **BlueALSA** (`bluealsa`, `bluealsa-cli`), and
-`ffmpeg` ([docs/DEPENDENCIES.md](docs/DEPENDENCIES.md)). The backend shells out to
-some of these via passwordless `sudo -n` at Connect time. The UI can key a
-licensed transmitter — put authentication in front of it before any remote/public
-exposure. See [docs/SECURITY_REVIEW.md](docs/SECURITY_REVIEW.md).
+The cardinal rule: **never launder a HYPOTHESIS into a fact to make the contract look tidy.**
+A clean-but-wrong spec is worse than an honest messy one.

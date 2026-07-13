@@ -15,7 +15,7 @@ import { hexToBytes } from './capture'
 
 const STARTUP = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  '../..',
+  '..',
   'captures/bt01-relay-20260619-150048.ndjson',
 )
 

@@ -1,75 +1,49 @@
-# ---- Dependencies ----
+# ---- Dependencies / build ----
 node_modules/
-**/node_modules/
-
-# ---- Nuxt / build output ----
-.nuxt/
-**/.nuxt/
-.output/
-**/.output/
-.data/
-**/.data/
+*.tsbuildinfo
 dist/
-
-# ---- Python ----
-__pycache__/
-**/__pycache__/
-*.pyc
-.venv/
-venv/
+.data/
 
 # ---- Local config & secrets (never publish) ----
+# TURN/API credentials live ONLY in the systemd drop-in (~/.config/systemd/user/…/*.conf).
 .env
 .env.*
 !.env.example
 *.local
 *.local.*
-config/local.*
-.local/
-local/
 .claude/
 
-# ---- Local-only research / process material ----
-# Keep reverse-engineering workspaces and internal cleanup notes out of the
-# public source tree. Move anything worth publishing into docs/PROTOCOL.md or
-# user-facing docs first.
-experiments/
-tools/
-docs/BUG_AUDIT.md
-docs/DUAL_TRANSPORT_PLAN.md
-docs/LLM_CONTEXT.md
-docs/PUBLICATION_CLEANUP.md
-docs/REFACTOR_PLAN.md
-docs/STARTUP_CLEANUP.md
-docs/VALIDATION.md
-app/sco-socket.mjs
-app/scripts/zone-snapshot.mjs
-
-# ---- Runtime / captured data (machine-local, personal) ----
-# Recordings are runtime audio artifacts (~hundreds of MB).
-**/.data/recordings/
-# Protocol captures, codeplug backups, zone maps, async-frame logs. Contain
-# personal data (callsign, contacts, GPS, channel names). Written at runtime by
-# anytone-server.mjs and local-only diagnostic scripts.
-captures/
-**/captures/
+# ---- Runtime artifacts (machine-local) ----
+recordings/
+runtime-config.json
+direwolf.conf
 runtime/
-cache/
 logs/
 *.log
-*.ndjson
 
-# ---- Personal codeplug (callsign, radio IDs, contacts) ----
-# Required at runtime by anytone-server.mjs (ANYTONE_CHANNELS_CSV) but not
-# checked in: it is personal data. Keep a local copy. See examples/ for the schema.
+# ---- Protocol captures & personal data ----
+# Wire captures / codeplug exports contain personal data (callsign, contacts,
+# channel names). captures/wire.ndjson is the one deliberate exception: a
+# frozen, reviewed replay fixture the test suite depends on.
+captures/
+!captures/wire.ndjson
+*.ndjson
+!captures/wire.ndjson
 *.CSV
 *.csv
 !examples/*.example.csv
 
-# ---- Vendor firmware (proprietary; do not redistribute) ----
-# AnyTone BT-01 remote-head firmware update files, kept locally for RE only.
+# ---- Local-only research / RE workspaces ----
+experiments/
 firmware/
 
 # ---- Editor / OS ----
 .DS_Store
 *.swp
+
+# ---- Local-only RE tools (unpublished; the two whitelisted ones are repo tooling) ----
+tools/*
+!tools/gen-frame-lengths.mjs
+!tools/fakephone.mjs
+__pycache__/
+*.pyc

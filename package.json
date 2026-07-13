@@ -1,21 +1,37 @@
 {
-  "name": "anytone-d578-controller",
-  "version": "0.1.0",
-  "description": "Web-based remote controller for the AnyTone AT-D578UV radio over Bluetooth. Root entry point — delegates to the app in app/.",
+  "name": "anytone-v2",
+  "version": "0.0.0",
   "private": true,
+  "type": "module",
+  "description": "AnyTone D578 controller — v2 (redesign). Layered, capture-verified rebuild of the PoC in ../app. See redesign/*.md for the contract.",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "postinstall": "npm --prefix app install",
-    "dev": "npm --prefix app run dev",
-    "dev:frontend": "npm --prefix app run dev:frontend",
-    "dev:backend": "npm --prefix app run dev:backend",
-    "build": "npm --prefix app run build",
-    "start": "npm --prefix app run start",
-    "start:frontend": "npm --prefix app run start:frontend",
-    "start:backend": "npm --prefix app run start:backend",
-    "preview": "npm --prefix app run preview",
-    "typecheck": "npm --prefix app run typecheck"
+    "dev": "DEV=1 node --import tsx --watch src/main.ts",
+    "build": "vite build",
+    "start": "node --import tsx src/main.ts",
+    "test": "node --import tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@fastify/middie": "^9.0.0",
+    "@types/node": "^20.19.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-vue": "^6.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^7.0.0",
+    "vue": "^3.5.0",
+    "ws": "^8.21.0"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.0",
+    "@fastify/websocket": "^11.0.0",
+    "@roamhq/wrtc": "^0.10.0",
+    "dbus-next": "^0.10.2",
+    "fastify": "^5.0.0",
+    "koffi": "^3.0.2",
+    "zod": "^3.25.76"
   }
 }
