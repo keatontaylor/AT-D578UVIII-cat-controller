@@ -1,0 +1,743 @@
+{
+  "note": "Menu setting map harvested from BT-01 relay settings-walk captures (write 08 <sub> <val> tail; read 04 05/06/09 before/after; isolate the changed byte). payloadOffset = byte index in the full read frame INCLUDING the 2-byte `04 0X` header (so first data byte = offset 2); equals the harvested PROTOCOL.md byte[N]. blockOffset = payloadOffset - 2. value = literal option index (first option / off = 0). ACK status byte[3] = 00 on success. Every 08 write appends the constant writeTail below.",
+  "source": "captures/bt01-relay-macos-20260627-163020.ndjson (settings_walk session)",
+  "writeFrame": "08 <subOpcode> <valueIndex> <writeTail>",
+  "writeTail": "88 1f 00 20 71 02 00 08 51 06 00 08 45 04 00 08 4d 06 00 08",
+  "writeTailNote": "20-byte fixed context payload, byte-identical across all observed 08 writes (key tone .. NR .. VOX .. color). v1 can emit it verbatim.",
+  "ackSuccess": {
+    "frame": "03 08 00 00 <ck>",
+    "statusByteIndex": 3,
+    "statusValue": "00"
+  },
+  "blocks": {
+    "05": {
+      "readReq": "04 05 00 00 00 00",
+      "len": 99,
+      "checksumOffset": 98,
+      "role": "core settings A (the big one \u2014 most menu items)"
+    },
+    "06": {
+      "readReq": "04 06 00 00 00 00",
+      "len": 99,
+      "checksumOffset": 98,
+      "role": "settings B \u2014 audio gains + display font color (band/step table region)"
+    },
+    "09": {
+      "readReq": "04 09 00 00 00 00",
+      "len": 141,
+      "checksumOffset": 140,
+      "role": "settings C \u2014 BT-01 gain, noise reduction, GPS, channel colors, VOX, fan, mic"
+    }
+  },
+  "encoding": "literal-index",
+  "settings": [
+    {
+      "name": "key_tone",
+      "menu": "voice/key tone",
+      "op": "04",
+      "block": "05",
+      "payloadOffset": 2,
+      "options": [
+        "off",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5",
+        "L6",
+        "L7",
+        "L8"
+      ],
+      "ex": "off(00)->L1(01)",
+      "desc": "Beep volume for keypad and button presses."
+    },
+    {
+      "name": "digital_idle",
+      "menu": "voice/digital idle",
+      "op": "05",
+      "block": "05",
+      "payloadOffset": 44,
+      "options": [
+        "off",
+        "type1",
+        "type2",
+        "type3"
+      ],
+      "ex": "off(00)->type1(01)",
+      "desc": "Comfort tone played while idle on a DMR channel."
+    },
+    {
+      "name": "analog_idle",
+      "menu": "voice/analog idle",
+      "op": "06",
+      "block": "09",
+      "payloadOffset": 62,
+      "options": [
+        "off",
+        "on"
+      ],
+      "ex": "off(00)->on(01)",
+      "desc": "Enable the analog idle / roger tone."
+    },
+    {
+      "name": "startup_sound",
+      "menu": "voice/startup sound",
+      "op": "07",
+      "block": "05",
+      "payloadOffset": 47,
+      "options": [
+        "off",
+        "on"
+      ],
+      "ex": "off(00)->on(01)",
+      "desc": "Play the boot chime when the radio powers on."
+    },
+    {
+      "name": "talk_permit",
+      "menu": "voice/talk permit",
+      "op": "08",
+      "block": "05",
+      "payloadOffset": 42,
+      "options": [
+        "off",
+        "digital",
+        "analog",
+        "both"
+      ],
+      "ex": "off(00)->digital(01)",
+      "desc": "Which modes require the channel to be free before transmit is allowed."
+    },
+    {
+      "name": "d_reset_tone",
+      "menu": "voice/D-Reset tone",
+      "op": "09",
+      "block": "05",
+      "payloadOffset": 43,
+      "options": [
+        "off",
+        "on"
+      ],
+      "ex": "off(00)->on(01)",
+      "desc": "Play a tone when the DMR call hang-timer resets."
+    },
+    {
+      "name": "mic_speaker_set",
+      "menu": "voice/mic speaker set",
+      "op": "0b",
+      "block": "09",
+      "payloadOffset": 39,
+      "options": [
+        "main",
+        "sub"
+      ],
+      "ex": "main(00)->sub(01)",
+      "desc": "Route the external mic's speaker audio to the Main or Sub side."
+    },
+    {
+      "name": "max_volume_level",
+      "menu": "voice/max volume",
+      "op": "10",
+      "block": "05",
+      "payloadOffset": 49,
+      "options": [
+        "Indoor",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5",
+        "L6",
+        "L7",
+        "L8"
+      ],
+      "ex": "Indoor(00)->L1(01)",
+      "desc": "Upper limit for the master volume control."
+    },
+    {
+      "name": "enhanced_sound",
+      "menu": "voice/enhanced sound",
+      "op": "15",
+      "block": "05",
+      "payloadOffset": 65,
+      "options": [
+        "Normal",
+        "MicEnhance",
+        "Indoor",
+        "Outdoor"
+      ],
+      "ex": "Normal(00)->Outdoor(03)",
+      "desc": "Audio / speech-enhancement profile for the speaker."
+    },
+    {
+      "name": "sms_notify",
+      "menu": "voice/SMS notify",
+      "op": "1c",
+      "block": "05",
+      "payloadOffset": 34,
+      "options": [
+        "off",
+        "ring"
+      ],
+      "ex": "off(00)->ring(01)",
+      "desc": "Alert when an incoming SMS text message arrives."
+    },
+    {
+      "name": "call_ring",
+      "menu": "voice/call ring",
+      "op": "1d",
+      "block": "05",
+      "payloadOffset": 40,
+      "options": [
+        "off",
+        "ring"
+      ],
+      "ex": "ring(01)->off(00)",
+      "desc": "Ring tone when a private or group call comes in."
+    },
+    {
+      "name": "digital_mic_level",
+      "menu": "voice/digital mic",
+      "op": "23",
+      "block": "05",
+      "payloadOffset": 14,
+      "options": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "ex": "L1(00)->L2(01)",
+      "desc": "Microphone gain used on digital (DMR) transmit."
+    },
+    {
+      "name": "analog_mic_level",
+      "menu": "voice/analog mic",
+      "op": "24",
+      "block": "09",
+      "payloadOffset": 64,
+      "options": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "ex": "L3(02)->L5(04)",
+      "desc": "Microphone gain used on analog (FM) transmit."
+    },
+    {
+      "name": "noise_reduction_rx",
+      "menu": "voice/NR receive",
+      "op": "6b",
+      "block": "09",
+      "payloadOffset": 80,
+      "options": [
+        "off",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5",
+        "L6",
+        "L7",
+        "L8",
+        "L9"
+      ],
+      "ex": "L3(03)->L9(09)",
+      "desc": "Digital noise reduction applied to received audio."
+    },
+    {
+      "name": "noise_reduction_tx",
+      "menu": "voice/NR transmit",
+      "op": "6c",
+      "block": "09",
+      "payloadOffset": 85,
+      "options": [
+        "off",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5",
+        "L6",
+        "L7",
+        "L8",
+        "L9"
+      ],
+      "ex": "L3(03)->off(00)",
+      "desc": "Digital noise reduction applied to transmitted audio."
+    },
+    {
+      "name": "back_light",
+      "menu": "display/back light",
+      "op": "0c",
+      "block": "05",
+      "payloadOffset": 31,
+      "options": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "ex": "L5(04)->L1(00)",
+      "desc": "Display and keypad backlight brightness."
+    },
+    {
+      "name": "backlight_time",
+      "menu": "display/backlight time",
+      "op": "0d",
+      "block": "09",
+      "payloadOffset": 73,
+      "options": [
+        "Always",
+        "5s",
+        "10s",
+        "15s",
+        "20s",
+        "25s",
+        "30s",
+        "1min",
+        "2min",
+        "3min",
+        "4min",
+        "5min",
+        "15min",
+        "30min",
+        "45min",
+        "1hr"
+      ],
+      "ex": "Always(00)->1hr(0f)",
+      "desc": "How long the backlight stays lit after the last key press."
+    },
+    {
+      "name": "channel_display",
+      "menu": "display/channel display",
+      "op": "12",
+      "block": "05",
+      "payloadOffset": 3,
+      "options": [
+        "Channel",
+        "Frequency"
+      ],
+      "ex": "Channel(00)->Frequency(01)",
+      "desc": "Show the channel by name/number or by its frequency."
+    },
+    {
+      "name": "menu_exit_time",
+      "menu": "display/menu exit time",
+      "op": "18",
+      "block": "05",
+      "payloadOffset": 45,
+      "options": [
+        "5s",
+        "10s",
+        "15s",
+        "20s",
+        "25s",
+        "30s",
+        "35s",
+        "40s",
+        "45s",
+        "50s",
+        "55s",
+        "60s"
+      ],
+      "ex": "30s(05)->60s(0b)",
+      "desc": "Idle time before the on-radio menu closes itself."
+    },
+    {
+      "name": "change_font_color",
+      "menu": "display/font color",
+      "op": "32",
+      "block": "06",
+      "payloadOffset": 84,
+      "options": [
+        "White",
+        "Black",
+        "Orange",
+        "Red",
+        "Yellow",
+        "Green",
+        "Cyan",
+        "Blue"
+      ],
+      "ex": "White(00)->Blue(07)",
+      "desc": "Text color used on the channel display."
+    },
+    {
+      "name": "channel_color_b",
+      "menu": "display/channel color B",
+      "op": "34",
+      "block": "09",
+      "payloadOffset": 49,
+      "options": [
+        "Orange",
+        "Red",
+        "Yellow",
+        "Green",
+        "Cyan",
+        "Blue",
+        "White"
+      ],
+      "ex": "White(06)->Orange(00)",
+      "desc": "Accent color for the Sub (B) channel."
+    },
+    {
+      "name": "channel_color_a",
+      "menu": "display/channel color A",
+      "op": "35",
+      "block": "09",
+      "payloadOffset": 54,
+      "options": [
+        "Orange",
+        "Red",
+        "Yellow",
+        "Green",
+        "Cyan",
+        "Blue",
+        "White"
+      ],
+      "ex": "White(06)->Red(01)",
+      "desc": "Accent color for the Main (A) channel."
+    },
+    {
+      "name": "sub_channel",
+      "menu": "display/sub channel",
+      "op": "1b",
+      "block": "05",
+      "payloadOffset": 38,
+      "options": [
+        "off",
+        "on"
+      ],
+      "ex": "on(01)->off(00)",
+      "desc": "Enable the second receiver (dual watch). Off leaves a single active side."
+    },
+    {
+      "name": "auto_power_off",
+      "menu": "other/auto power off",
+      "op": "14",
+      "block": "05",
+      "payloadOffset": 5,
+      "options": [
+        "off",
+        "10min",
+        "30min",
+        "60min",
+        "120min"
+      ],
+      "ex": "off(00)->120min(04)",
+      "desc": "Automatically power the radio off after this idle period."
+    },
+    {
+      "name": "tx_timer",
+      "menu": "other/TX timer",
+      "op": "0e",
+      "block": "05",
+      "payloadOffset": 6,
+      "options": [
+        "off",
+        "30s",
+        "60s",
+        "90s",
+        "120s",
+        "150s",
+        "180s",
+        "210s",
+        "240s"
+      ],
+      "ex": "off(00)->240s(08)",
+      "desc": "Time-out timer \u2014 the maximum continuous transmit length."
+    },
+    {
+      "name": "tot_predict",
+      "menu": "other/TOT predict",
+      "op": "0f",
+      "block": "09",
+      "payloadOffset": 75,
+      "options": [
+        "off",
+        "on"
+      ],
+      "ex": "on(01)->off(00)",
+      "desc": "Sound a warning shortly before the transmit time-out timer expires."
+    },
+    {
+      "name": "activate_fan",
+      "menu": "other/activate fan",
+      "op": "16",
+      "block": "09",
+      "payloadOffset": 43,
+      "options": [
+        "Via PTT",
+        "Via Temperature",
+        "Via Both"
+      ],
+      "ex": "Temp(01)->PTT(00)",
+      "desc": "When the cooling fan is allowed to run."
+    },
+    {
+      "name": "frequency_step",
+      "menu": "other/frequency step",
+      "op": "11",
+      "block": "05",
+      "payloadOffset": 10,
+      "options": [
+        "2.5k",
+        "5k",
+        "6.25k",
+        "8.33k",
+        "10k",
+        "12.5k",
+        "20k",
+        "25k",
+        "30k",
+        "50k"
+      ],
+      "ex": "5k(01)->50k(09)",
+      "desc": "VFO tuning step size."
+    },
+    {
+      "name": "analog_squelch_level",
+      "menu": "other/analog squelch",
+      "op": "1e",
+      "block": "05",
+      "payloadOffset": 12,
+      "options": [
+        "off",
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "ex": "L2(02)->L5(05)",
+      "desc": "Squelch threshold for analog (FM) receive."
+    },
+    {
+      "name": "tbst_select",
+      "menu": "other/TBST select",
+      "op": "1f",
+      "block": "05",
+      "payloadOffset": 39,
+      "options": [
+        "1000hz",
+        "1450hz",
+        "1750hz",
+        "2100hz"
+      ],
+      "ex": "1000(00)->2100(03)",
+      "desc": "Tone-burst frequency used for repeater access."
+    },
+    {
+      "name": "vox_level",
+      "menu": "other/VOX level",
+      "op": "20",
+      "block": "09",
+      "payloadOffset": 86,
+      "options": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5",
+        "L6",
+        "L7",
+        "L8",
+        "L9"
+      ],
+      "ex": "L3(02)->L9(08)",
+      "desc": "Voice-activated transmit (VOX) sensitivity."
+    },
+    {
+      "name": "vox_delay",
+      "menu": "other/VOX delay",
+      "op": "21",
+      "block": "09",
+      "payloadOffset": 87,
+      "options": [
+        "0.5s..3.0s (0.1s step, ~26)"
+      ],
+      "ex": "1.0s(05)->3.0s(19)",
+      "desc": "Hang time before VOX drops transmit after you stop talking."
+    },
+    {
+      "name": "scan_mode",
+      "menu": "other/scan mode",
+      "op": "22",
+      "block": "05",
+      "payloadOffset": 13,
+      "options": [
+        "TO",
+        "CO",
+        "SE"
+      ],
+      "ex": "TO(00)->SE(02)",
+      "desc": "How a scan resumes: Time-operated, Carrier-operated, or Search."
+    },
+    {
+      "name": "dtmf_speed",
+      "menu": "other/DTMF speed",
+      "op": "25",
+      "block": "05",
+      "payloadOffset": 29,
+      "options": [
+        "50ms",
+        "100ms",
+        "200ms",
+        "300ms",
+        "500ms"
+      ],
+      "ex": "50ms(00)->100ms(01)",
+      "desc": "DTMF tone timing (send rate) for auto-dial."
+    },
+    {
+      "name": "bt_mic_gain",
+      "menu": "voice/BT mic gain",
+      "op": "47",
+      "block": "06",
+      "payloadOffset": 75,
+      "options": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "ex": "L1(00)->L5(04)",
+      "desc": "Gain of the Bluetooth (BT-01 / hands-free) microphone into the radio. Ported from the PoC (raw 0-4 = display 1-5)."
+    },
+    {
+      "name": "bt_speaker_gain",
+      "menu": "voice/BT speaker gain",
+      "op": "48",
+      "block": "06",
+      "payloadOffset": 76,
+      "options": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "ex": "L1(00)->L5(04)",
+      "desc": "Level of radio audio sent to the Bluetooth speaker path. Ported from the PoC (raw 0-4 = display 1-5)."
+    },
+    {
+      "name": "bt01_speaker_gain",
+      "menu": "voice/BT-01 speaker gain",
+      "op": "49",
+      "block": "09",
+      "payloadOffset": 71,
+      "options": [
+        "L1",
+        "L2",
+        "L3",
+        "L4",
+        "L5"
+      ],
+      "ex": "L1(00)->L5(04)",
+      "desc": "The BT-01 remote head's own speaker level. Ported from the PoC (raw 0-4 = display 1-5)."
+    },
+    {
+      "name": "digi_monitor",
+      "menu": "other/digital monitor",
+      "op": "3f",
+      "block": "05",
+      "payloadOffset": 56,
+      "options": [
+        "off",
+        "single",
+        "double"
+      ],
+      "ex": "off(00)->single(01)",
+      "desc": "DMR promiscuous monitor: hear other talkgroups on the current (single) or both (double) time slots. Read offset pinned in the PoC."
+    },
+    {
+      "name": "gps",
+      "menu": "other/GPS",
+      "op": "3c",
+      "block": "05",
+      "payloadOffset": 33,
+      "options": [
+        "off",
+        "on"
+      ],
+      "ex": "off(00)->on(01)",
+      "desc": "GPS receiver power. Ported from the PoC (writes 08 3c..3e are contiguous with DigiMon 3f)."
+    },
+    {
+      "name": "gps_mode",
+      "menu": "other/GPS mode",
+      "op": "3d",
+      "block": "09",
+      "payloadOffset": 40,
+      "options": [
+        "GPS",
+        "BDS",
+        "GPS+BDS",
+        "GLONASS",
+        "GPS+GLONASS",
+        "BDS+GLONASS",
+        "ALL"
+      ],
+      "ex": "GPS(00)->ALL(06)",
+      "desc": "Satellite constellation selection. Ported from the PoC."
+    },
+    {
+      "name": "gps_area_sql",
+      "menu": "other/GPS area SQL",
+      "op": "3e",
+      "block": "09",
+      "payloadOffset": 76,
+      "options": [
+        "off",
+        "on"
+      ],
+      "ex": "off(00)->on(01)",
+      "desc": "GPS area squelch (only open squelch inside a configured area). Ported from the PoC."
+    },
+    {
+      "name": "external_audio_jack",
+      "menu": "other/external audio jack",
+      "op": "46",
+      "block": "06",
+      "payloadOffset": 72,
+      "options": [
+        "off",
+        "on"
+      ],
+      "desc": "Route received audio to the rear external-speaker jack. Write 08 46 <0|1> (BT-01 relay capture 2026-07-12); reads back from settings block 04 06 byte 72 (found by diffing full startup enumerations with the jack on vs off)."
+    }
+  ],
+  "open": [
+    {
+      "name": "power_save",
+      "menu": "other/power save",
+      "status": "NOT in 05/06/09",
+      "detail": "toggled both directions with NO 08 write and NO diff in any of 05/06/09 (only 5a 0d menu-nav frames). Lives elsewhere (different block, a bit not in these reads, or a non-08 command). Needs a wider read or a different walk."
+    },
+    {
+      "name": "language",
+      "menu": "display/language",
+      "status": "single-option (English) on this firmware \u2014 no diff to confirm; op 08 17 observed but value unchanged."
+    },
+    {
+      "name": "channel_color_a (op 08 33)",
+      "status": "ambiguous",
+      "detail": "op 08 33 produced NO diff (value 06 written twice with no change). 08 35 is the one that cleanly drives block 09[54]. 08 33 may be a separate color field (channel-name color?) not in 05/06/09, or was a no-op repeat. Re-walk 08 33 from a known-different value."
+    },
+    {
+      "name": "vox_level (first capture)",
+      "status": "bad capture (mislabelled TBST values) \u2014 superseded by the clean L3->L9 sample."
+    },
+    {
+      "name": "am_fm_radio",
+      "menu": "other/AM-FM radio",
+      "status": "capture failed",
+      "detail": "04 09 read timed out mid-walk; no data. Re-capture (and note: enabling AM/FM may change the radio's response timing)."
+    }
+  ]
+}

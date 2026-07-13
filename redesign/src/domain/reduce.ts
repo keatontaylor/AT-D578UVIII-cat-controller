@@ -1,0 +1,469 @@
+// The reducer: DOMAIN EVENTS → RadioState (ARCHITECTURE: mutations happen in one place).
+// Pure — `applyEvent(state, event)` returns a new state; everything else observes. An event is
+// either an inbound decoded frame or the lifecycle of one of OUR writes (pending → acked/failed).
+// Because one event is one reduction is one broadcast patch, the "a logical mutation must land in
+// a single emission" invariant (the stale-flash class of bug) is structural, not conventional.
+// The Session orchestrates (ARQ correlation, side-readiness, settle windows) and dispatches
+// events; it never touches state directly.
+
+import type { DecodedFrame } from '../codec/framing'
+import {
+  decodeChannel,
+  decodeClock,
+  decodeDmr,
+  decodeDmrAlias,
+  decodeFirmware,
+  decodeIdentity,
+  decodeLastCall,
+  decodeScanListName,
+  decodeSettingsBlock,
+  decodeSmeter,
+  decodeSelectedSide,
+  decodeSquelchOpen,
+  decodeZoneName,
+  decodeZoneNumber,
+} from '../codec/decode'
+import { CHANNEL_SETTINGS_BY_KEY } from '../codec/channel-settings'
+import { bytesToHexStr, hexStrToBytes, writeField } from '../codec/record'
+import { toneLabel, type ToneType } from '../codec/tones'
+import type { DmrActivity, Smeter } from '../codec/decode'
+import { READ_HEAD } from '../codec/frame-table'
+import type { PttPhase } from './ptt'
+import type { RadioState, Side, SideKey } from './state'
+
+/** One pending/failed write overlay entry ({ desired, phase }). */
+type PendingEntry = RadioState['pendingSettings'][string]
+
+/** The lifecycle phase of one of our writes: optimistic overlay → confirmed / not confirmed. */
+export type WritePhase = 'pending' | 'acked' | 'failed'
+
+/** Everything that may mutate RadioState. `frame` covers all radio→host traffic; the rest are
+ * the write lifecycles the Session correlates (ACK = gospel — `acked` applies optimistically). */
+export type DomainEvent =
+  | { kind: 'frame'; frame: DecodedFrame }
+  | { kind: 'setting'; phase: WritePhase; name: string; desired: string | number }
+  | { kind: 'channelSetting'; phase: WritePhase; side: SideKey; key: string; desired: string }
+  | { kind: 'channelTone'; phase: WritePhase; side: SideKey; field: 'rx' | 'tx'; type: ToneType; value: number; desired: string }
+  | { kind: 'channelFrequency'; phase: WritePhase; side: SideKey; field: 'rx' | 'tx'; mhz: number; desired: string }
+  | { kind: 'sideSelect'; phase: WritePhase; side: SideKey }
+  | { kind: 'ptt'; phase: PttPhase }
+  | { kind: 'channelCount'; side: SideKey; count: number }
+  | { kind: 'volume'; side: SideKey; level: number }
+  | { kind: 'scan'; active: boolean; listName: string | null }
+  | { kind: 'scanLock'; locked: boolean }
+  | { kind: 'scanPause'; paused: boolean }
+  | { kind: 'manualDial'; dial: { target: number; callType: 'group' | 'private' } | null }
+  | { kind: 'dmrCaller'; callerId: number; callsign: string | null; name: string | null; location: string | null }
+
+/** A copy of `map` without `key` (immutably clear one pending overlay). */
+function withoutKey<T>(map: Record<string, T>, key: string): Record<string, T> {
+  const { [key]: _drop, ...rest } = map
+  return rest
+}
+
+const BLOCK_BY_REG: Record<number, string> = { 0x05: '05', 0x06: '06', 0x09: '09' }
+
+function patchSide(state: RadioState, side: SideKey, patch: Partial<Side>): RadioState {
+  const next: Side = { ...state.sides[side], ...patch }
+  const sides = side === 'a' ? { ...state.sides, a: next } : { ...state.sides, b: next }
+  return { ...state, sides }
+}
+
+/** A channel block landing for the scanning (selected) side while the scan is PAUSED is the
+ * pause-confirm read of the PARKED channel (the radio holds the last-scanned channel through a
+ * pause) — record its name so the UI can say WHICH channel "Paused" is sitting on. Any other
+ * channel read leaves the scan slice alone. */
+function reconcilePausedChannel(state: RadioState, side: SideKey): RadioState {
+  const scan = state.scan
+  if (!scan.active || !scan.paused || scan.locked || state.selectedSide !== side) return state
+  const name = state.sides[side].channelName || null
+  if (name === scan.pausedChannel) return state
+  return { ...state, scan: { ...scan, pausedChannel: name } }
+}
+
+function channelProjectionPatch(raw: Uint8Array): Pick<Side, 'channelRaw' | 'freqMHz' | 'txFreqMHz' | 'channelName' | 'channelPosition' | 'mode' | 'channel'> {
+  const ch = decodeChannel(raw)
+  return {
+    channelRaw: bytesToHexStr(raw),
+    freqMHz: ch.freqMHz,
+    txFreqMHz: ch.txFreqMHz,
+    channelName: ch.name,
+    channelPosition: ch.position,
+    mode: ch.mode,
+    channel: ch.config,
+  }
+}
+
+function channelRawPatch(state: RadioState, side: SideKey, mutate: (raw: Uint8Array) => Uint8Array): Partial<Side> {
+  const rawHex = state.sides[side].channelRaw
+  if (!rawHex) return {}
+  try {
+    return channelProjectionPatch(mutate(hexStrToBytes(rawHex)))
+  } catch {
+    // If the cached raw is malformed/too short for this write, do not leave stale echo-back context.
+    return { channelRaw: null }
+  }
+}
+
+function hasChannelProjection(patch: Partial<Side>): boolean {
+  return Object.prototype.hasOwnProperty.call(patch, 'freqMHz')
+}
+
+function applyRawChannelSetting(raw: Uint8Array, key: string, desired: string): Uint8Array {
+  const def = CHANNEL_SETTINGS_BY_KEY[key]
+  const index = def?.options.indexOf(desired) ?? -1
+  if (index < 0) throw new Error(`unknown channel setting value for raw update: ${key}=${desired}`)
+  if (key === 'channelType') return writeField('channel', raw, 'chanType', index)
+  if (key === 'dmrMode') {
+    const direct = index === 1 ? 0 : 1
+    const slot = index === 0 ? 0 : index === 2 ? 1 : index === 3 ? 2 : 0
+    return writeField('channel', writeField('channel', raw, 'dmrDirect', direct), 'dmrModeSlot', slot)
+  }
+  return writeField('channel', raw, key, index)
+}
+
+function dcsRaw(value: number): number {
+  return parseInt(String(value), 8)
+}
+
+function applyRawTone(raw: Uint8Array, field: 'rx' | 'tx', type: ToneType, value: number): Uint8Array {
+  const toneTypeKey = field === 'rx' ? 'rxToneType' : 'txToneType'
+  const ctcssKey = field === 'rx' ? 'rxCtcssIndex' : 'txCtcssIndex'
+  const dcsKey = field === 'rx' ? 'rxDcs' : 'txDcs'
+  const typeRaw = type === 'ctc' ? 1 : type === 'dcs' ? 2 : 0
+  let out = writeField('channel', raw, toneTypeKey, typeRaw)
+  out = writeField('channel', out, ctcssKey, type === 'ctc' ? value : 0)
+  return writeField('channel', out, dcsKey, type === 'dcs' ? dcsRaw(value) : 0)
+}
+
+function applyRawFrequency(raw: Uint8Array, field: 'rx' | 'tx', mhz: number, rxMHz: number | null): Uint8Array {
+  if (field === 'rx') return writeField('channel', raw, 'rxFreq', Math.round(mhz * 100000))
+  if (rxMHz == null) throw new Error('cannot project TX frequency into raw channel record without RX frequency')
+  const diff = Number((mhz - rxMHz).toFixed(5))
+  const dir = diff > 0 ? 1 : diff < 0 ? 2 : 0
+  let out = writeField('channel', raw, 'shiftDir', dir)
+  if (dir !== 0) out = writeField('channel', out, 'txOffset', Math.round(Math.abs(diff) * 100000))
+  return out
+}
+
+/** Resolve a decoded 5a smeter (selected/other-relative) to physical sides via selectedSide.
+ * Shared by the async `5a` push and the `04 5a` startup/refresh read — one decode path. */
+function applySmeter(state: RadioState, s: Smeter | null): RadioState {
+  if (!s) return state
+  const selA = state.selectedSide === 'a'
+  // The 5a scan flag (byte 12) is the RADIO's truth about a running native scan — it covers scans
+  // started on the radio's front panel and scans already running at connect (the startup 04 5a
+  // read). Our own 57 48 ack flips scan.active optimistically; this reconciles: an ON transition
+  // keeps whatever listName the ack recorded (null for a panel scan — the wire doesn't say), an
+  // OFF transition resets the slice exactly like a stop ack. Corpus: the flag flips on the very
+  // next push after the ack, so the two sources never fight.
+  let scan = state.scan
+  if (s.scanning !== scan.active) {
+    scan = s.scanning
+      ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, lastLock: null }
+      : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, lastLock: null }
+  }
+  return {
+    ...state,
+    signal: {
+      aRssi: selA ? s.selectedRssi : s.otherRssi,
+      bRssi: selA ? s.otherRssi : s.selectedRssi,
+      aOpen: selA ? s.selectedOpen : s.otherOpen,
+      bOpen: selA ? s.otherOpen : s.selectedOpen,
+    },
+    // TX is side-agnostic (it happens on the selected side by definition) — no mapping needed.
+    transmitting: s.transmitting,
+    scan,
+  }
+}
+
+/** Merge a decoded DMR activity into state. The radio streams 5e frames continuously during a call:
+ * VOICE frames carry the caller identity (source/dest/cc/slot), but the interleaved non-voice
+ * frames decode with those fields null. Replacing wholesale made the badge flap — the caller
+ * appeared on a voice frame then blanked on the next non-voice one, falling back to the channel's
+ * programmed contact. So we LATCH: keep the last-known identity fields and only overwrite them when
+ * a newer frame actually carries them. `a === null` is the explicit end-of-call (5e status byte 0)
+ * — that, and only that, clears the slice. (Alias rides a separate 58 push and is preserved too.) */
+function applyDmr(state: RadioState, a: DmrActivity | null): RadioState {
+  if (a === null) return state.dmr === null ? state : { ...state, dmr: null }
+  const prev = state.dmr
+  return {
+    ...state,
+    dmr: {
+      direction: a.direction,
+      colorCode: a.colorCode ?? prev?.colorCode ?? null,
+      slot: a.slot ?? prev?.slot ?? null,
+      source: a.source ?? prev?.source ?? null,
+      dest: a.dest ?? prev?.dest ?? null,
+      private: a.private ?? prev?.private ?? null,
+      // Alias + RadioID caller-id ride the 58 push (and its lookup) — carry them across 5e frames.
+      alias: prev?.alias ?? null,
+      callerId: prev?.callerId ?? null,
+      callsign: prev?.callsign ?? null,
+      name: prev?.name ?? null,
+      location: prev?.location ?? null,
+    },
+  }
+}
+
+export function applyFrame(state: RadioState, frame: DecodedFrame): RadioState {
+  switch (frame.head) {
+    case 0x5a:
+      return applySmeter(state, decodeSmeter(frame.bytes))
+    case 0x5b:
+      return { ...state, squelchOpen: decodeSquelchOpen(frame.bytes) }
+    case 0x5e:
+      return applyDmr(state, decodeDmr(frame.bytes))
+    case 0x58: {
+      // Talker alias + id for the active call — only meaningful while a call is up. The id keys the
+      // RadioID caller-id lookup, which the session performs and feeds back via a `dmrCaller` event.
+      if (state.dmr === null) return state
+      const a = decodeDmrAlias(frame.bytes)
+      if (!a) return state
+      const alias = a.alias || state.dmr.alias
+      const callerId = a.id ?? state.dmr.callerId
+      if (alias === state.dmr.alias && callerId === state.dmr.callerId) return state
+      return { ...state, dmr: { ...state.dmr, alias, callerId } }
+    }
+    case READ_HEAD:
+      return frame.reg === undefined ? state : applyRead(state, frame.reg, frame.bytes)
+    default:
+      return state
+  }
+}
+
+function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
+  switch (reg) {
+    case 0x02:
+      return { ...state, firmware: decodeFirmware(b) }
+    case 0x32:
+      return { ...state, identity: decodeIdentity(b) }
+    case 0x51: {
+      const clock = decodeClock(b)
+      return clock ? { ...state, clock } : state
+    }
+    // The raw record is stored ALONGSIDE its decoded projection in the same reduction — they can
+    // never disagree (record-canonical model: raw is truth, decoded fields are views of it).
+    case 0x2c: {
+      return reconcilePausedChannel(patchSide(state, 'a', channelProjectionPatch(b)), 'a')
+    }
+    case 0x2d: {
+      return reconcilePausedChannel(patchSide(state, 'b', channelProjectionPatch(b)), 'b')
+    }
+    case 0x29:
+      return patchSide(state, 'a', { zoneName: decodeZoneName(b), zoneNumber: decodeZoneNumber(b) })
+    case 0x2a:
+      return patchSide(state, 'b', { zoneName: decodeZoneName(b), zoneNumber: decodeZoneNumber(b) })
+    case 0x05: {
+      // The 05 block also carries the radio's active side (@37) — the authoritative source for the
+      // 5a active/inactive → a/b mapping. Keep the prior side if this frame is too short to decode.
+      // A read-back that matches a pending side-select clears the pending flag (the switch landed).
+      const withSettings = { ...state, settings: { ...state.settings, ...decodeSettingsBlock(b, '05') } }
+      const side = decodeSelectedSide(b)
+      if (!side) return withSettings
+      return { ...withSettings, selectedSide: side, pendingSide: state.pendingSide === side ? null : state.pendingSide }
+    }
+    case 0x06:
+    case 0x09: {
+      const block = BLOCK_BY_REG[reg]!
+      return { ...state, settings: { ...state.settings, ...decodeSettingsBlock(b, block) } }
+    }
+    // `04 1b` byte 36 = the codeplug's ZONE COUNT (BT-01 RE: it never walks zone names; this is
+    // how it bounds/wraps zone navigation — matched the on-radio count live, 2026-07-02). Zones
+    // are shared, so both sides get it; it's what stepZone's wrap arithmetic needs.
+    case 0x1b: {
+      const count = b.length > 36 ? b[36]! : 0
+      if (count < 1 || count > 250) return state // sanity: an implausible count is not a count
+      return {
+        ...state,
+        sides: {
+          a: { ...state.sides.a, zoneCount: count },
+          b: { ...state.sides.b, zoneCount: count },
+        },
+      }
+    }
+    // `04 4a` — the working channel's ASSIGNED scan-list record; while a scan runs it names the
+    // list BEING SCANNED (a panel scan runs the channel's list). Only meaningful mid-scan, and
+    // only fills a gap: a scan WE started already carries its list name from the ack path.
+    case 0x4a: {
+      if (!state.scan.active || state.scan.listName !== null) return state
+      const name = decodeScanListName(b)
+      return name ? { ...state, scan: { ...state.scan, listName: name } } : state
+    }
+    // `04 59` — the persisted last-call record. It enriches an ONGOING RX call at startup: when
+    // we connect mid-call the 04 5e read carries direction/CC/slot/src/dest, but the talker id +
+    // alias normally arrive only on later 58 pushes — 04 59 has them NOW. Guarded on the dest
+    // matching the live call so a STALE record (from a previous call) can never paint this one;
+    // and it never overwrites what a real 58 push already provided.
+    case 0x59: {
+      if (!state.dmr || state.dmr.direction !== 'rx') return state
+      const last = decodeLastCall(b)
+      if (!last || last.dest == null || state.dmr.dest !== last.dest) return state
+      const callerId = state.dmr.callerId ?? last.callerId
+      const alias = state.dmr.alias ?? (last.callerName || null)
+      if (callerId === state.dmr.callerId && alias === state.dmr.alias) return state
+      return { ...state, dmr: { ...state.dmr, callerId, alias } }
+    }
+    // `04 5a` / `04 5b` reads (startup enumeration + post-side-swap refresh) carry the same
+    // payload as the async pushes, shifted by the `04` prefix — reuse the push decoders so the
+    // initial squelch/RSSI state hydrates through the exact path the live stream uses.
+    case 0x5a:
+      return applySmeter(state, decodeSmeter(b.slice(1)))
+    case 0x5b:
+      return { ...state, squelchOpen: decodeSquelchOpen(b.slice(1)) }
+    case 0x5e:
+      return applyDmr(state, decodeDmr(b.slice(1)))
+    default:
+      return state
+  }
+}
+
+export function reduceFrames(frames: Iterable<DecodedFrame>, initial: RadioState): RadioState {
+  let state = initial
+  for (const frame of frames) state = applyFrame(state, frame)
+  return state
+}
+
+// ── write lifecycles (the device-shadow overlay) ────────────────────────────────
+// pending → the desired value overlays the reported one (UI spinner); acked → the desired value
+// becomes the reported value AND the overlay clears IN THE SAME REDUCTION (never two patches);
+// failed → the overlay flips to failed and the reported value stays authoritative.
+
+/** The side's pendingChannel with `key` set to a phase overlay, or cleared. */
+function channelOverlay(state: RadioState, side: SideKey, key: string, entry: PendingEntry | null): Record<string, PendingEntry> {
+  const pending = state.sides[side].pendingChannel
+  return entry === null ? withoutKey(pending, key) : { ...pending, [key]: entry }
+}
+
+/** Build a Tone value for an acked tone write (mirrors the decode-side Tone shape). */
+function toneValue(type: ToneType, value: number) {
+  return type === 'ctc'
+    ? { kind: 'ctcss' as const, display: toneLabel('ctc', value), ctcssIndex: value, dcsCode: null }
+    : type === 'dcs'
+      ? { kind: 'dcs' as const, display: toneLabel('dcs', value), ctcssIndex: null, dcsCode: value }
+      : { kind: 'off' as const, display: 'Off', ctcssIndex: null, dcsCode: null }
+}
+
+/** THE state transition function: one event in, one new state out (or the SAME reference for a
+ * no-op, which the Session uses to skip the broadcast). All mutation lives here. */
+export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
+  switch (event.kind) {
+    case 'frame':
+      return applyFrame(state, event.frame)
+
+    case 'setting': {
+      const { name, desired, phase } = event
+      if (phase === 'acked') {
+        return {
+          ...state,
+          settings: { ...state.settings, [name]: desired },
+          pendingSettings: withoutKey(state.pendingSettings, name),
+        }
+      }
+      return { ...state, pendingSettings: { ...state.pendingSettings, [name]: { desired, phase } } }
+    }
+
+    case 'channelSetting': {
+      const { side, key, desired, phase } = event
+      if (phase !== 'acked') {
+        return patchSide(state, side, { pendingChannel: channelOverlay(state, side, key, { desired, phase }) })
+      }
+      const rawPatch = channelRawPatch(state, side, (raw) => applyRawChannelSetting(raw, key, desired))
+      return patchSide(state, side, {
+        ...rawPatch,
+        pendingChannel: channelOverlay(state, side, key, null),
+      }) // optimistic; no re-read (ACK = gospel, anti-corruption write discipline)
+    }
+
+    case 'channelTone': {
+      const { side, field, type, value, desired, phase } = event
+      const key = field === 'rx' ? 'rxTone' : 'txTone'
+      if (phase !== 'acked') {
+        return patchSide(state, side, { pendingChannel: channelOverlay(state, side, key, { desired, phase }) })
+      }
+      const config = state.sides[side].channel
+      const rawPatch = channelRawPatch(state, side, (raw) => applyRawTone(raw, field, type, value))
+      return patchSide(state, side, {
+        ...rawPatch,
+        // No channel block read yet → still settle the overlay (no stuck spinner).
+        ...(!hasChannelProjection(rawPatch) && config ? { channel: { ...config, [key]: toneValue(type, value) } } : {}),
+        pendingChannel: channelOverlay(state, side, key, null),
+      })
+    }
+
+    case 'channelFrequency': {
+      const { side, field, mhz, desired, phase } = event
+      const key = field === 'rx' ? 'rxFreq' : 'txFreq'
+      if (phase !== 'acked') {
+        return patchSide(state, side, { pendingChannel: channelOverlay(state, side, key, { desired, phase }) })
+      }
+      // An RX retune carries the repeater shift into the displayed TX (the radio keeps the offset).
+      // When raw context exists, reprojecting that mutated raw record does the same atomically.
+      const cur = state.sides[side]
+      const shift = cur.txFreqMHz != null && cur.freqMHz != null ? cur.txFreqMHz - cur.freqMHz : null
+      const rawPatch = channelRawPatch(state, side, (raw) => applyRawFrequency(raw, field, mhz, cur.freqMHz))
+      return patchSide(state, side, {
+        ...rawPatch,
+        ...(!hasChannelProjection(rawPatch)
+          ? field === 'rx'
+            ? { freqMHz: mhz, ...(shift != null ? { txFreqMHz: Number((mhz + shift).toFixed(5)) } : {}) }
+            : { txFreqMHz: mhz }
+          : {}),
+        pendingChannel: channelOverlay(state, side, key, null),
+      })
+    }
+
+    case 'sideSelect': {
+      const { side, phase } = event
+      if (phase === 'pending') {
+        return state.pendingSide === side ? state : { ...state, pendingSide: side }
+      }
+      if (phase === 'acked') return { ...state, selectedSide: side, pendingSide: null }
+      return state.pendingSide === null ? state : { ...state, pendingSide: null } // failed: revert
+    }
+
+    case 'ptt':
+      return state.ptt === event.phase ? state : { ...state, ptt: event.phase }
+
+    case 'channelCount':
+      return state.sides[event.side].channelCount === event.count
+        ? state
+        : patchSide(state, event.side, { channelCount: event.count })
+
+    // ACKed volume write — no wire read-back exists, so the acked level IS the state.
+    case 'volume':
+      return state.sides[event.side].volume === event.level
+        ? state
+        : patchSide(state, event.side, { volume: event.level })
+
+    case 'scan':
+      // Start/stop resets the lock + pause (a fresh scan hasn't locked or paused yet).
+      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, lastLock: null } }
+
+    case 'scanLock': {
+      if (state.scan.locked === event.locked) return state
+      // Lock DROPPING → the channel it was on becomes history: remember it for the "Last: …"
+      // chip (the lock-follow read put the real locked channel in the selected side's slice).
+      let lastLock = state.scan.lastLock
+      if (state.scan.locked && !event.locked) {
+        const side = state.sides[state.selectedSide]
+        if (side.channelName) lastLock = { name: side.channelName, freqMHz: side.freqMHz, at: Date.now() }
+      }
+      return { ...state, scan: { ...state.scan, locked: event.locked, lastLock } }
+    }
+
+    case 'scanPause':
+      if (state.scan.paused === event.paused) return state
+      // pause END clears the parked channel — the scan resumes hopping and no channel is current
+      return { ...state, scan: { ...state.scan, paused: event.paused, pausedChannel: event.paused ? state.scan.pausedChannel : null } }
+
+    case 'manualDial':
+      return { ...state, manualDial: event.dial }
+
+    case 'dmrCaller':
+      // Resolved RadioID caller-id for the CURRENT call only (guard on callerId so a late lookup
+      // can't paint a call that already ended / moved on).
+      if (!state.dmr || state.dmr.callerId !== event.callerId) return state
+      return { ...state, dmr: { ...state.dmr, callsign: event.callsign, name: event.name, location: event.location } }
+  }
+}

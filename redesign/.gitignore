@@ -1,0 +1,8 @@
+node_modules/
+*.tsbuildinfo
+# build artifacts
+dist/
+.data/
+recordings/
+runtime-config.json
+direwolf.conf

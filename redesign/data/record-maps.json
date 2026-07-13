@@ -1,0 +1,55 @@
+{
+  "note": "Record FIELD whitelist, not a complete protocol/message schema. This is THE single source of known mutable/readable record field offsets — consumed by src/codec/record.ts (read/write machinery) AND tools/gen-frame-map.py (the frame-map docs), so code and documentation cannot drift for these pinned fields. Offsets are byte indices into the WHOLE inbound frame (head included; last byte is the additive checksum). Codecs: u8 | le16 | bcd (len bytes, MSB-first packed decimal, value = the digits as a number) | asciiz (len bytes, null-padded ASCII) | bits (single byte, inclusive [lo,hi] bit range). Only fields listed here are readable/writable through the record codec — unknown offsets and unmodeled message families are preserved/left alone by construction (the byte-identity golden-master in test/record.test.ts proves known-field writes preserve all other bytes).",
+  "records": {
+    "channel": {
+      "frame": "04 2c (side A) / 04 2d (side B)",
+      "lengths": [72, 118, 121],
+      "fullFrom": 118,
+      "fields": [
+        { "key": "rxFreq", "offset": 2, "len": 4, "codec": "bcd", "desc": "RX frequency, BCD of Hz/10" },
+        { "key": "txOffset", "offset": 6, "len": 4, "codec": "bcd", "desc": "TX offset BCD of Hz/10 (mirrors RX on some simplex records — semantics partial)" },
+        { "key": "chanType", "offset": 10, "codec": "bits", "bits": [0, 1], "desc": "0 analog / 1 digital / 2 A+D(TX-A) / 3 D+A(TX-D)" },
+        { "key": "txPower", "offset": 10, "codec": "bits", "bits": [2, 3], "desc": "0 low / 1 mid / 2 high / 3 turbo" },
+        { "key": "bandwidth", "offset": 10, "codec": "bits", "bits": [4, 4], "desc": "0 = 12.5 kHz, 1 = 25 kHz" },
+        { "key": "shiftDir", "offset": 10, "codec": "bits", "bits": [6, 7], "desc": "repeater shift: 0 simplex / 1 + / 2 −" },
+        { "key": "rxToneType", "offset": 11, "codec": "bits", "bits": [0, 1], "desc": "0 off / 1 CTCSS / 2 DCS" },
+        { "key": "txToneType", "offset": 11, "codec": "bits", "bits": [2, 3], "desc": "0 off / 1 CTCSS / 2 DCS" },
+        { "key": "reverse", "offset": 11, "codec": "bits", "bits": [4, 4], "desc": "reverse on/off" },
+        { "key": "txProhibit", "offset": 11, "codec": "bits", "bits": [5, 5], "desc": "TX prohibit on/off" },
+        { "key": "talkaround", "offset": 11, "codec": "bits", "bits": [7, 7], "desc": "talkaround on/off" },
+        { "key": "txCtcssIndex", "offset": 12, "codec": "u8", "desc": "TX CTCSS 1-based index" },
+        { "key": "rxCtcssIndex", "offset": 13, "codec": "u8", "desc": "RX CTCSS 1-based index" },
+        { "key": "txDcs", "offset": 14, "len": 2, "codec": "le16", "desc": "TX DCS word (octal code)" },
+        { "key": "rxDcs", "offset": 16, "len": 2, "codec": "le16", "desc": "RX DCS word (octal code)" },
+        { "key": "squelchMode", "offset": 27, "codec": "bits", "bits": [4, 6], "desc": "0 SQ / 1 CDT / 2 TONE / 3 C&T / 4 C|T" },
+        { "key": "busyLock", "offset": 28, "codec": "bits", "bits": [0, 1], "desc": "0 off / 1 different-CDT / 2 channel-free" },
+        { "key": "optionalSignal", "offset": 28, "codec": "bits", "bits": [4, 5], "desc": "0 off / 1 DTMF / 2 2-tone / 3 5-tone" },
+        { "key": "colorCode", "offset": 34, "codec": "bits", "bits": [0, 3], "desc": "DMR color code 0-15" },
+        { "key": "timeSlot", "offset": 35, "codec": "bits", "bits": [0, 0], "desc": "DMR slot: 0 = TS1, 1 = TS2" },
+        { "key": "dmrModeSlot", "offset": 35, "codec": "bits", "bits": [2, 3], "desc": "direct-mode slot variant (with dmrDirect): 0 simplex / 1 double-slot / 2 double-slot(D)" },
+        { "key": "aprsReceive", "offset": 35, "codec": "bits", "bits": [5, 5], "desc": "APRS receive on/off" },
+        { "key": "name", "offset": 37, "len": 16, "codec": "asciiz", "desc": "channel name" },
+        { "key": "dmrDirect", "offset": 54, "codec": "bits", "bits": [1, 1], "desc": "0 = repeater mode, 1 = direct (see dmrModeSlot)" },
+        { "key": "compander", "offset": 54, "codec": "bits", "bits": [3, 3], "desc": "compander on/off" },
+        { "key": "txInterrupt", "offset": 54, "codec": "bits", "bits": [4, 5], "desc": "0 off / 1 low priority / 2 high priority" },
+        { "key": "scrambler", "offset": 60, "codec": "bits", "bits": [0, 3], "desc": "0 off / 1-11 scrambler mode" },
+        { "key": "smsForbid", "offset": 63, "codec": "bits", "bits": [2, 2], "desc": "SMS forbid on/off" },
+        { "key": "dataAckForbid", "offset": 63, "codec": "bits", "bits": [3, 3], "desc": "data-ack forbid on/off" },
+        { "key": "position", "offset": 71, "codec": "u8", "desc": "absolute in-zone channel position" },
+        { "key": "contactCallType", "offset": 74, "codec": "u8", "desc": "DMR contact call type: 1 group / 2 all / else private" },
+        { "key": "talkgroup", "offset": 75, "len": 4, "codec": "bcd", "desc": "DMR talkgroup, BCD" },
+        { "key": "contactName", "offset": 79, "len": 16, "codec": "asciiz", "desc": "DMR contact name" }
+      ]
+    },
+    "zone": {
+      "frame": "04 29 (side A) / 04 2a (side B)",
+      "lengths": [37],
+      "fullFrom": 37,
+      "fields": [
+        { "key": "name", "offset": 2, "len": 16, "codec": "asciiz", "desc": "zone name" },
+        { "key": "zoneIndex", "offset": 34, "codec": "u8", "desc": "0-based zone index (zone-select target)" },
+        { "key": "currentPosition", "offset": 35, "codec": "u8", "desc": "current/last in-zone channel position (NOT the channel count)" }
+      ]
+    }
+  }
+}

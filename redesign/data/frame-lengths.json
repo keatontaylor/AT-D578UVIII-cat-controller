@@ -1,0 +1,828 @@
+{
+  "generatedAt": "2026-06-27T23:40:55.171Z",
+  "generatedFrom": [
+    "captures/wire.ndjson"
+  ],
+  "note": "Per-frame-TYPE length table from the capture corpus (RX frames, checksum-validated). fixedByHead = status/ack push head byte \u2192 length. reads04 = 0x04 register read \u2192 length. variable:true = a small length-set (browse family) framed by checksum+next-head, NOT a fixed length. Structural only \u2014 regenerate with redesign/tools/gen-frame-lengths.mjs.",
+  "totals": {
+    "lines": 39353,
+    "rxFrames": 30181,
+    "badChecksum": 0
+  },
+  "fixedByHead": {
+    "58": {
+      "lengths": [
+        112
+      ],
+      "variable": false,
+      "primaryLength": 112,
+      "distribution": {
+        "112": 348
+      },
+      "validSamples": 348,
+      "badChecksum": 0
+    },
+    "59": {
+      "lengths": [
+        57
+      ],
+      "variable": false,
+      "primaryLength": 57,
+      "distribution": {
+        "57": 374
+      },
+      "validSamples": 374,
+      "badChecksum": 0
+    },
+    "03": {
+      "lengths": [
+        5
+      ],
+      "variable": false,
+      "primaryLength": 5,
+      "distribution": {
+        "5": 1420
+      },
+      "validSamples": 1420,
+      "badChecksum": 0
+    },
+    "5a": {
+      "lengths": [
+        16
+      ],
+      "variable": false,
+      "primaryLength": 16,
+      "distribution": {
+        "16": 10068
+      },
+      "validSamples": 10068,
+      "badChecksum": 0
+    },
+    "5b": {
+      "lengths": [
+        3
+      ],
+      "variable": false,
+      "primaryLength": 3,
+      "distribution": {
+        "3": 3341
+      },
+      "validSamples": 3341,
+      "badChecksum": 0
+    },
+    "5c": {
+      "lengths": [
+        12
+      ],
+      "variable": false,
+      "primaryLength": 12,
+      "distribution": {
+        "12": 175
+      },
+      "validSamples": 175,
+      "badChecksum": 0
+    },
+    "5e": {
+      "lengths": [
+        18
+      ],
+      "variable": false,
+      "primaryLength": 18,
+      "distribution": {
+        "18": 8678
+      },
+      "validSamples": 8678,
+      "badChecksum": 0
+    },
+    "5f": {
+      "lengths": [
+        3,
+        5
+      ],
+      "variable": true,
+      "primaryLength": null,
+      "distribution": {
+        "3": 406,
+        "5": 87
+      },
+      "validSamples": 493,
+      "badChecksum": 0
+    }
+  },
+  "reads04": {
+    "10": {
+      "lengths": [
+        64
+      ],
+      "variable": false,
+      "primaryLength": 64,
+      "distribution": {
+        "64": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "11": {
+      "lengths": [
+        67
+      ],
+      "variable": false,
+      "primaryLength": 67,
+      "distribution": {
+        "67": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "12": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "13": {
+      "lengths": [
+        17
+      ],
+      "variable": false,
+      "primaryLength": 17,
+      "distribution": {
+        "17": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "14": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "15": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "16": {
+      "lengths": [
+        103
+      ],
+      "variable": false,
+      "primaryLength": 103,
+      "distribution": {
+        "103": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "17": {
+      "lengths": [
+        103
+      ],
+      "variable": false,
+      "primaryLength": 103,
+      "distribution": {
+        "103": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "18": {
+      "lengths": [
+        103
+      ],
+      "variable": false,
+      "primaryLength": 103,
+      "distribution": {
+        "103": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "19": {
+      "lengths": [
+        103
+      ],
+      "variable": false,
+      "primaryLength": 103,
+      "distribution": {
+        "103": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "22": {
+      "lengths": [
+        147
+      ],
+      "variable": false,
+      "primaryLength": 147,
+      "distribution": {
+        "147": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "23": {
+      "lengths": [
+        147
+      ],
+      "variable": false,
+      "primaryLength": 147,
+      "distribution": {
+        "147": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "24": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "26": {
+      "lengths": [
+        172
+      ],
+      "variable": false,
+      "primaryLength": 172,
+      "distribution": {
+        "172": 199
+      },
+      "validSamples": 199,
+      "badChecksum": 0
+    },
+    "27": {
+      "lengths": [
+        104
+      ],
+      "variable": false,
+      "primaryLength": 104,
+      "distribution": {
+        "104": 198
+      },
+      "validSamples": 198,
+      "badChecksum": 0
+    },
+    "28": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "29": {
+      "lengths": [
+        37
+      ],
+      "variable": false,
+      "primaryLength": 37,
+      "distribution": {
+        "37": 66
+      },
+      "validSamples": 66,
+      "badChecksum": 0
+    },
+    "30": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "31": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "32": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "33": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "34": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "35": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "37": {
+      "lengths": [
+        103
+      ],
+      "variable": false,
+      "primaryLength": 103,
+      "distribution": {
+        "103": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "38": {
+      "lengths": [
+        103
+      ],
+      "variable": false,
+      "primaryLength": 103,
+      "distribution": {
+        "103": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "45": {
+      "lengths": [
+        81
+      ],
+      "variable": false,
+      "primaryLength": 81,
+      "distribution": {
+        "81": 4
+      },
+      "validSamples": 4,
+      "badChecksum": 0
+    },
+    "50": {
+      "lengths": [
+        5
+      ],
+      "variable": false,
+      "primaryLength": 5,
+      "distribution": {
+        "5": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "51": {
+      "lengths": [
+        12
+      ],
+      "variable": false,
+      "primaryLength": 12,
+      "distribution": {
+        "12": 686
+      },
+      "validSamples": 686,
+      "badChecksum": 0
+    },
+    "52": {
+      "lengths": [
+        94
+      ],
+      "variable": false,
+      "primaryLength": 94,
+      "distribution": {
+        "94": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "59": {
+      "lengths": [
+        59
+      ],
+      "variable": false,
+      "primaryLength": 59,
+      "distribution": {
+        "59": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "02": {
+      "lengths": [
+        33
+      ],
+      "variable": false,
+      "primaryLength": 33,
+      "distribution": {
+        "33": 51
+      },
+      "validSamples": 51,
+      "badChecksum": 0
+    },
+    "05": {
+      "lengths": [
+        99
+      ],
+      "variable": false,
+      "primaryLength": 99,
+      "distribution": {
+        "99": 136
+      },
+      "validSamples": 136,
+      "badChecksum": 0
+    },
+    "06": {
+      "lengths": [
+        99
+      ],
+      "variable": false,
+      "primaryLength": 99,
+      "distribution": {
+        "99": 136
+      },
+      "validSamples": 136,
+      "badChecksum": 0
+    },
+    "07": {
+      "lengths": [
+        39
+      ],
+      "variable": false,
+      "primaryLength": 39,
+      "distribution": {
+        "39": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "09": {
+      "lengths": [
+        141
+      ],
+      "variable": false,
+      "primaryLength": 141,
+      "distribution": {
+        "141": 135
+      },
+      "validSamples": 135,
+      "badChecksum": 0
+    },
+    "0a": {
+      "lengths": [
+        131
+      ],
+      "variable": false,
+      "primaryLength": 131,
+      "distribution": {
+        "131": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "0b": {
+      "lengths": [
+        131
+      ],
+      "variable": false,
+      "primaryLength": 131,
+      "distribution": {
+        "131": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "0c": {
+      "lengths": [
+        36
+      ],
+      "variable": false,
+      "primaryLength": 36,
+      "distribution": {
+        "36": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "0d": {
+      "lengths": [
+        123
+      ],
+      "variable": false,
+      "primaryLength": 123,
+      "distribution": {
+        "123": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "0e": {
+      "lengths": [
+        87
+      ],
+      "variable": false,
+      "primaryLength": 87,
+      "distribution": {
+        "87": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "1a": {
+      "lengths": [
+        103
+      ],
+      "variable": false,
+      "primaryLength": 103,
+      "distribution": {
+        "103": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "1b": {
+      "lengths": [
+        60
+      ],
+      "variable": false,
+      "primaryLength": 60,
+      "distribution": {
+        "60": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "1c": {
+      "lengths": [
+        119
+      ],
+      "variable": false,
+      "primaryLength": 119,
+      "distribution": {
+        "119": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "1d": {
+      "lengths": [
+        18
+      ],
+      "variable": false,
+      "primaryLength": 18,
+      "distribution": {
+        "18": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "1e": {
+      "lengths": [
+        25
+      ],
+      "variable": false,
+      "primaryLength": 25,
+      "distribution": {
+        "25": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "1f": {
+      "lengths": [
+        109
+      ],
+      "variable": false,
+      "primaryLength": 109,
+      "distribution": {
+        "109": 33
+      },
+      "validSamples": 33,
+      "badChecksum": 0
+    },
+    "2a": {
+      "lengths": [
+        37
+      ],
+      "variable": false,
+      "primaryLength": 37,
+      "distribution": {
+        "37": 196
+      },
+      "validSamples": 196,
+      "badChecksum": 0
+    },
+    "2b": {
+      "lengths": [
+        35
+      ],
+      "variable": false,
+      "primaryLength": 35,
+      "distribution": {
+        "35": 224
+      },
+      "validSamples": 224,
+      "badChecksum": 0
+    },
+    "2c": {
+      "lengths": [
+        72,
+        118
+      ],
+      "variable": true,
+      "primaryLength": 118,
+      "distribution": {
+        "72": 4,
+        "118": 75
+      },
+      "validSamples": 79,
+      "badChecksum": 0
+    },
+    "2d": {
+      "lengths": [
+        72,
+        121
+      ],
+      "variable": true,
+      "primaryLength": 121,
+      "distribution": {
+        "72": 4,
+        "121": 449
+      },
+      "validSamples": 453,
+      "badChecksum": 0
+    },
+    "2e": {
+      "lengths": [
+        20
+      ],
+      "variable": false,
+      "primaryLength": 20,
+      "distribution": {
+        "20": 1379
+      },
+      "validSamples": 1379,
+      "badChecksum": 0
+    },
+    "4a": {
+      "lengths": [
+        135
+      ],
+      "variable": false,
+      "primaryLength": 135,
+      "distribution": {
+        "135": 41
+      },
+      "validSamples": 41,
+      "badChecksum": 0
+    },
+    "4b": {
+      "lengths": [
+        18,
+        135
+      ],
+      "variable": true,
+      "primaryLength": 135,
+      "distribution": {
+        "18": 19,
+        "135": 202
+      },
+      "validSamples": 221,
+      "badChecksum": 0
+    },
+    "4d": {
+      "lengths": [
+        29
+      ],
+      "variable": false,
+      "primaryLength": 29,
+      "distribution": {
+        "29": 51
+      },
+      "validSamples": 51,
+      "badChecksum": 0
+    },
+    "4e": {
+      "lengths": [
+        7
+      ],
+      "variable": false,
+      "primaryLength": 7,
+      "distribution": {
+        "7": 51
+      },
+      "validSamples": 51,
+      "badChecksum": 0
+    },
+    "4f": {
+      "lengths": [
+        70
+      ],
+      "variable": false,
+      "primaryLength": 70,
+      "distribution": {
+        "70": 34
+      },
+      "validSamples": 34,
+      "badChecksum": 0
+    },
+    "5a": {
+      "lengths": [
+        17
+      ],
+      "variable": false,
+      "primaryLength": 17,
+      "distribution": {
+        "17": 53
+      },
+      "validSamples": 53,
+      "badChecksum": 0
+    },
+    "5b": {
+      "lengths": [
+        4
+      ],
+      "variable": false,
+      "primaryLength": 4,
+      "distribution": {
+        "4": 51
+      },
+      "validSamples": 51,
+      "badChecksum": 0
+    },
+    "5e": {
+      "lengths": [
+        19
+      ],
+      "variable": false,
+      "primaryLength": 19,
+      "distribution": {
+        "19": 53
+      },
+      "validSamples": 53,
+      "badChecksum": 0
+    }
+  }
+}
