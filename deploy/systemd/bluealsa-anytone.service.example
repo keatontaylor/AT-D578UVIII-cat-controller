@@ -1,0 +1,16 @@
+# /etc/systemd/system/bluealsa-anytone.service — the app's PRIVATE BlueALSA instance.
+# HFP-HF + CVSD only, on its own D-Bus name, so system audio (A2DP/PipeWire) is untouched.
+[Unit]
+Description=BlueALSA HFP instance for AnyTone controller (org.bluealsa.anytone)
+Requires=bluetooth.service dbus.service
+After=bluetooth.service dbus.service
+
+[Service]
+Type=dbus
+BusName=org.bluealsa.anytone
+ExecStart=/usr/bin/bluealsa -B anytone -p hfp-hf -c CVSD --keep-alive=30 --io-rt-priority=20 --loglevel=warning
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

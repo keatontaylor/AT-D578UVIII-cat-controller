@@ -1,0 +1,20 @@
+# ~/.config/systemd/user/anytone-v2.service — the app as a USER service.
+# Enable boot-start with:  sudo loginctl enable-linger <user>
+#   systemctl --user daemon-reload && systemctl --user enable --now anytone-v2
+[Unit]
+Description=AnyTone D578 controller v2 — Fastify + Vite SPA, single process
+After=network.target bluetooth.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/anytone
+Environment=ANYTONE_API_PORT=8080
+Environment=ANYTONE_API_HOST=0.0.0.0
+Environment=ANYTONE_BASE_PATH=/anytone-v2
+Environment=ANYTONE_BLUEALSA_DBUS=anytone
+ExecStart=/usr/bin/node --import tsx src/main.ts
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

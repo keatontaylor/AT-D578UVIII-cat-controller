@@ -1,0 +1,5 @@
+# ~/.config/systemd/user/anytone-v2.service.d/turn.conf — mode 600, NEVER committed.
+# Cloudflare TURN credentials for WebRTC audio across hostile NATs (optional).
+[Service]
+Environment=ANYTONE_CF_TURN_KEY_ID=your-key-id
+Environment=ANYTONE_CF_TURN_API_TOKEN=your-api-token

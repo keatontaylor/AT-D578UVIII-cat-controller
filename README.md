@@ -1,40 +1,88 @@
-# AnyTone D578 Controller — Redesign (v2) Doc Set
+# AnyTone AT-D578UVIII Bluetooth Controller
 
-This folder is the **foundational specification** for a clean re-implementation of the
-AnyTone D578UV Bluetooth controller. It is the output of a long design pass over the
-existing proof-of-concept (`app/anytone-server.mjs` + `app/pages/index.vue`), distilled
-into normative contracts so the rewrite can be built against a *spec*, not by archaeology.
+Full remote control for the AnyTone AT-D578UV III mobile radio over its built-in
+Bluetooth — the same link its BT-01 remote head uses, reverse-engineered from wire
+captures and BT-01 firmware analysis. Runs great on a Raspberry Pi sitting next to
+the radio; operate from any browser on the LAN (or beyond, behind a reverse proxy).
 
-> **Status: DRAFT for review.** Nothing here is committed to code yet. Review, push back,
-> and we refine before a line is written.
+## What it does
 
-## Philosophy
+- **Live dual-VFO dashboard** — both sides (A/B): frequency, channel/zone, S-meters,
+  squelch state, TX truth indicators; click-to-edit frequency, channel/zone stepping,
+  a zone+channel picker, VFO/memory switching.
+- **Voice** — listen to the radio's RX audio in the browser (WebRTC: Opus or native-8k
+  PCMU), hold-to-talk PTT with mic capture, lock-screen media display on mobile.
+  Optional Cloudflare TURN for hostile NATs (credentials via env, never in the repo).
+- **DMR** — live call decode (talkgroup, caller ID with RadioID lookup, slot/CC),
+  digital-monitor control, manual dial (call any TG / private ID without a codeplug slot).
+- **Channel + radio settings** — per-channel settings (power, tones, bandwidth, color
+  code, time slot, …) and the radio's global settings menu, editable live with
+  ack-confirmed writes and a CTCSS/DCS tone picker.
+- **Native scan** — start/stop the radio's own scanner, scan-list selection, lock/pause
+  follow, honest "position unknown" display while it hops.
+- **Squelch + TX recordings** — every squelch opening and every transmission recorded
+  to disk, browsable on a per-channel timeline with continuous playback and download.
+- **Packet TNC (optional)** — a direwolf soundcard modem bridged to the radio's audio
+  and PTT: KISS (TCP :8001) + AGWPE (:8000) on the LAN, Bonjour-advertised for iOS
+  packet apps (RadioMail etc). Best-effort over the Bluetooth voice path.
+- **PTT safety chain** — radio-ACK-confirmed keying, bounded retries, automatic
+  failsafe release, Bluetooth-teardown last resort, and a deadman that releases PTT
+  if the browser vanishes mid-transmission.
 
-1. **Treat the current codebase as a PoC, not garbage.** It encodes a large amount of
-   hard-won, validated behavior. We **harvest** it as the reference implementation and
-   behavioral oracle — every guard and edge case becomes a numbered requirement or a test,
-   not a deleted line.
-2. **Spec-first, then code.** These docs are the requirements. The protocol is now
-   well-understood (it was reverse-engineered live and documented); the rewrite implements
-   a known contract rather than re-deriving one.
-3. **Capture-verified, not blind.** We have a corpus of real wire captures
-   (`captures/wire.ndjson`). The rewrite's link/codec layers are validated by **replaying
-   captured traffic and asserting identical framing/decoding** (golden-master /
-   characterization tests). This is what turns a risky rewrite into a verifiable one.
-4. **Invariants, not incidents.** Contracts describe what is *always true* (positive rules),
-   not a catalogue of bugs we hit. Where a historical "edge case" was really a symptom of an
-   incomplete model, it collapses into the correct rule. (e.g. the "5e wedge" is just *"these
-   message classes require an ACK"*; "codeplug corruption" is just *"one frame on the wire at
-   a time, with a gap"*.)
-5. **Transplant the gnarly glue, rewrite the protocol.** The radio *protocol* is the
-   well-understood part (safe to rewrite). The BT/audio *orchestration* (BlueZ, BlueALSA,
-   HFP/SCO, ffmpeg, WebRTC) is under-documented system glue — we **port it behind a clean
-   interface** rather than re-deriving it.
-6. **Small, single-responsibility modules.** Files are sized so a human *and* an LLM can hold
-   one in working memory. No 10k-line monoliths. This is a first-class requirement
-   (see REQUIREMENTS §NF), not a nicety.
+## Quick start (Raspberry Pi OS / Debian)
 
-## How to read this set
+```sh
+git clone https://github.com/keatontaylor/AT-D578UVIII-cat-controller.git ~/anytone
+cd ~/anytone && ./install.sh
+```
+
+The installer is idempotent. It installs system packages (BlueZ, BlueALSA, Node.js),
+builds the UI, sets up the isolated BlueALSA HFP instance + D-Bus policy + one scoped
+sudoers rule, installs the app as a **user** systemd service (`anytone-v2`), and
+(optionally) an nginx HTTPS reverse proxy. The header comments in `install.sh`
+document every `ANYTONE_NO_*` opt-out.
+
+Then open `https://<pi>/anytone-v2/`, put the radio in pairing mode
+(Menu → Bluetooth → Pairing), scan, pair, connect.
+
+> **HTTPS matters:** browsers only allow microphone capture (PTT voice) on secure
+> origins. The installer's self-signed cert works; a real cert works better.
+
+## Manual run (development)
+
+```sh
+npm install
+npm test            # 400+ tests, no radio required (sim rig + captured-wire replays)
+npm run build       # Vite SPA → dist/
+node --import tsx src/main.ts   # Fastify + /ws on :8080, SPA at /anytone-v2/
+```
+
+## Configuration (environment)
+
+Everything is optional; defaults suit a Pi with one radio.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANYTONE_API_PORT` / `ANYTONE_API_HOST` | `8080` / `0.0.0.0` | HTTP/WS bind |
+| `ANYTONE_BASE_PATH` | `/anytone-v2` | Subpath the SPA + API mount at |
+| `ANYTONE_BLUEALSA_DBUS` | `anytone` | Isolated BlueALSA D-Bus suffix |
+| `ANYTONE_RADIOID_CSV` | `~/anytone/data/radioid_user.csv` | RadioID.net user DB for DMR caller ID |
+| `ANYTONE_RECORDER_AUTOSTART` | on | Squelch/TX recorders arm on connect (`0` opts out) |
+| `ANYTONE_AUDIO_TX_GAIN` | `0.6` | Mic → radio gain |
+| `ANYTONE_CF_TURN_KEY_ID` / `ANYTONE_CF_TURN_API_TOKEN` | unset | Mint Cloudflare TURN credentials for WebRTC relay — put these in a mode-600 systemd drop-in, **never** in the repo |
+| `ANYTONE_ICE_SERVERS` | unset | Static ICE server JSON (alternative to Cloudflare TURN) |
+| `ANYTONE_RTC_FORCE_RELAY` | unset | `1` forces WebRTC through TURN |
+| `ANYTONE_PACKET_*` | see `src/main.ts` | Packet TNC: callsign, ports, TXDELAY/TXTAIL… |
+| `ANYTONE_WIRE_LOG` | unset | `1` → NDJSON wire capture per connect (diagnostics) |
+
+## Architecture
+
+One Node process (TypeScript via tsx): Bluetooth SPP transport → framing + codec
+(corpus-derived frame tables) → stop-and-wait ARQ link with retransmit-safety classes
+→ pure domain reducer + shared view model → single WebSocket (JSON-RPC 2.0 commands,
+RFC 7396 state patches) → Vue 3 SPA. Audio rides BlueZ/BlueALSA HFP (CVSD) into WebRTC.
+
+The docs are the spec the code was built against:
 
 | Doc | What it covers |
 |---|---|
@@ -43,22 +91,31 @@ into normative contracts so the rewrite can be built against a *spec*, not by ar
 | [LINK_PROTOCOL.md](LINK_PROTOCOL.md) | **Normative** radio link contract — framing, transactions, ACK classes, ARQ |
 | [UI_PROTOCOL.md](UI_PROTOCOL.md) | The WebSocket command bus, command lifecycle, desired/reported state, PTT lifecycle |
 | [CONNECTION_AND_COMPONENTS.md](CONNECTION_AND_COMPONENTS.md) | Connection establishment sequence + external-component inventory |
-| [COMMAND_REFERENCE.md](COMMAND_REFERENCE.md) | Frame format + opcode/register catalogue (decode completion tracked here) |
-| [TESTING.md](TESTING.md) | Capture-replay / golden-master test strategy (how NF4 is actually done) |
+| [COMMAND_REFERENCE.md](COMMAND_REFERENCE.md) | Frame format + opcode/register catalogue |
+| [TESTING.md](TESTING.md) | Capture-replay / golden-master strategy, the sim rig, invariant fuzzing |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md), [docs/BT01_HEAD_BUS_PROTOCOL.md](docs/BT01_HEAD_BUS_PROTOCOL.md) | The reverse-engineered radio protocol |
 
-## Evidence grading (used throughout)
+### Evidence grading (used throughout the docs)
 
-Every behavioral claim carries a grade. Do not promote a grade without new evidence; do not
-build a hard dependency on anything below **DOCUMENTED** without flagging it.
+Every behavioral claim carries a grade — **CONFIRMED / OBSERVED / DOCUMENTED /
+INFERRED / HYPOTHESIS / OPEN** — and the cardinal rule is: never launder a
+HYPOTHESIS into a fact to make the contract look tidy. A clean-but-wrong spec is
+worse than an honest messy one.
 
-| Grade | Meaning |
-|---|---|
-| **CONFIRMED** | Reproduced live / measured across many samples |
-| **OBSERVED** | Seen directly in a capture, single session / not stress-tested |
-| **DOCUMENTED** | Recorded in prior RE, not re-verified here |
-| **INFERRED** | Logical deduction from confirmed facts |
-| **HYPOTHESIS** | Working model, not yet validated — *must not be asserted as fact* |
-| **OPEN** | Unknown; data needed |
+## Security notes
 
-The cardinal rule: **never launder a HYPOTHESIS into a fact to make the contract look tidy.**
-A clean-but-wrong spec is worse than an honest messy one.
+- The app has **no authentication** — put it behind your reverse proxy's auth if it
+  is reachable beyond a trusted LAN (`rtc.config` mints TURN credentials for anyone
+  who can reach `/ws`).
+- Secrets (the TURN API token) belong in a systemd drop-in
+  (`~/.config/systemd/user/anytone-v2.service.d/turn.conf`, mode 600); see
+  `deploy/README.md`. The repo `.gitignore` refuses `.env` files as a backstop.
+- Wire captures and codeplug exports contain personal data (callsign, contacts,
+  channel names) and are git-ignored; `captures/wire.ndjson` is the one reviewed,
+  frozen test fixture.
+
+## Heritage / disclaimer
+
+Built by reverse-engineering the AnyTone BT-01 remote-head protocol from live wire
+captures and firmware analysis. Not affiliated with AnyTone. It keys a real
+transmitter — know your license conditions, and use at your own risk.
