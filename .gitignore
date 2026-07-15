@@ -41,9 +41,10 @@ firmware/
 .DS_Store
 *.swp
 
-# ---- Local-only RE tools (unpublished; the two whitelisted ones are repo tooling) ----
+# ---- Local-only RE tools (unpublished; the whitelisted ones are repo tooling) ----
 tools/*
 !tools/gen-frame-lengths.mjs
 !tools/fakephone.mjs
+!tools/wire-health.ts
 __pycache__/
 *.pyc
