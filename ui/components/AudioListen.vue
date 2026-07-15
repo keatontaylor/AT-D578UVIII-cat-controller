@@ -2,36 +2,22 @@
 // Audio toolbar (PoC parity): Enable Audio (RX), Enable Mic (arm the mic independently), and Stats
 // (WebRTC diagnostics popup). The hold-to-talk floating PTT is only present once the mic is armed —
 // no mic, no PTT — mirroring the PoC's `v-if="audioMicActive"`.
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { useRadio } from '../composables/useRadio'
 import { setAudioSessionType, useMediaSession } from '../composables/useMediaSession'
-import WebRtcStats from './WebRtcStats.vue'
 import SettingsDialog from './SettingsDialog.vue'
-import AppSlider from './AppSlider.vue'
 
 const radio = useRadio()
 const listening = ref(false)
 
-// Mic→radio gain: server-held (persists across restarts), applies to the NEXT mic frame — so it
-// can be trimmed live, even mid-transmission. Debounced: range inputs fire per pixel.
-const gain = ref(0.6)
-let gainTimer: number | undefined
-function onGainInput(): void {
-  window.clearTimeout(gainTimer)
-  gainTimer = window.setTimeout(() => {
-    void radio.setTxGain(gain.value).catch(() => {})
-  }, 200)
-}
-watch(listening, (on) => {
-  if (on) void radio.getTxGain().then((g) => (gain.value = g.gain)).catch(() => {})
-})
+// Mic→radio gain: server-held at its 0.6 default (main.ts). The live-adjust slider was removed —
+// the default is left in place; re-add the AppSlider + setTxGain/getTxGain wiring to expose it.
 // RX codec picker (PCMU native-8k default vs Opus). Changing it re-establishes audio so the new
 // codec is negotiated. Persisted in localStorage by the composable.
 const busy = ref(false)
 const micBusy = ref(false)
 const micEnabled = ref(false)
 const keyed = ref(false)
-const statsOpen = ref(false)
 const settingsOpen = ref(false)
 const error = ref<string | null>(null)
 const audioPlayerRef = ref<HTMLAudioElement | null>(null)
@@ -51,7 +37,6 @@ async function toggleAudio(): Promise<void> {
     if (listening.value) {
       if (keyed.value) await releaseMic()
       if (micEnabled.value) await radio.disableMic().catch(() => {})
-      statsOpen.value = false
       await radio.stopAudio()
       // Detach the dead stream from the element — a lingering srcObject keeps iOS's now-playing
       // surface alive even after the peer connection is closed (media session teardown pairs
@@ -154,26 +139,15 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="audio-listener" :class="{ 'audio-listener--active': listening }">
-    <button class="btn btn-ghost" :disabled="busy" :title="audioTitle" @click="toggleAudio">{{ audioToggleLabel }}</button>
+    <button class="btn btn-ghost" :class="{ 'btn-audio--active': listening }" :disabled="busy" :title="audioTitle" @click="toggleAudio">{{ audioToggleLabel }}</button>
     <button
-      v-if="listening"
       class="btn btn-ghost"
       :class="{ 'btn-mic--active': micEnabled }"
-      :disabled="micBusy"
+      :disabled="micBusy || !listening"
       :title="micTitle"
       @click="toggleMic"
     >{{ micLabel }}</button>
-    <button v-if="listening" class="btn btn-ghost" title="WebRTC connection stats" @click="statsOpen = true">Stats</button>
     <button class="btn btn-ghost audio-settings-btn" title="Radio settings — organized like the radio's own menu" @click="settingsOpen = true">Radio Settings</button>
-    <label
-      v-if="listening && micEnabled"
-      class="mic-gain"
-      title="Microphone → radio gain — lower it if your transmit audio distorts (applies live, persists)"
-    >
-      <span class="mic-gain-name">TX Gain</span>
-      <AppSlider v-model="gain" :min="0.1" :max="1.5" :step="0.05" aria-label="Microphone to radio gain" @update:model-value="onGainInput" />
-      <span class="mic-gain-val">{{ gain.toFixed(2) }}</span>
-    </label>
     <span v-if="error" class="audio-listener-error">{{ error }}</span>
 
     <!-- Live-audio playback sink: where WebRTC audio actually plays, kept in the DOM but hidden. -->
@@ -208,22 +182,15 @@ onBeforeUnmount(() => {
       </button>
     </Teleport>
 
-    <WebRtcStats v-if="statsOpen" @close="statsOpen = false" />
     <SettingsDialog v-if="settingsOpen" @close="settingsOpen = false" />
   </div>
 </template>
 
 <style scoped>
-.btn-mic--active {
+.btn-mic--active,
+.btn-audio--active {
   border-color: rgba(63, 185, 80, .6);
   color: var(--green, #3fb950);
   background: rgba(63, 185, 80, .1);
 }
-.mic-gain {
-  display: inline-flex; align-items: center; gap: 6px;
-  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
-  color: var(--text-muted, #8b949e);
-}
-.mic-gain .app-slider { width: 84px; }
-.mic-gain-val { font-family: var(--font-mono); font-size: 11px; color: var(--text, #e6edf3); min-width: 30px; }
 </style>

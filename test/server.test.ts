@@ -140,3 +140,51 @@ test('fastify /ws: rtc messages are validated before reaching the audio session'
     await app.close()
   }
 })
+
+test('wire capture: link.stats reports the capture + /wire/current downloads it', async (t) => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'wire-'))
+  const file = join(dir, 'v2-wire-test.ndjson')
+  const body = '{"ts":"t","dir":"rx","hex":"5b 01 5c"}\n'
+  writeFileSync(file, body)
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+
+  const { c } = newController()
+  const broadcaster = new StateBroadcaster(c.appState)
+  let current: string | null = file
+  const app = await createServer({ controller: c, broadcaster, wireCapture: () => current }, {})
+  t.after(() => app.close())
+
+  // download route streams the file as an attachment with its own name
+  const dl = await app.inject({ method: 'GET', url: '/wire/current' })
+  assert.equal(dl.statusCode, 200)
+  assert.match(dl.headers['content-disposition'] as string, /filename="v2-wire-test\.ndjson"/)
+  assert.equal(dl.body, body)
+
+  // link.stats is augmented at the API boundary with the capture metadata
+  const ws = new WebSocket(`ws://127.0.0.1:${(await listen(app)).port}/ws`)
+  try {
+    await withTimeout(new Promise<void>((res, rej) => { ws.on('open', () => res()); ws.on('error', rej) }), 2000, 'open')
+    const got = new Promise<Msg & { result?: { wireCapture?: { filename: string; sizeBytes: number } } }>((resolve) => {
+      ws.on('message', (d: Buffer) => { const m = JSON.parse(d.toString()); if (m.id === 5) resolve(m) })
+    })
+    ws.send(JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'link.stats' }))
+    const rep = await withTimeout(got, 2000, 'link.stats')
+    assert.equal(rep.result?.wireCapture?.filename, 'v2-wire-test.ndjson')
+    assert.equal(rep.result?.wireCapture?.sizeBytes, Buffer.byteLength(body))
+
+    // when logging is off, the route 404s and link.stats reports null
+    current = null
+    const off = await app.inject({ method: 'GET', url: '/wire/current' })
+    assert.equal(off.statusCode, 404)
+  } finally {
+    ws.close()
+  }
+})
+
+async function listen(app: Awaited<ReturnType<typeof createServer>>): Promise<AddressInfo> {
+  if (!app.server.listening) await app.listen({ port: 0, host: '127.0.0.1' })
+  return app.server.address() as AddressInfo
+}

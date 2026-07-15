@@ -4,7 +4,6 @@
 // clip with the correct channel instead of blindly using the selected side (which mis-marked a DMR
 // call on the non-selected side).
 
-import { resolveDmrSide } from './dmr-side'
 import type { ChannelConfig } from '../codec/decode'
 import type { RadioState, SideKey } from './state'
 
@@ -19,11 +18,12 @@ export interface ReceiveSnapshot {
   /** The side the current audio is attributed to. */
   side: SideKey
   /** HOW the side was attributed — the recorder's re-attribution policy keys off this:
-   *  'dmr' = a decoded call's tuple; 'analog' = that side's 5a squelch is open (both are
-   *  EVIDENCE); 'inferred' = gate open with no analog squelch → the lone DMR side (a sound
-   *  default at clip-open, but transient during the 5a-closes-before-5b end-of-RX race);
-   *  'selected' = nothing known, fell back to the selected side. */
-  source: 'dmr' | 'analog' | 'inferred' | 'selected'
+   *  'dmr' = a decoded call's tuple; 'analog' = that side's 5a squelch is open; 'holder' = the
+   *  audio-holder latch carries the side past its own squelch close (tail / overlap survivor) —
+   *  all three are EVIDENCE; 'inferred' = gate open with no analog squelch → the lone DMR side
+   *  (a sound default at clip-open, but transient during the 5a-closes-before-5b end-of-RX
+   *  race); 'selected' = nothing known, fell back to the selected side. */
+  source: 'dmr' | 'analog' | 'holder' | 'inferred' | 'selected'
   /** Raw per-side 5a squelch bits — SIDE-level evidence for consumers that must know whether a
    * specific side (e.g. a clip's attributed side) is still receiving, independent of which side
    * this snapshot attributes the audio to. Honest for DMR sides too (wire-pinned 2026-07-11). */
@@ -50,6 +50,8 @@ export interface ReceiveSnapshot {
  * RSSI DO stream (wire-pinned 2026-07-11). Gate-dependent logic (scan pause, the recorder) must
  * derive openness from both sources, or it goes blind exactly in that state. */
 export function audioGateOpen(state: RadioState): boolean {
+  // The 5a open bits are per-side AUDIO truth, not carrier presence (wire-proven 2026-07-14: a
+  // DigiMon-off muted call streams RSSI but never sets its open bit) — no decode-only filtering.
   return state.audioGate || state.signal.aOpen || state.signal.bOpen
 }
 
@@ -62,7 +64,11 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
   const dmr = state.dmr
   // identity is unresolved when the audio is attributed to the SCANNING side (the selected side
   // scans) and the lock-follow read hasn't named the channel yet — hopping or locked-unread
-  const scanUnread = state.scan.active && (state.scan.locked || state.scan.dwell ? state.scan.lockedChannel === null : !state.scan.paused || state.scan.pausedChannel === null)
+  const scanUnread =
+    state.scan.active &&
+    (state.scan.locked || state.scan.parked || state.scan.paused
+      ? state.scan.lockedChannel === null && !(state.scan.paused && state.scan.pausedChannel !== null)
+      : true)
 
   let side: SideKey = state.selectedSide
   let source: ReceiveSnapshot['source'] = 'selected'
@@ -71,14 +77,26 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
   // scan engine pushes fully identified 5e frames for channels it merely SAMPLES (wire-pinned
   // 2026-07-11: no 58/59/5b/5a-open, no audio) — an uncorroborated tuple must not steal the
   // attribution from a genuinely receiving analog side (or open phantom clips).
-  const dmrSide = dmr && dmr.direction === 'rx' ? resolveDmrSide(dmr, a.channel, b.channel, state.selectedSide) : null
+  // Only an AUDIBLE (audioRouted) DMR RX call attributes the audio — a decode-only muted call is
+  // decoded but not passed, so it never owns the stream. Side is the latched first-wins pick.
+  const dmrSide = dmr && dmr.direction === 'rx' && dmr.audioRouted ? dmr.side : null
   // Corroboration = the matched side's OWN squelch bit, or the global gate open while the OTHER
   // side isn't the one holding it (an analog carrier elsewhere opens 5b too — that must not
   // validate a phantom call on this side).
   const dmrOwnBit = dmrSide === 'a' ? state.signal.aOpen : state.signal.bOpen
   const dmrOtherBit = dmrSide === 'a' ? state.signal.bOpen : state.signal.aOpen
   const dmrCorroborated = dmrSide != null && (dmrOwnBit || (state.audioGate && !dmrOtherBit))
-  if (dmrSide != null && dmrCorroborated) {
+  // THE AUDIO HOLDER WINS (ear+clip-proven 2026-07-13): the radio's mono path is a latch — the
+  // holder keeps the audio through overlaps and its own tail, and NOTHING (not the selected-side
+  // tiebreak, not a corroborated DMR call on the other side) takes it early. When the holder is
+  // latched, it IS the side whose audio is flowing; the ladder below only decides when no latch
+  // exists (5b-only audio with no squelch edges, or idle fallbacks).
+  const holder = state.signal.holder
+  if (holder != null) {
+    side = holder
+    const holderBit = holder === 'a' ? state.signal.aOpen : state.signal.bOpen
+    source = dmrSide === holder && dmrCorroborated ? 'dmr' : holderBit ? 'analog' : 'holder'
+  } else if (dmrSide != null && dmrCorroborated) {
     side = dmrSide
     source = 'dmr'
   } else {

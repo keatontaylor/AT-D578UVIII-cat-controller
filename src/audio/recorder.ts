@@ -36,10 +36,11 @@ export interface ClipMeta {
 export type LiveClip = Omit<ClipMeta, 'durationMs'>
 
 /** What the recorder needs from the live radio state at clip-open (for metadata). `side`/`channel`
- * must be the ACTUAL receiving side (see domain/receive.ts), not just the selected one. `source`
- * says HOW the side was attributed — mid-clip side re-attribution requires evidence ('dmr' or
- * 'analog'), never a default ('inferred'/'selected'), so end-of-RX transients can't relabel a
- * clip. Omitted (the TX recorder's context) → treated as evidence. */
+ * must be the ACTUAL receiving side (see domain/receive.ts) — the audio-holder latch, not just
+ * the selected one. `source` says HOW the side was attributed — the dual-RX split and mid-clip
+ * side re-attribution require evidence ('dmr'/'analog'/'holder'), never a default
+ * ('inferred'/'selected'), so end-of-RX transients can't relabel or split a clip. Omitted (the
+ * TX recorder's context) → treated as evidence. */
 export type RadioContext = () => {
   squelchOpen: boolean
   side: 'a' | 'b'
@@ -48,9 +49,9 @@ export type RadioContext = () => {
    * the live timeline never shows a recording under the WRONG channel. Recording itself is never
    * delayed — only the announcement. Absent = resolved (the TX recorder). */
   identityResolved?: boolean
-  source?: 'dmr' | 'analog' | 'inferred' | 'selected'
-  /** Raw per-side squelch bits (RX recorder only) — lets the dual-RX split test whether the
-   * CLIP's attributed side is still receiving, not just where the current audio points. */
+  source?: 'dmr' | 'analog' | 'holder' | 'inferred' | 'selected'
+  /** Raw per-side squelch bits (RX recorder only) — diagnostic metadata alongside the
+   * holder-driven attribution. */
   aOpen?: boolean
   bOpen?: boolean
   channelName: string
@@ -114,12 +115,10 @@ export class Recorder {
     wav: string
     bytes: number
     meta: Omit<ClipMeta, 'durationMs'>
-    openSource: 'dmr' | 'analog' | 'inferred' | 'selected' | undefined
+    openSource: 'dmr' | 'analog' | 'holder' | 'inferred' | 'selected' | undefined
     /** The single `opened` announcement went out (held while identity is unresolved). */
     announced: boolean
     announceTimer?: ReturnType<typeof setTimeout> | undefined
-    /** Last time the clip's OWN side showed receive evidence — drives the dual-RX split. */
-    sideActiveAt: number
   } | null = null
   private readonly listeners = new Set<(e: RecorderEvent) => void>()
 
@@ -219,25 +218,21 @@ export class Recorder {
       else if (e.kind === 'append') this.appendFrame(e.frame)
       else void this.finishClip(e.keep, e.durationMs)
     }
-    // DUAL-RX SPLIT: both sides receiving, the clip's side stops, the OTHER side holds the gate
-    // open — the global gate never closes, so without this the segmenter fuses two different
-    // sides' transmissions into one clip labeled with the first winner. When the clip's own side
-    // has shown no evidence for tailMs (the same window that bridges its own squelch bounces)
-    // while the audio is evidence-attributed to a DIFFERENT side, the attributed transmission is
-    // over: close this clip and let the next frame open a fresh one for the new side. This is a
-    // SPLIT, never a relabel — the no-overturn policy below stands.
+    // DUAL-RX SPLIT: both sides active, the audio HANDS OFF between them, the global gate never
+    // closes — without this the segmenter fuses two different sides' transmissions into one clip
+    // labeled with the first winner. The radio's audio path is a LATCH (ear+clip-proven
+    // 2026-07-13, holder-keeps): audio transfers the instant the holder releases while the other
+    // side is receiving, and the released side reopening does NOT reclaim it. activeReceive's
+    // attribution follows that latch, so an evidence-backed attribution pointing away from the
+    // clip's side IS the handoff moment — split right there. (The previous timeout model — clip
+    // side quiet ≥ tailMs — missed handoffs where the released side relocked inside the tail
+    // window: 527 ms, live-mislabeled 2026-07-13 19:43:52.) This is a SPLIT, never a relabel —
+    // the no-overturn policy below stands.
     {
       const c0 = this.clip
       if (c0 && ctx.squelchOpen) {
-        const sideBit = c0.meta.side === 'a' ? ctx.aOpen === true : ctx.bOpen === true
-        const sideActive = sideBit || (ctx.source === 'dmr' && ctx.side === c0.meta.side)
-        if (sideActive) {
-          c0.sideActiveAt = Date.now()
-        } else if (
-          (ctx.source === 'analog' || ctx.source === 'dmr') &&
-          ctx.side !== c0.meta.side &&
-          Date.now() - c0.sideActiveAt >= this.cfg.tailMs
-        ) {
+        const evidence = ctx.source === 'analog' || ctx.source === 'dmr' || ctx.source === 'holder'
+        if (evidence && ctx.side !== c0.meta.side) {
           const ev = this.segmenter.flush()
           if (ev?.kind === 'close') void this.finishClip(ev.keep, ev.durationMs)
         }
@@ -264,7 +259,7 @@ export class Recorder {
     if (c && ctx.squelchOpen) {
       const m = c.meta
       const sideChange = ctx.side !== m.side
-      const ctxEvidence = ctx.source === undefined || ctx.source === 'dmr' || ctx.source === 'analog'
+      const ctxEvidence = ctx.source === undefined || ctx.source === 'dmr' || ctx.source === 'analog' || ctx.source === 'holder'
       const openedOnDefault = c.openSource === 'inferred' || c.openSource === 'selected'
       if (!sideChange || (ctxEvidence && openedOnDefault)) {
         const name = ctx.channelName || null
@@ -311,7 +306,6 @@ export class Recorder {
         direction: this.direction,
       },
       openSource: ctx.source,
-      sideActiveAt: Date.now(),
       announced: false,
     }
     if (ctx.identityResolved === false) {

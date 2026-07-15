@@ -209,11 +209,6 @@ body {
   min-width: 0;
 }
 
-.audio-listener--active {
-  border-color: rgba(63, 185, 80, .6);
-  background: rgba(63, 185, 80, .12);
-}
-
 .audio-listener--reconnecting {
   border-color: rgba(210, 153, 34, .7);
   background: rgba(210, 153, 34, .12);
@@ -580,6 +575,24 @@ body {
 @keyframes rx-indicator-pulse {
   0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63, 185, 80, .5); }
   50%      { opacity: .82; box-shadow: 0 0 6px 1px rgba(63, 185, 80, .55); }
+}
+/* NO MATCH: amber, no pulse — DMR traffic on frequency that the radio is not taking (the call's
+ * tuple doesn't match the channel, DigiMon off). Mirrors the radio's solid RX LED; the label
+ * states the CAUSE, not an audio claim (the mono BT path already means "silent here" happens to
+ * audible calls too). Self-explanatory on mobile (no tooltips there). */
+.rx-indicator--busy {
+  color: #3a2a05;
+  background: var(--yellow, #d29922);
+  letter-spacing: .06em;
+  animation: none;
+}
+
+/* The unlocked (NO MATCH) call's tuple + caller badges render AMBER instead of the audible
+ * green — visible call info (maybe worth flipping DigiMon on for) that you cannot hear. */
+.sql-badge--dmr-nomatch {
+  background: rgba(245, 158, 11, .16);
+  border-color: rgba(245, 158, 11, .78);
+  color: #fcd34d;
 }
 
 /* Radio-truth TX (5a byte-7 state field): red variant of the RX pill, same slot. */
@@ -1292,10 +1305,15 @@ body {
   color: #7ee787;
   animation: sql-badge-live-pulse 1.4s ease-in-out infinite;
 }
+/* ACQUIRING: lock confirmed, channel read in flight — locked-green but still pulsing (the pulse
+   stops the moment the values are real, so steady green always means "what you see is current") */
+.zone-readout--acquiring {
+  color: #7ee787;
+  animation: sql-badge-live-pulse 0.7s ease-in-out infinite;
+}
 .zone-readout--locked { color: #7ee787; }
-/* DWELL: parked post-signal, waiting out the dropout delay — amber, steady (about to move on) */
-.zone-readout--dwell { color: #d29922; }
-.zone-readout--paused { color: #b6bec8; }
+/* WAITING: parked, not receiving (dropout delay / other-side pause) — amber, steady */
+.zone-readout--waiting { color: #d29922; }
 
 .channel-step-btn--label {
   font-size: 13px;
@@ -2098,11 +2116,13 @@ button.recordings-lane-label {
   color: var(--yellow, #d29922);
 }
 
-/* Live DMR caller (5e/58) — pulses while a call is up. */
+/* Live DMR tuple (5e) — AMBER (the long-standing look), distinct from the green caller-id badge.
+ * Pulses while a call is up. Audible-vs-NO-MATCH is carried by the pill + the caller badge color,
+ * not by this badge. */
 .sql-badge--dmr-live {
-  background: rgba(16, 185, 129, .16);
-  border-color: rgba(16, 185, 129, .75);
-  color: #6ee7b7;
+  background: rgba(245, 158, 11, .16);
+  border-color: rgba(245, 158, 11, .78);
+  color: #fcd34d;
   font-family: var(--font-mono);
   animation: rx-indicator-pulse 1.1s ease-in-out infinite;
 }
@@ -2111,15 +2131,6 @@ button.recordings-lane-label {
   background: rgba(16, 185, 129, .14);
   border-color: rgba(16, 185, 129, .72);
   color: #86efac;
-}
-
-/* Live incoming call on a talkgroup the channel isn't set to (Digital Monitor). */
-.sql-badge--dmr-live {
-  background: rgba(245, 158, 11, .16);
-  border-color: rgba(245, 158, 11, .78);
-  color: #fcd34d;
-  font-family: var(--font-mono);
-  animation: sql-badge-live-pulse 1.4s ease-in-out infinite;
 }
 
 /* Scan LOCKED on a channel — solid green, no pulse (the hop settled). */
@@ -2753,8 +2764,8 @@ button.recordings-lane-label {
     text-align: center;
   }
 
-  /* 2×2 grid on phones for bigger tap targets (Enable Audio / Mic / Stats / Radio Settings).
-     The label + hidden player still span the full width. */
+  /* 2-col grid on phones for bigger tap targets: Enable Audio | Mic on the first row, and
+     Radio Settings full-width on the second. The label + hidden player also span full width. */
   .audio-listener {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2767,7 +2778,8 @@ button.recordings-lane-label {
   }
 
   .audio-settings-btn {
-    margin-left: 0; /* a grid cell like the others on phones */
+    margin-left: 0;
+    grid-column: 1 / -1; /* full width on its own (second) row */
   }
 
   .audio-listener-label {
@@ -2804,8 +2816,13 @@ button.recordings-lane-label {
   .dashboard {
     gap: 12px;
     padding: 12px;
-    /* Clear the fixed floating-PTT (bottom-right) so the last card's content
-       isn't permanently hidden behind it when scrolled to the bottom. */
+  }
+
+  /* Clear the fixed floating-PTT (bottom-right) so the last card's content isn't hidden behind it
+     when scrolled to the bottom — but ONLY while the PTT is actually present (mic armed). It's
+     teleported to <body>, so :has() scopes the reserve to exactly that state; otherwise this was
+     140px of dead space between the recordings pane and the footer. */
+  body:has(.floating-ptt) .dashboard {
     padding-bottom: 140px;
   }
 

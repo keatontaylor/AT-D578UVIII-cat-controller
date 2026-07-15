@@ -12,6 +12,8 @@ const uiError = ref<string | null>(null)
 
 const connected = computed(() => radio.online.value && state.value?.connection === 'connected')
 const connecting = computed(() => radio.online.value && state.value?.connection === 'connecting')
+// Teardown in flight (any client sees it via the shared status, not just the one that clicked).
+const disconnecting = computed(() => radio.online.value && state.value?.connection === 'disconnecting')
 // No controls before the /ws snapshot — a Connect button rendered on unknown state is a lie
 // (and its RPC would only queue in the outbox anyway). Mirrors App.vue's hydration gate.
 const hydrated = computed(() => radio.online.value && state.value !== null)
@@ -56,7 +58,7 @@ onMounted(() => void radio.refreshRadios())
     </div>
 
     <div v-if="hydrated" class="conn-bar">
-      <select v-model="selected" class="sel" :disabled="connected || connecting">
+      <select v-model="selected" class="sel" :disabled="connected || connecting || disconnecting">
         <option v-if="!radios.length" value="">No radios — Scan</option>
         <option v-for="r in radios" :key="r.address" :value="r.address">
           {{ r.name || r.address }}{{ r.paired ? '' : ' (unpaired)' }}
@@ -64,11 +66,11 @@ onMounted(() => void radio.refreshRadios())
       </select>
       <button
         class="btn"
-        :class="connected ? 'btn-danger' : 'btn-primary'"
-        :disabled="busy || connecting || (!connected && !selected)"
+        :class="connected || disconnecting ? 'btn-danger' : 'btn-primary'"
+        :disabled="busy || connecting || disconnecting || (!connected && !selected)"
         @click="toggle"
       >
-        {{ connecting ? '…' : connected ? 'Disconnect' : 'Connect' }}
+        {{ connecting ? '…' : disconnecting ? 'Disconnecting…' : connected ? 'Disconnect' : 'Connect' }}
       </button>
     </div>
 

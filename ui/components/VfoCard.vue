@@ -56,6 +56,15 @@ const props = defineProps<{
   manualDial?: { target: number; callType: 'group' | 'private' } | null
   /** Squelch open on this side (receiving) — lights the RX indicator. */
   open: boolean
+  /** NO MATCH: DMR traffic decoded on this side's frequency that the radio is NOT taking (the
+   * call's tuple doesn't match this channel and Digital Monitor is off) — the radio's RX LED is
+   * solid but it passes no audio. The card shows the decoded tuple + caller in AMBER (an operator
+   * may see someone interesting and flip DigiMon on) plus the amber NO MATCH pill; the meter
+   * carries the live RSSI. */
+  dmrBusy?: boolean
+  /** Unlocked decode (no 59 yet): the call info renders with the AMBER caller treatment — real
+   * decode, audio not (yet) confirmed. dmrBusy (the NO MATCH pill) implies this. */
+  dmrUnlocked?: boolean
   /** PTT truth-state for the pill (UI_PROTOCOL §6): TX renders red ONLY once the radio confirms
    * (`confirmed`); a sent-but-unacked key is `pending` (yellow), an unconfirmed release is
    * `releasing` (the radio is still transmitting), an exhausted release is `fault`. */
@@ -100,14 +109,15 @@ const freqClass = computed(() => (props.label === 'B' ? 'freq-sub' : 'freq-main'
 const typeLabel = computed(() => viewTypeLabel(props.config))
 const vfoMemLabel = computed(() => viewVfoMem(props.mode))
 const contactDisplay = computed(() => viewContact(props.config?.contact))
-const dmrLive = computed(() => dmrLiveBadge(props.dmr))
+// TX badge derives from the channel/dial (the radio's 5e tuple is inert on TX — see dmrLiveBadge).
+const dmrLive = computed(() => dmrLiveBadge(props.dmr, { channel: props.config ?? null, dial: props.manualDial ?? null }))
 const dmrCaller = computed(() => dmrCallerBadge(props.dmr))
 
 // ── scan-time display honesty (view.ts) ──────────────────────────────────────
 // While the scan hops, the frequency is UNKNOWN — show an animated placeholder, never the stale
 // pre-scan digits; the zone line carries the scan status; the last lock renders as labeled history.
 const sweeping = computed(() => viewScanSweeping(props.scan))
-const zoneView = computed(() => viewZoneReadout(props.zoneName, props.mode, props.scan))
+const zoneView = computed(() => viewZoneReadout(props.zoneName, props.mode, props.scan, props.open))
 const lastLock = computed(() => viewScanLastLock(props.scan))
 // ticking "12s ago" age for the history chip — 1 Hz wall clock, only while the chip shows
 const nowTick = ref(Date.now())
@@ -230,11 +240,11 @@ function openDial(): void {
 }
 function applyDial(target: number, callType: 'group' | 'private'): void {
   dialOpen.value = false
-  void radio.setManualDial(target, callType)
+  void radio.setManualDial(props.side, target, callType)
 }
 function clearDial(): void {
   dialOpen.value = false
-  void radio.clearManualDial()
+  void radio.clearManualDial(props.side)
 }
 </script>
 
@@ -268,7 +278,7 @@ function clearDial(): void {
         <span
           class="band-sel vfo-readout zone-readout"
           :class="zoneView.tone ? `zone-readout--${zoneView.tone}` : undefined"
-          :title="zoneView.tone === 'scanning' ? 'Scanning — position unknown until it locks' : zoneView.tone === 'dwell' ? 'Signal ended — waiting out the dropout delay before the scan resumes' : zoneView.tone === 'paused' ? 'Scan paused — the other side is receiving' : zoneView.tone === 'locked' ? 'Scan locked on a busy channel' : mode === 'vfo' ? 'Direct frequency entry — no zone' : zoneName"
+          :title="zoneView.tone === 'scanning' ? 'Scanning — position unknown until it locks' : zoneView.tone === 'acquiring' ? 'Scan stopped — reading the channel info from the radio' : zoneView.tone === 'waiting' ? 'Scan is holding this stop (post-receive delay, or the other side is receiving) — it resumes on its own' : zoneView.tone === 'locked' ? 'Scan locked on a busy channel' : mode === 'vfo' ? 'Direct frequency entry — no zone' : zoneName"
         >{{ zoneView.text }}</span>
       </div>
       <div class="vfo-step-row">
@@ -294,8 +304,12 @@ function clearDial(): void {
     <div class="sql-row">
       <span class="sql-badge sql-badge--mode" title="Channel type">{{ typeLabel }}</span>
       <span v-if="config?.contact" class="sql-badge sql-badge--contact" :title="config.contact.name ? `DMR contact: ${config.contact.name}` : 'DMR contact'">{{ contactDisplay }}</span>
-      <span v-if="dmrLive" class="sql-badge sql-badge--dmr-live" :title="`DMR ${dmrLive.direction === 'tx' ? 'transmit' : 'receive'}`">{{ dmrLive.label }}</span>
-      <span v-if="dmrCaller" class="sql-badge sql-badge--dmr-caller" title="DMR caller (RadioID)">{{ dmrCaller }}</span>
+      <span
+        v-if="dmrLive"
+        class="sql-badge sql-badge--dmr-live"
+        :title="dmrBusy ? 'Decoded call the radio is not taking — its tuple doesn\'t match this channel (Digital Monitor off)' : `DMR ${dmrLive.direction === 'tx' ? 'transmit' : 'receive'}`"
+      >{{ dmrLive.label }}</span>
+      <span v-if="dmrCaller" class="sql-badge sql-badge--dmr-caller" :class="{ 'sql-badge--dmr-nomatch': dmrUnlocked }" title="DMR caller (RadioID)">{{ dmrCaller }}</span>
       <!-- No scan status chip here — the zone line carries SCANNING/PAUSED/LOCKED now; the only
            scan chip is the last-lock HISTORY (something that happened, which is what chips mean). -->
       <span v-if="lastLockChip" class="sql-badge sql-badge--last-lock" title="Where the scan last stopped (history, not the current position)">{{ lastLockChip }}</span>
@@ -304,6 +318,7 @@ function clearDial(): void {
       <span v-else-if="txState === 'confirmed'" class="rx-indicator tx-indicator" title="Transmitting (radio-confirmed)">TX</span>
       <span v-else-if="txState === 'pending'" class="rx-indicator tx-indicator--wait" title="Key sent — awaiting the radio's acknowledgment">TX?</span>
       <span v-else-if="open" class="rx-indicator" title="Squelch open — receiving">RX</span>
+      <span v-else-if="dmrBusy" class="rx-indicator rx-indicator--busy" title="The call doesn't match this channel's tuple and Digital Monitor is off — the radio is not taking it">NO MATCH</span>
     </div>
 
     <div class="freq-block">

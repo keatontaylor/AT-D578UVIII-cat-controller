@@ -92,7 +92,7 @@ async function fuzz(t: TestContext, seed: number, steps: number): Promise<void> 
       } else if (roll < 0.92 && !keyed && !scanning && !dmrUp && rig.state.ptt === 'idle') {
         if (rand() < 0.3 && !dialed) {
           act('dial 5042450')
-          rig.session.setManualDial(5042450, 'group')
+          rig.session.setManualDial('a', 5042450, 'group')
           dialed = true
         }
         act('key')

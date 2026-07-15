@@ -315,6 +315,13 @@ export interface Smeter {
   readonly scanning: boolean
   /** Scan parked on a channel (byte 3 bit 0x20) — spans lock + the dropout-delay DWELL. */
   readonly parked: boolean
+  /** FOCUS side (byte 4 bit 0x40) — ABSOLUTE: 'b' when set, 'a' clear (NOT selected-relative;
+   * live-pinned 2026-07-13 across a side-swap test). The radio's "active side" pointer: the
+   * SELECTED side, EXCEPT while the unselected side is the SOLE active receiver (held through
+   * its audio tail). NOT the audio-path owner — ear+clip-proven: audio routing is holder-keeps
+   * and does not follow this bit during overlaps. Useful as radio truth for sole-receiver
+   * attribution (5b-only audio with no per-side squelch bits). */
+  readonly focusSide: 'a' | 'b'
 }
 
 // byte 7 of the 5a push is a radio-state bitfield. Live-pinned (Sitting 1, 2026-07-03): 0x86 and
@@ -342,6 +349,10 @@ const SCANNING = 0x02
 // check), holds through the signal AND the post-signal dropout-delay window, and clears at the
 // exact hop resume (measured 3.03 s / 3.08 s after gate close vs the list's configured 3.1 s).
 const PARKED = 0x20
+// `5a` byte 4 bit 0x40 — the FOCUS side, ABSOLUTE (0x40 = B, 0x00 = A). Live-pinned 2026-07-13:
+// 4,469-frame corpus + a deliberate side-swap test. Points at the selected side except while the
+// unselected side is the sole active receiver (with tail-hold). See Smeter.focusSide.
+const FOCUS_B = 0x40
 
 /** `5a` async push (16 bytes) — RX level + squelch state RELATIVE to the selected side. Offsets are
  * the `04 5a` read form shifted down by 1 (no `04` prefix): selected RSSI @1, other @2, open mask
@@ -357,6 +368,7 @@ export function decodeSmeter(frame: Uint8Array): Smeter | null {
     transmitting: TX_STATE_VALUES.has(frame[7]!),
     scanning: (frame[12]! & SCANNING) !== 0,
     parked: (frame[3]! & PARKED) !== 0,
+    focusSide: (frame[4]! & FOCUS_B) !== 0 ? 'b' : 'a',
   }
 }
 
@@ -417,6 +429,13 @@ export function decodeDmr(frame: Uint8Array): DmrActivity | null {
     private: hasIdentity && src ? src !== dest : null,
   }
 }
+// NOTE on byte3 bit 0x20: initially hypothesized as an "audio routed" flag — FALSIFIED live
+// 2026-07-14 (cap 05-24-35: an audible call ran transmission after transmission with byte3=0x02;
+// 0x20 appears only on scattered onset frames — some sync/lead-in marker, not audio truth). The
+// real muted-vs-monitored signal is PRESENTATION: a DigiMon-off non-matching call streams 5e with
+// full identity but the radio sends NO 58/59, NO 5b, and never sets the per-side 5a open bits
+// (cap 17-30-40 dst 5067498: RSSI streams, open mask 0x00 for the whole 40 s call, ends 5e-idle).
+// The 5a open bit is per-side AUDIO truth (already routing-gated), not carrier presence.
 
 export interface LastCall {
   /** Destination — talkgroup or private target id. */

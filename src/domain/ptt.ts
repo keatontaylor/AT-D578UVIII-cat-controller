@@ -3,6 +3,11 @@
 // local intent + command outcomes (not radio frames) — but the transitions are still pure
 // and centralized here. Safety-critical rule: an unkey FAILURE goes to `fault`, never `idle`
 // (we must never report "released" when the radio may still be transmitting).
+//
+// RELEASE DRAIN (2026-07-13): the session withholds the unkey's `acked` event while the radio's
+// OWN TX indications are still up (the DMR terminator runs ~0.5 s past the ack), so `unkeying`
+// spans until RF is actually down — the same never-report-released-early principle as the fault
+// rule, and it removes the yellow→red→green flash the early idle caused.
 
 export const PTT_PHASES = ['idle', 'keying', 'keyed', 'unkeying', 'fault'] as const
 export type PttPhase = (typeof PTT_PHASES)[number]

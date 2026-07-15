@@ -61,13 +61,16 @@ test('TX recorder events relay over /ws; setEnabled drives both recorders', asyn
     ws.send(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'recordings.setEnabled', params: { enabled: true } }))
     await until(() => recorder.status.enabled && txRecorder.status.enabled, 'both recorders enabled by one switch')
 
-    // the operator keys and talks → the TX recorder's opened/saved events reach the client
+    // the operator keys and talks → the TX recorder's opened/saved events reach the client.
+    // Feed frames INSIDE the poll loop: setEnabled flips status.enabled synchronously but the
+    // source subscription lands after an await, so a one-shot burst can fire into zero
+    // subscribers under suite load (the flake this replaced).
     keyed = true
-    tx.push(100) // 1 s of TX audio
-    await until(
-      () => messages.some((m) => m.method === 'recordings.opened' && m.params?.clip?.direction === 'tx'),
-      'TX opened event relayed',
-    )
+    await until(() => {
+      tx.push(10)
+      return messages.some((m) => m.method === 'recordings.opened' && m.params?.clip?.direction === 'tx')
+    }, 'TX opened event relayed')
+    tx.push(100) // 1 s of TX audio → comfortably over minDurationMs
 
     // a client that just (re)connected hydrates the in-progress clip via recordings.live
     ws.send(JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'recordings.live' }))

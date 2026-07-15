@@ -470,7 +470,9 @@ onBeforeUnmount(() => {
           <i class="rec-row-edge" :style="{ background: clipColor(clip) }" />
           <span class="rec-row-main">
             <span class="rec-row-title">
-              {{ laneLabel(clip) }}
+              <!-- name in its own span so it ellipsizes (a flex container's anonymous text can't) —
+                   mirrors the timeline lane-label, keeping the pill on the same baseline -->
+              <span class="rec-row-name">{{ laneLabel(clip) }}</span>
               <span v-if="isTx(clip)" class="rec-pill rec-pill--tx">TX</span>
               <span v-else-if="clip.mode" class="rec-pill" :class="`rec-pill--${modeClass(clip.mode)}`">{{ clip.mode }}</span>
             </span>
@@ -744,7 +746,9 @@ onBeforeUnmount(() => {
 .rec-row--playing { border-color: var(--accent, #58a6ff); box-shadow: 0 0 0 1px var(--accent, #58a6ff); }
 .rec-row-edge { align-self: stretch; width: 4px; border-radius: 8px 0 0 8px; flex: none; }
 .rec-row-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
-.rec-row-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-row-title { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; min-width: 0; }
+.rec-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.rec-row-title .rec-pill { flex: none; }
 .rec-row-bar { display: block; height: 4px; border-radius: 2px; background: var(--surface-2, #21262d); overflow: hidden; }
 .rec-row-bar i { display: block; height: 100%; border-radius: 2px; }
 .rec-row-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; }

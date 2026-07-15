@@ -37,10 +37,10 @@ test('5a resolves the smeter to physical sides via selectedSide', () => {
   // selected RSSI @1, other @2, open mask @5 (0x02 = selected open)
   const f = withChecksum([0x5a, 0x04, 0x00, 0x2a, 0x40, 0x02, 0xff, 0x8a, 0, 0, 0, 0, 0, 0x01], 16)
   // default selectedSide 'a' → selected→a, other→b
-  assert.deepEqual(applyFrame(initialState(), frame(f)).signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false })
+  assert.deepEqual(applyFrame(initialState(), frame(f)).signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false, holder: 'a', focus: 'b' })
   // selectedSide 'b' flips the mapping: selected→b, other→a
   const onB = applyFrame({ ...initialState(), selectedSide: 'b' }, frame(f))
-  assert.deepEqual(onB.signal, { aRssi: 0, bRssi: 4, aOpen: false, bOpen: true })
+  assert.deepEqual(onB.signal, { aRssi: 0, bRssi: 4, aOpen: false, bOpen: true, holder: 'b', focus: 'b' })
 })
 
 // Real frames from the live per-side-squelch capture (5a byte-5 = per-side open mask, relative to
@@ -51,13 +51,13 @@ test('5a byte-5 decodes per-side squelch open (analog + DMR), mapped via selecte
     applyFrame({ ...initialState(), selectedSide: sel }, frame(bytes(hex))).signal
 
   // other side receiving, selected silent → 0x04
-  assert.deepEqual(sig('5a 00 04 0c 00 04 ff 8a 00 00 00 00 00 01 00 f8'), { aRssi: 0, bRssi: 4, aOpen: false, bOpen: true })
+  assert.deepEqual(sig('5a 00 04 0c 00 04 ff 8a 00 00 00 00 00 01 00 f8'), { aRssi: 0, bRssi: 4, aOpen: false, bOpen: true, holder: 'b', focus: 'a' })
   // both sides open → 0x06
-  assert.deepEqual(sig('5a 03 04 0e 40 06 ff 8a 00 00 00 00 00 01 00 3f'), { aRssi: 3, bRssi: 4, aOpen: true, bOpen: true })
+  assert.deepEqual(sig('5a 03 04 0e 40 06 ff 8a 00 00 00 00 00 01 00 3f'), { aRssi: 3, bRssi: 4, aOpen: true, bOpen: true, holder: 'a', focus: 'b' })
   // selected (active) side open, other silent → 0x02
-  assert.deepEqual(sig('5a 04 00 0a 40 02 ff 8a 00 00 00 00 00 01 00 34'), { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false })
+  assert.deepEqual(sig('5a 04 00 0a 40 02 ff 8a 00 00 00 00 00 01 00 34'), { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false, holder: 'a', focus: 'b' })
   // both closed → 0x00
-  assert.deepEqual(sig('5a 00 00 08 40 00 ff 8a 00 00 00 00 00 00 00 2b'), { aRssi: 0, bRssi: 0, aOpen: false, bOpen: false })
+  assert.deepEqual(sig('5a 00 00 08 40 00 ff 8a 00 00 00 00 00 00 00 2b'), { aRssi: 0, bRssi: 0, aOpen: false, bOpen: false, holder: null, focus: 'b' })
 
   // DMR: bit0 (timeslot) set but bit1 clear → still CLOSED (0x01), and bit1 set → OPEN (0x03)
   assert.equal(sig('5a 04 00 0a 40 01 ff 8a 00 00 00 00 00 00 00 32').aOpen, false, '0x01 = DMR slot bit, not open')
@@ -74,13 +74,13 @@ test('04 5a read reply (startup/refresh) hydrates the smeter + per-side open lik
   }
   // read form = push shifted by the 04 prefix: selected RSSI @2, other @3, open mask @6
   const s = applyFrame(initialState(), read([0x04, 0x5a, 0x04, 0x00, 0x2a, 0x40, 0x02, 0xff, 0x8a]))
-  assert.deepEqual(s.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false })
+  assert.deepEqual(s.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false, holder: 'a', focus: 'b' })
   // and it resolves through selectedSide exactly like the push does
   const onB = applyFrame(
     { ...initialState(), selectedSide: 'b' },
     read([0x04, 0x5a, 0x03, 0x02, 0x2a, 0x40, 0x04, 0xff, 0x8a]),
   )
-  assert.deepEqual(onB.signal, { aRssi: 2, bRssi: 3, aOpen: true, bOpen: false })
+  assert.deepEqual(onB.signal, { aRssi: 2, bRssi: 3, aOpen: true, bOpen: false, holder: 'a', focus: 'b' })
 })
 
 test('04 5b read reply (startup) hydrates squelchOpen like a 5b push', () => {
@@ -193,4 +193,60 @@ test('reduceFrames folds applyFrame', () => {
   let viaFold = initialState()
   for (const fr of frames) viaFold = applyFrame(viaFold, fr)
   assert.deepEqual(viaReduce, viaFold)
+})
+
+// ── the AUDIO-HOLDER latch (ear+clip-proven 2026-07-13): the mono audio path is a latch — first
+// side to open keeps the audio; instant transfer when the holder releases while the other side
+// receives; the released side reopening does NOT reclaim; tail-holds through its own squelch
+// close while the 5b gate is up; resets when the whole gate closes. FOCUS (byte 4) seeds the
+// latch for 5b-only audio when it points away from the selected side.
+import { activeReceive } from '../src/domain/receive'
+
+test('audio-holder latch: first-wins, instant transfer, no reclaim, tail-hold, gate-close reset', () => {
+  const push = (selRssi: number, othRssi: number, mask: number, focusB = false) =>
+    frame(withChecksum([0x5a, selRssi, othRssi, 0x08, focusB ? 0x40 : 0x00, mask, 0xff, 0x89, 0, 0, 0, 0, 0, mask ? 0x01 : 0x00], 16))
+
+  let s = initialState() // selected 'a': mask bit1 = A, bit2 = B
+  s = applyFrame(s, push(4, 0, 0x02)) // A opens first
+  assert.equal(s.signal.holder, 'a')
+  s = applyFrame(s, push(4, 4, 0x06)) // B joins — the holder keeps the audio
+  assert.equal(s.signal.holder, 'a')
+  s = applyFrame(s, push(0, 4, 0x04)) // A releases while B receives → INSTANT transfer
+  assert.equal(s.signal.holder, 'b')
+  s = applyFrame(s, push(4, 4, 0x06)) // A reopens — no reclaim
+  assert.equal(s.signal.holder, 'b')
+  s = applyFrame(s, push(4, 0, 0x02)) // B ends while A still open → hands back
+  assert.equal(s.signal.holder, 'a')
+
+  // tail: the holder's own squelch closes but the 5b gate is still up → the latch holds
+  s = applyFrame(s, frame(hexToBytes('5b 01 5c')))
+  s = applyFrame(s, push(0, 0, 0x00))
+  assert.equal(s.signal.holder, 'a', 'tail-holds while the gate is up')
+  // the gate closes with the bits down → reset
+  s = applyFrame(s, frame(hexToBytes('5b 00 5b')))
+  assert.equal(s.signal.holder, null)
+
+  // 5b-only audio (no per-side bits — undecoded DMR): FOCUS pointing off-selected seeds the latch
+  let d = applyFrame(initialState(), frame(hexToBytes('5b 01 5c')))
+  d = applyFrame(d, push(0, 0, 0x00, true)) // focus = B ≠ selected(A) → B is the sole active side
+  assert.equal(d.signal.holder, 'b')
+  // focus == selected is the idle default — ambiguous, stays unlatched
+  let amb = applyFrame(initialState(), frame(hexToBytes('5b 01 5c')))
+  amb = applyFrame(amb, push(0, 0, 0x00, false))
+  assert.equal(amb.signal.holder, null)
+})
+
+test('activeReceive follows the holder: overlaps and tails attribute to the side whose audio is playing', () => {
+  const base = initialState() // selected 'a'
+  // Overlap, holder = B (B opened first), selected = A: the old selected-side tiebreak said A —
+  // the latch says B, and B it is.
+  const overlap: RadioState = { ...base, signal: { ...base.signal, aOpen: true, bOpen: true, holder: 'b' } }
+  const r1 = activeReceive(overlap, true)
+  assert.equal(r1.side, 'b')
+  assert.equal(r1.source, 'analog', "the holder's own squelch is open — plain side evidence")
+  // Tail: holder's bit closed, gate still open → side sticks with the holder, source 'holder'
+  const tail: RadioState = { ...base, audioGate: true, signal: { ...base.signal, holder: 'b' } }
+  const r2 = activeReceive(tail, true)
+  assert.equal(r2.side, 'b')
+  assert.equal(r2.source, 'holder')
 })

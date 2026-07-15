@@ -82,10 +82,13 @@ const keys = computed(() => {
 })
 
 // Only settings that decode from this channel, rendered in catalogue order; pending-only keys still
-// render so failures don't disappear before the user sees them.
+// render so failures don't disappear before the user sees them — but ONLY if they are real grid
+// settings. The tone/frequency writes also put rxTone/txTone/rxFreq/txFreq into pendingChannel
+// (those are VfoCard tiles, NOT grid settings), and a bare phantom tile for them must not appear
+// in the grid while a tone/freq save is in flight.
 const items = computed<Item[]>(() =>
   keys.value
-    .filter((key) => key in values.value || key in (props.pending ?? {}))
+    .filter((key) => key in values.value || (key in (props.pending ?? {}) && key in meta.value))
     .map((key) => {
       const m = meta.value[key]
       const p = (props.pending ?? {})[key]

@@ -167,7 +167,7 @@ test('side swap: 5a frames are held through the settle window, then live pushes 
 
   // Steady state on side A: selected(A) RSSI 4 + squelch open, other(B) silent.
   tp.handler(ck([0x5a, 0x04, 0x00, 0x2a, 0x40, 0x02], 16))
-  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false })
+  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false, holder: 'a', focus: 'b' })
 
   s.chooseSide('b')
   clock.t = 200
@@ -179,17 +179,17 @@ test('side swap: 5a frames are held through the settle window, then live pushes 
   // are held: the meter keeps showing the known physical truth.
   clock.t = 500
   tp.handler(ck([0x5a, 0x04, 0x00, 0x2a, 0x40, 0x02], 16))
-  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false }, 'push held')
+  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false, holder: 'a', focus: 'b' }, 'push held')
   tp.handler(ck([0x04, 0x5a, 0x04, 0x00, 0x2a, 0x40, 0x02], 17))
-  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false }, 'read held')
+  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false, holder: 'a', focus: 'b' }, 'read held')
 
   // Past the settle deadline (ack+1000ms) the engine reports in the NEW reference:
   // selected(B) 0, other(A) 4 + open — same physical truth, applied again.
   clock.t = 1201
   tp.handler(ck([0x5a, 0x00, 0x04, 0x2a, 0x40, 0x04], 16))
-  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false }, 'post-settle push applies')
+  assert.deepEqual(s.state.signal, { aRssi: 4, bRssi: 0, aOpen: true, bOpen: false, holder: 'a', focus: 'b' }, 'post-settle push applies')
   tp.handler(ck([0x5a, 0x02, 0x00, 0x2a, 0x40, 0x02], 16))
-  assert.deepEqual(s.state.signal, { aRssi: 0, bRssi: 2, aOpen: false, bOpen: true }, 'live meter resumes')
+  assert.deepEqual(s.state.signal, { aRssi: 0, bRssi: 2, aOpen: false, bOpen: true, holder: 'b', focus: 'b' }, 'live meter resumes')
 })
 
 test('a failed side-select ends the 5a hold (meter must not freeze)', () => {

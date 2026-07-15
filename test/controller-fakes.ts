@@ -61,8 +61,12 @@ export class FakeBt implements RadioManager {
   setTarget(address: string): void {
     this.calls.push(`setTarget:${address}`)
   }
+  /** When set, disconnectAcl blocks on it — lets a test observe the transient 'disconnecting'
+   * status while the teardown is mid-flight. */
+  disconnectGate: Promise<void> | null = null
   async disconnectAcl(): Promise<void> {
     this.calls.push('disconnectAcl')
+    if (this.disconnectGate) await this.disconnectGate
   }
 }
 

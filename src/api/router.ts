@@ -48,6 +48,7 @@ const ZoneChannelSelectParams = z.object({
   position: z.number().int().nonnegative(),
 })
 const DmrDialParams = z.object({
+  side: z.enum(['a', 'b']),
   target: z.number().int().positive().nullable().optional(), // null/absent → clear
   callType: z.enum(['group', 'private']).optional(),
 })
@@ -214,7 +215,7 @@ const METHODS: Record<string, Method> = {
     params: DmrDialParams,
     handle: (c, p) => {
       const d = p as z.infer<typeof DmrDialParams>
-      return guard(() => (d.target == null ? c.clearManualDial() : c.setManualDial(d.target, d.callType ?? 'group')))
+      return guard(() => (d.target == null ? c.clearManualDial(d.side) : c.setManualDial(d.side, d.target, d.callType ?? 'group')))
     },
   },
   // Static settings metadata (option tables) — kept OUT of the state; the UI fetches it once to

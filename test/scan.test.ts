@@ -188,11 +188,26 @@ test('scan display: sweeping hides values, lock shows them, unlock records histo
   assert.equal(swept.sweeping, true)
   assert.equal(swept.zoneReadout.tone, 'scanning')
 
-  // lock CONFIRMED but the lock-follow read hasn't landed: still sweeping — the slice holds the
-  // PREVIOUS channel and must not flash (the two-phase lock: locked says stopped, lockedChannel
-  // says the data is current)
+  // PARK: the 5a parked bit lands with the squelch open — ACQUIRING from the true hop-stop
+  // moment (before the session's confirm window even fires the lock + read). The same park with
+  // squelch CLOSED is WAITING — dropout hold, other-side pause, sub-confirm blip: the radio
+  // never says which, so neither does the display (the collapse).
+  const parkedScan = { ...rs.scan, parked: true }
+  assert.deepEqual(zoneReadout('LOCAL', 'memory', parkedScan, true), { text: 'ACQUIRING · FIRE', tone: 'acquiring' })
+  assert.deepEqual(zoneReadout('LOCAL', 'memory', parkedScan, false), { text: 'WAITING · FIRE', tone: 'waiting' })
+  // a paused park reads the same WAITING — the pause cause shows on the other card's RX pill
+  assert.equal(zoneReadout('LOCAL', 'memory', { ...parkedScan, paused: true }, false).tone, 'waiting')
+  // PAUSED WITHOUT the park bit must ALSO read WAITING — the radio does not reliably set the
+  // bit at pause onset (wire 2026-07-13 22:32: other-side RX frames with byte-3 0x20 clear),
+  // so the pause flag (edge-driven from the other side's 5a bit) is its own trigger.
+  assert.deepEqual(zoneReadout('LOCAL', 'memory', { ...rs.scan, paused: true }, false), { text: 'WAITING · FIRE', tone: 'waiting' })
+
+  // lock CONFIRMED but the lock-follow read hasn't landed: ACQUIRING — we know THAT we stopped,
+  // not WHERE. Still sweeping (the slice holds the PREVIOUS channel and must not flash), the
+  // zone line says so honestly, and the channel name stays "Scanning…" until a real name lands.
   rs = applyEvent(rs, { kind: 'scanLock', locked: true })
   assert.equal(scanSweeping(rs.scan), true, 'locked-unread → placeholder holds')
+  assert.deepEqual(zoneReadout('LOCAL', 'memory', rs.scan), { text: 'ACQUIRING · FIRE', tone: 'acquiring' })
   assert.equal(memoryDisplay('memory', rs.sides.a.channelName, rs.scan), 'Scanning…')
 
   // the read lands (channel block for the scanning side) → lockedChannel named → values live
@@ -210,17 +225,19 @@ test('scan display: sweeping hides values, lock shows them, unlock records histo
   assert.equal(ll?.freqMHz, 146.76)
   assert.ok(typeof ll?.at === 'number' && ll.at > 0)
 
-  // pause: grey status, history persists. UNCONFIRMED pause (parked channel not read back yet)
-  // still placeholders; once the pause-confirm read names the parked channel, its values are
-  // CURRENT — the card shows real frequency/channel data through the pause.
+  // pause: the radio PARKS a paused scan, so the zone line reads WAITING; history persists.
+  // UNCONFIRMED pause (parked channel not read back yet) still placeholders; once the
+  // pause-confirm read names the parked channel, its values are CURRENT.
   rs = applyEvent(rs, { kind: 'scanPause', paused: true })
-  assert.equal(zoneReadout('LOCAL', 'memory', rs.scan).tone, 'paused')
+  rs = { ...rs, scan: { ...rs.scan, parked: true } } // the radio's park bit rides the same 5a
+  assert.equal(zoneReadout('LOCAL', 'memory', rs.scan).tone, 'waiting')
   assert.equal(scanLastLock(rs.scan)?.name, 'PAPA BRIDGE')
   assert.equal(scanSweeping(rs.scan), true, 'unconfirmed pause → values still unknown')
   rs = { ...rs, scan: { ...rs.scan, pausedChannel: 'PARKED CH' } } // pause-confirm read landed
   assert.equal(scanSweeping(rs.scan), false, 'confirmed pause → parked-channel values are current')
   assert.equal(scanLastLock(rs.scan)?.name, 'PAPA BRIDGE', 'history chip survives the confirmed pause')
   rs = applyEvent(rs, { kind: 'scanPause', paused: false })
+  rs = { ...rs, scan: { ...rs.scan, parked: false } } // park lifts as the hop resumes
   assert.equal(scanSweeping(rs.scan), true, 'pause over → hopping again → placeholder')
 
   // scan stops → history cleared, zone line back to the zone

@@ -281,37 +281,76 @@ test('link drop + auto-reconnect: the client rides disconnected → connected wi
   rig.assertClean()
 })
 
-test('phantom 5e renders NO live call — even with the gate open; PRESENTATION lights it', async (t) => {
+test('phantom 5e renders NO live call — even with the gate open; the 59 LOCK lights it', async (t) => {
   const rig = await FullRig.create(t)
   await midsouthOnB(rig)
 
-  // fully identified 5e frames with NO presentation — the scan-sample signature
+  // fully identified 5e frames with NO lock — outside a scan this is a REAL decode: the INFO
+  // renders immediately (amber, unlocked), but nothing claims a LIVE call (no RX, no meter)
   rig.sim.injectPush(dmrVoicePush({ direction: 'rx', colorCode: 10, slot: 2, source: 43114, dest: 43114 }))
   await rig.advance(100)
   {
     const { a, b } = rig.cards
     assert.ok(rig.client.radio.dmr, 'the tuple reached the client state')
-    assert.equal(b.dmrLive, null, 'no badge without presentation')
-    assert.equal(b.smeter, 0, 'no meter')
+    assert.equal(b.dmrLive?.label, 'TS2 · CC10 · TG 43114', 'unlocked INFO renders immediately')
+    assert.equal(b.dmrUnlocked, true, '…as the amber unlocked treatment')
+    assert.equal(b.smeter, 0, 'no meter — not a live call')
     assert.equal(b.indicator, null, 'no RX icon')
-    assert.equal(a.dmrLive, null)
+    assert.equal(a.dmrLive, null, 'the other card carries nothing')
   }
 
-  // the audio gate opening is NOT presentation — an unrelated analog carrier could hold the 5b
-  // gate open; under the old audibility rule this exact state lit a phantom call
+  // the audio gate opening is NOT the lock — an unrelated analog carrier could hold the 5b
+  // gate open; under the old audibility rule this exact state lit a phantom LIVE call
   rig.sim.injectPush(squelchPush(true))
   await rig.advance(50)
-  assert.equal(rig.cards.b.dmrLive?.label, undefined, 'gate alone must not light an unpresented call')
+  assert.equal(rig.cards.b.indicator, null, 'gate alone must not light RX on an unlocked call')
 
-  // the 58 presentation push (the BT-01 popup, caller id aboard) is what lights it
-  const { aliasPush } = await import('./sim/frames')
+  // nor is the 58 popup line — the radio pushes 58s even for calls it MUTES (wire-pinned
+  // 2026-07-14): it enriches the caller id but must not lock the call
+  const { aliasPush, lastCallPush } = await import('./sim/frames')
   rig.sim.injectPush(aliasPush(3223436, ''))
   await rig.advance(50)
-  assert.equal(rig.cards.b.dmrLive?.label, 'TS2 · CC10 · TG 43114', 'presented call lights the badge')
+  assert.equal(rig.cards.b.indicator, null, 'a 58 alone must not light RX')
+  assert.equal(rig.cards.b.dmrUnlocked, true, 'still the amber unlocked treatment')
+
+  // THE 59 LOCK — the radio's call-log write, sent only for calls it routes — locks it LIVE
+  rig.sim.injectPush(lastCallPush({ dest: 43114, callerId: 3223436 }))
+  await rig.advance(50)
+  assert.equal(rig.cards.b.dmrLive?.label, 'TS2 · CC10 · TG 43114', 'the badge persists')
+  assert.equal(rig.cards.b.dmrUnlocked, false, 'no longer the amber treatment')
   assert.equal(rig.cards.b.indicator, 'RX')
-  assert.equal(rig.client.radio.dmr!.callerId, 3223436, 'caller id present at the popup moment')
+  assert.equal(rig.client.radio.dmr!.callerId, 3223436, 'caller id aboard at the lock moment')
 
   rig.sim.injectPush(squelchPush(false))
+  rig.sim.injectPush(dmrIdlePush())
+  await rig.advance(100)
+  rig.assertClean()
+})
+
+test('a muted decode reads NO MATCH when the 59 lock window (2 s) expires — info immediate', async (t) => {
+  // The verdict is TIME-based (session timer → dmrNoLock), not frame-count: the muted 5e stream
+  // is far too sparse for counting (live: 2 frames then a 7 s gap). Info renders on frame 1;
+  // the pill lands 2 s later regardless of 5e cadence.
+  const rig = await FullRig.create(t)
+  await midsouthOnB(rig)
+
+  rig.sim.injectPush(dmrVoicePush({ direction: 'rx', colorCode: 10, slot: 2, source: 43114, dest: 43114 }))
+  await rig.advance(100)
+  assert.equal(rig.cards.b.dmrLive?.label, 'TS2 · CC10 · TG 43114', 'info immediately')
+  assert.equal(rig.cards.b.dmrBusy, false, 'no verdict inside the lock window')
+
+  await rig.advance(2100) // the 59 lock window expires with NO further frames (sparse stream)
+  assert.equal(rig.cards.b.dmrBusy, true, 'NO MATCH pill — the 59 never came')
+  assert.equal(rig.cards.b.indicator, null, 'still no RX claim')
+
+  // the idle ends the transmission; the SAME dest reappearing re-verdicts instantly (remnant)
+  rig.sim.injectPush(dmrIdlePush())
+  await rig.advance(100)
+  assert.equal(rig.cards.b.dmrLive, null, 'between transmissions the slice is clear')
+  rig.sim.injectPush(dmrVoicePush({ direction: 'rx', colorCode: 10, slot: 2, source: 43114, dest: 43114 }))
+  await rig.advance(100)
+  assert.equal(rig.cards.b.dmrBusy, true, 'the verdict carries — instant on the next transmission')
+
   rig.sim.injectPush(dmrIdlePush())
   await rig.advance(100)
   rig.assertClean()

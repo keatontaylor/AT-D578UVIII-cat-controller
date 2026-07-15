@@ -544,8 +544,8 @@ export function useRadio() {
       rpc<{ position: number; name: string }[]>('zone.channelsIn', { zoneIndex, force }),
     selectZoneChannel: (side: 'a' | 'b', zoneIndex: number, position: number) =>
       rpc('channel.selectIn', { side, zoneIndex, position }),
-    setManualDial: (target: number, callType: 'group' | 'private') => rpc('dmr.dial', { target, callType }),
-    clearManualDial: () => rpc('dmr.dial', { target: null }),
+    setManualDial: (side: 'a' | 'b', target: number, callType: 'group' | 'private') => rpc('dmr.dial', { side, target, callType }),
+    clearManualDial: (side: 'a' | 'b') => rpc('dmr.dial', { side, target: null }),
     // Live recordings state (pushed) + a one-shot hydrate on panel open (re-run on reconnect).
     recordings,
     liveRecordings,

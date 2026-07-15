@@ -234,6 +234,22 @@ test('setVfoMode re-reads the target channel block after the 57 3d ack', async (
   assert.ok(tp.writes.some((w) => w.startsWith('04 2c')), 'VFO/MEM ack is followed by a channel A read')
 })
 
+test('setVfoMode (57 3d) is retransmit-safe: a dropped ack retries the idempotent mode write', () => {
+  // 57 3d carries the ABSOLUTE mode (not a toggle), so re-sending is harmless — a lost ack must
+  // auto-retry, not leave the button a silent no-op (audit follow-up to the scan-stop fix). This
+  // is NOT a 2f channel-record write, so the anti-corruption "never retransmit 2f" rule doesn't
+  // apply here.
+  const tp = new FakeTransport()
+  tp.autoAck = false
+  const clock = { t: 0 }
+  const s = new Session(tp, { timeoutMs: 1000, maxAttempts: 3, gapMs: 0 }, () => clock.t)
+  s.setVfoMode('a', true)
+  assert.equal(tp.writes.filter((w) => w.startsWith('57 3d')).length, 1, 'first send')
+  clock.t = 1000
+  s.tick() // ack never came → retransmit (it's retransmit-safe now)
+  assert.equal(tp.writes.filter((w) => w.startsWith('57 3d')).length, 2, 'the mode write was re-sent on timeout')
+})
+
 // Channel stepping: with the zone's channel count known (zone-block byte 35, Sitting-1 pin) the
 // wrap happens host-side; without it we fall back to the radio's own 0xf9 sentinel (confirmed
 // radio-side the same sitting: target 0xf9 → last channel).

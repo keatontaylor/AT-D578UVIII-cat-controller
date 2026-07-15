@@ -40,3 +40,17 @@ test('both DMR, no discriminating match (or a tie) → the active side', () => {
 test('neither side DMR → selected side (defensive)', () => {
   assert.equal(resolveDmrSide({ colorCode: 1, slot: 1, dest: 3100 }, analog, analog, 'b'), 'b')
 })
+
+test('per-side manual dial breaks a tie between two identical DMR channels', () => {
+  const a = dmr(1, 1, 3100)
+  const b = dmr(1, 1, 3100) // identical programmed config — the tuple can't discriminate
+  const call = { colorCode: 1, slot: 1, dest: 720 }
+  // no dials → tie → falls to the selected side (the ambiguous default)
+  assert.equal(resolveDmrSide(call, a, b, 'a'), 'a')
+  // dial 720 on B → B wins even though A is selected: solid data for the side match
+  assert.equal(resolveDmrSide(call, a, b, 'a', null, 720), 'b')
+  // dial 720 on A → A wins
+  assert.equal(resolveDmrSide(call, a, b, 'b', 720, null), 'a')
+  // both dialed, only B matches the call's dest → B
+  assert.equal(resolveDmrSide(call, a, b, 'a', 700, 720), 'b')
+})

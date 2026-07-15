@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, shallowRef, watchEffect } from 'vue'
 import { useRadio } from './composables/useRadio'
 import ConnectBar from './components/ConnectBar.vue'
 import VfoCard from './components/VfoCard.vue'
@@ -10,7 +10,7 @@ import PairingPanel from './components/PairingPanel.vue'
 // ALL per-card render derivations live in the shared view model (src/domain/view.ts) — the
 // integration suite asserts on the same functions, so what the tests prove is what renders.
 // Do NOT re-derive rendering logic locally; add it to view.ts (and vfoView) instead.
-import { dmrSideFor, inactiveSide as viewInactive, openFor as viewOpen, smeterFor as viewSmeter, txStateFor as viewTxState } from '../src/domain/view'
+import { dmrBusy as viewBusy, dmrUnlocked as viewUnlocked, dmrSideFor, inactiveSide as viewInactive, openFor as viewOpen, smeterFor as viewSmeter, txStateFor as viewTxState } from '../src/domain/view'
 import type { TxState } from '../src/domain/view'
 
 const radio = useRadio()
@@ -21,10 +21,26 @@ const state = radio.state
 // Only once the grace expires does the full "reconnecting" placeholder tear the layout down.
 const inGrace = computed(() => !radio.online.value && state.value !== null && !radio.graceExpired.value)
 const effectiveOnline = computed(() => radio.online.value || inGrace.value)
+// The layout goes stale (dimmed, inert) for BOTH a dropped controller socket (grace) and a
+// user-initiated disconnect still tearing down — same visual language, same reused chip.
+const stale = computed(() => inGrace.value || disconnecting.value)
 
 const connected = computed(() => effectiveOnline.value && state.value?.connection === 'connected')
 const connecting = computed(() => effectiveOnline.value && state.value?.connection === 'connecting')
-const rs = computed(() => state.value?.radio ?? null)
+// Explicit-disconnect teardown in progress: same stale treatment as a lost controller socket —
+// the last-known radio UI stays rendered, heavily dimmed and inert, until the disconnect is
+// CONFIRMED (status flips to 'disconnected' only after the session/SPP/ACL teardown completes).
+const disconnecting = computed(() => effectiveOnline.value && state.value?.connection === 'disconnecting')
+
+// The teardown resets the server-side radio state immediately, so the greyed-out display uses
+// the last snapshot seen while CONNECTED (patch merges replace the object, so the old reference
+// is a stable frozen copy). Cleared once fully disconnected — the pairing panel takes over.
+const lastLiveRs = shallowRef<NonNullable<typeof state.value>['radio'] | null>(null)
+watchEffect(() => {
+  if (state.value?.connection === 'connected' && state.value.radio) lastLiveRs.value = state.value.radio
+  else if (state.value?.connection === 'disconnected') lastLiveRs.value = null
+})
+const rs = computed(() => (disconnecting.value ? lastLiveRs.value : state.value?.radio ?? null))
 
 // Nothing radio-shaped may render before the /ws snapshot: pre-hydration the connection state is
 // simply UNKNOWN, and the disconnected UI (pairing panel, connect controls) would be a lie.
@@ -47,6 +63,8 @@ const dmrSide = computed(() => (rs.value ? dmrSideFor(rs.value) : null))
 const txStateFor = (side: 'a' | 'b'): TxState => (rs.value ? viewTxState(rs.value, side) : null)
 const smeterFor = (side: 'a' | 'b'): number | null => (rs.value ? viewSmeter(rs.value, side) : null)
 const openFor = (side: 'a' | 'b'): boolean => (rs.value ? viewOpen(rs.value, side) : false)
+const busyFor = (side: 'a' | 'b'): boolean => (rs.value ? viewBusy(rs.value, side) : false)
+const unlockedFor = (side: 'a' | 'b'): boolean => (rs.value ? viewUnlocked(rs.value, side) : false)
 const inactiveSide = (side: 'a' | 'b'): boolean => (rs.value ? viewInactive(rs.value, side) : false)
 
 // Write actions → JSON-RPC; the result flows back via the AppState patch stream.
@@ -66,17 +84,20 @@ function setVfoMode(side: 'a' | 'b', vfo: boolean): void {
 </script>
 
 <template>
-  <div class="app" :class="{ 'app--stale': inGrace }">
+  <div class="app" :class="{ 'app--stale': stale }">
     <ConnectBar />
 
-    <!-- Grace-period chip: the layout below stays (dimmed, inert) instead of tearing down. -->
-    <div v-if="inGrace" class="stale-chip" role="status">Connection lost — reconnecting…</div>
+    <!-- Grace-period / disconnecting chip: the layout below stays (dimmed, inert) instead of
+         tearing down — same stale treatment for both "socket lost" and "teardown in progress". -->
+    <div v-if="stale" class="stale-chip" role="status">
+      {{ disconnecting ? 'Disconnecting…' : 'Connection lost — reconnecting…' }}
+    </div>
 
     <div v-if="!hydrated" class="connect-placeholder">
       <span class="hydrate-wait">{{ waitLabel }}</span>
     </div>
 
-    <main v-else-if="connected && rs" class="dashboard">
+    <main v-else-if="(connected || disconnecting) && rs" class="dashboard">
       <section class="vfo-section">
         <VfoCard
           label="B"
@@ -93,9 +114,11 @@ function setVfoMode(side: 'a' | 'b', vfo: boolean): void {
           :smeter="smeterFor('b')"
           :open="openFor('b')"
           :tx-state="txStateFor('b')"
-          :dmr="dmrSide === 'b' ? rs.dmr : null"
+          :dmr="dmrSide === 'b' || unlockedFor('b') ? rs.dmr : null"
+          :dmr-busy="busyFor('b')"
+          :dmr-unlocked="unlockedFor('b')"
           :scan="rs.selectedSide === 'b' ? rs.scan : null"
-          :manual-dial="rs.selectedSide === 'b' ? rs.manualDial : null"
+          :manual-dial="rs.manualDial.b"
           :connected="connected"
           :selected="rs.selectedSide === 'b'"
           :scan-active="!!rs.scan?.active"
@@ -121,9 +144,11 @@ function setVfoMode(side: 'a' | 'b', vfo: boolean): void {
           :smeter="smeterFor('a')"
           :open="openFor('a')"
           :tx-state="txStateFor('a')"
-          :dmr="dmrSide === 'a' ? rs.dmr : null"
+          :dmr="dmrSide === 'a' || unlockedFor('a') ? rs.dmr : null"
+          :dmr-busy="busyFor('a')"
+          :dmr-unlocked="unlockedFor('a')"
           :scan="rs.selectedSide === 'a' ? rs.scan : null"
-          :manual-dial="rs.selectedSide === 'a' ? rs.manualDial : null"
+          :manual-dial="rs.manualDial.a"
           :connected="connected"
           :selected="rs.selectedSide === 'a'"
           :scan-active="!!rs.scan?.active"
@@ -145,7 +170,7 @@ function setVfoMode(side: 'a' | 'b', vfo: boolean): void {
 
     <PairingPanel v-else />
 
-    <StatusFooter v-if="connected && rs" :radio="rs" :metrics="state?.metrics ?? null" />
+    <StatusFooter v-if="(connected || disconnecting) && rs" :radio="rs" :metrics="state?.metrics ?? null" />
   </div>
 </template>
 

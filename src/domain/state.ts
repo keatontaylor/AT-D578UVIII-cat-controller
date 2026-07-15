@@ -108,6 +108,17 @@ export const SignalState = z.object({
   aOpen: z.boolean(),
   /** Squelch open (receiving) on side B. */
   bOpen: z.boolean(),
+  /** The AUDIO HOLDER — which side's audio the mono speaker/BT path is carrying. The radio is a
+   * LATCH, not a mixer (ear+clip-proven 2026-07-13): the first side to open keeps the audio; when
+   * the holder's squelch closes while the other side is receiving, the audio transfers INSTANTLY,
+   * and the original side reopening does NOT reclaim it. Latched in the reducer from 5a squelch
+   * edges (seeded from the radio's focus field for 5b-only audio); cleared when the whole audio
+   * gate closes. Clip attribution and audio-side logic should trust THIS, not the open bits. */
+  holder: z.enum(['a', 'b']).nullable(),
+  /** The radio's FOCUS side (5a byte 4 bit 0x40, ABSOLUTE): the selected side, except while the
+   * unselected side is the sole active receiver (held through its tail). NOT the audio owner —
+   * kept as the holder seed for gate-open-without-squelch-bits audio, and for telemetry. */
+  focus: z.enum(['a', 'b']).nullable(),
 })
 
 // Live DMR call activity, decoded from the 5e link-state push (+ 58 alias). Single top-level slice
@@ -123,9 +134,31 @@ export const DmrState = z.object({
   dest: z.number().nullable(),
   /** Group (false) vs private (true) call; null until a voice frame resolves it. */
   private: z.boolean().nullable(),
-  /** The radio PRESENTED this call (58 talker push / matching 59 record / the 04 5e call-state
-   * read) — the BT-01's popup moment, always carrying the caller id. Scan-engine 5e samples and
-   * other decode-only traffic never present; RX calls render ONLY once presented. */
+  /** The radio ROUTES this call's audio — sticky per call, latched from AUDIO EVIDENCE only: the
+   * call side's 5a open bit (per-side audio truth — a muted call streams RSSI but never sets one)
+   * or an attributable 5b gate open (see reduce.dmrAudioEvidence). NOT from presentation: the
+   * radio pushes 58s even for DigiMon-off non-matching calls it mutes (wire-pinned 2026-07-14,
+   * cap 05-54-31 — 58 per transmission, 5b never opened), and 5e byte3-0x20 was falsified too.
+   * False for a muted call's whole life → the decode-only ("monitor · no audio") UI state. */
+  audioRouted: z.boolean(),
+  /** The 59 LOCK WINDOW expired for this call: the session's 2 s timer fired with the slice
+   * still unlocked (an audible call's 59 lands within ~0.5 s of its first 5e — wire-measured),
+   * so the radio is NOT taking it. Drives the NO MATCH pill. Time-based, session-dispatched
+   * (`dmrNoLock` event) — a frame-count proxy failed live: the muted 5e stream is too sparse
+   * (2-4 frames per transmission with multi-second gaps) for counting to bound the wait. */
+  noLock: z.boolean(),
+  /** The physical side (a/b) this call is attributed to, LATCHED at call onset — 5e itself carries
+   * no side, but only one DMR call decodes at a time (they never overlap), so first-wins is exact:
+   * the DMR side whose 5a open (audio) bit was set at onset, tie-broken by the tuple/dial resolver
+   * (muted calls never set an open bit → resolver → selected-side default, which is where the
+   * radio decodes DMR). Held for the call's lifetime so attribution can't flip mid-call. */
+  side: z.enum(['a', 'b']).nullable(),
+  /** The RENDER gate: the radio PRESENTED this call (58 talker push / matching 59 record / the
+   * 04 5e call-state read — the BT-01's popup moment), OR a sustained decode-only call earned it
+   * (frames ≥ threshold outside a scan — the muted call the user should still SEE, since the
+   * radio's RX LED is solid for it). Scan-engine 5e samples never cross either bar: no 58/59
+   * fires for them and the threshold path is disabled while a scan runs. RX calls render ONLY
+   * once presented; `audioRouted` then splits audible (green RX) from muted (amber MON). */
   presented: z.boolean(),
   /** Caller alias from the 58 talker push (radio's contact-list lookup), when known. */
   alias: z.string().nullable(),
@@ -155,12 +188,13 @@ export const ScanState = z.object({
    * pause). Filled by the pause-confirm live-register read; null until that read lands — the
    * pre-scan channel name is stale while hopping and must not be presented as the parked one. */
   pausedChannel: z.string().nullable(),
-  /** Radio truth: the scan is PARKED on a channel (5a byte-3 bit 0x20) — spans the lock AND the
-   * post-signal dropout-delay window; clears at the exact hop resume. */
+  /** Radio truth: the scan is PARKED on a channel (5a byte-3 bit 0x20) — set when the SCANNING
+   * side stops (lock + the post-signal dropout hold); clears at the exact hop resume. NOT
+   * reliable at pause onset (wire 2026-07-13 22:32: other-side RX with the bit clear), so the
+   * view's WAITING state derives from parked OR paused. The radio never says WHY it stopped, so
+   * the display doesn't guess (2026-07-13 collapse — replaced the derived dwell/paused split
+   * that flapped and masked pauses). */
   parked: z.boolean(),
-  /** DWELL: parked with the signal gone — the radio is waiting out the dropout delay before
-   * resuming. The locked channel's data is still CURRENT (it is still sitting on it). */
-  dwell: z.boolean(),
   /** The channel the LOCK-FOLLOW READ named (04 2c/2d reply after the lock confirm) — null until
    * that read lands. The lock boolean says the scan STOPPED; only this says the side slice's
    * channel data is CURRENT. Freshness gates: the card keeps its sweeping placeholder, and the
@@ -193,13 +227,24 @@ export const RadioState = z.object({
   signal: SignalState,
   /** Live DMR call activity (5e/58 pushes); null when no call is in progress. */
   dmr: DmrState.nullable(),
+  /** Remnant of the last UNLOCKED (muted, no-59) RX call, stashed when its 5e-idle clears the
+   * slice: a muted conversation idles between transmissions, and without carrying the verdict
+   * the NO MATCH pill would re-wait its 2 s lock window every transmission. When the SAME dest
+   * reappears, `noLock` seeds from here — the verdict is earned once per conversation, then
+   * instant. CLEARED the moment a call LOCKS (59/read), so an audible call's transmissions
+   * never inherit an amber flash from an earlier muted phase of the same TG. */
+  dmrRemnant: z.object({ dest: z.number(), noLock: z.boolean() }).nullable(),
   /** Native scan status (57 48 / 2f 2b). */
   scan: ScanState,
-  /** Sticky manual-dial override: the next PTT on a DMR channel calls this target instead of the
-   * channel's programmed contact, until cleared. Null = use the channel contact. */
-  manualDial: z
-    .object({ target: z.number().int().positive(), callType: z.enum(['group', 'private']) })
-    .nullable(),
+  /** PER-SIDE sticky manual-dial override: the next PTT on that side's DMR channel calls this
+   * target instead of the channel's programmed contact, until cleared. Each side keeps its own
+   * (both sides can be DMR at once) — which ALSO gives resolveDmrSide a strong per-side TG to
+   * match an incoming call against, disambiguating two DMR channels that share a contact. Null
+   * slot = use that side's channel contact. */
+  manualDial: z.object({
+    a: z.object({ target: z.number().int().positive(), callType: z.enum(['group', 'private']) }).nullable(),
+    b: z.object({ target: z.number().int().positive(), callType: z.enum(['group', 'private']) }).nullable(),
+  }),
   /** The radio's 5b AUDIO gate: decoded voice is flowing to the speaker/BT path. NOT a
    * squelch indicator (per-side squelch is signal.aOpen/bOpen) — on DMR it opens ~150 ms
    * after the call presents and closes at end of voice, BEFORE hang time expires. */
@@ -239,10 +284,11 @@ export function initialState(): RadioState {
     pendingSide: null,
     settings: {},
     pendingSettings: {},
-    signal: { aRssi: 0, bRssi: 0, aOpen: false, bOpen: false },
+    signal: { aRssi: 0, bRssi: 0, aOpen: false, bOpen: false, holder: null, focus: null },
     dmr: null,
-    scan: { active: false, listName: null, locked: false, paused: false, pausedChannel: null, parked: false, dwell: false, lockedChannel: null, lastLock: null },
-    manualDial: null,
+    dmrRemnant: null,
+    scan: { active: false, listName: null, locked: false, paused: false, pausedChannel: null, parked: false, lockedChannel: null, lastLock: null },
+    manualDial: { a: null, b: null },
     audioGate: false,
     transmitting: false,
     ptt: 'idle',

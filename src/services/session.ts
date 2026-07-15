@@ -54,7 +54,29 @@ export interface ConnectOptions {
   readonly readMode?: number
   readonly wakeCount?: number
   readonly wakeDelayMs?: number
+  /** How many times to attempt the required HANDSHAKE before giving up (default 2). The first
+   * COM_MODE probe is flaky by design (the radio is waking), so one clean retry recovers most
+   * failures; exhausting them throws a StartupError the controller surfaces to the user. */
+  readonly startupAttempts?: number
 }
+
+/** The required startup handshake failed after all attempts — the radio never entered COM mode
+ * (no response to COM_MODE and no reply to the firmware proof read). Thrown by connect() so the
+ * controller can surface a clean, retryable error instead of reporting a hollow "connected" whose
+ * enumeration silently got nothing. */
+export class StartupError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'StartupError'
+  }
+}
+
+/** The firmware-id register — read as the handshake PROOF: a reply confirms the radio is in COM
+ * mode (and populates identity); repeated timeout means it never entered it. */
+const HANDSHAKE_PROOF_REGISTER = 0x02
+/** Bounded attempts for the proof read: comMode is one-shot (not retransmit-safe), so this read
+ * is the gate's real cost — keep it short (~a few seconds) so a retry stays within the deadline. */
+const HANDSHAKE_PROOF_ATTEMPTS = 3
 
 /** Coarse startup steps the Session reports during connect(), for UI progress display. */
 export type SessionPhase = 'handshake' | 'info' | 'settings' | 'channels' | 'status'
@@ -106,6 +128,11 @@ const CHANNEL_OP = 0x2f
 /** How long the squelch must stay open during a scan before we treat it as a real lock (not a
  * mid-hop graze) and read the locked channel. Matches the BT-01's ~1s dwell confirm. */
 const SCAN_LOCK_CONFIRM_MS = 1000
+/** Cap on the post-unkey RELEASE DRAIN (hold `unkeying` until the radio's own TX indications
+ * clear — the DMR terminator runs ~0.5 s past the ack, wire-measured 451/625 ms 2026-07-13). If
+ * the end-of-call push never arrives (5e decode dropout), go idle anyway: the release WAS acked,
+ * and a stale dmr slice must not wedge the yellow state. */
+const PTT_DRAIN_CAP_MS = 2000
 
 export class Session {
   private current: RadioState = initialState()
@@ -231,23 +258,36 @@ export class Session {
     })
   }
 
-  /** Run the startup sequence against the radio: wake → COM_MODE → the enumeration reads →
-   * COM_CHECK_END (enable the push stream). Builds a full RadioState. Best-effort per command
-   * (a missed handshake ack / individual read doesn't abort the connect). Starts the ARQ ticker. */
+  /** Run the startup sequence against the radio: (GATED) wake → COM_MODE → firmware-proof read,
+   * then (best-effort) the enumeration reads → COM_CHECK_END (enable the push stream). Builds a
+   * full RadioState. The HANDSHAKE is a hard gate — it retries and, on exhaustion, throws a
+   * StartupError so we never proceed into a hollow connect; the enumeration stays best-effort (a
+   * missed settings/channel read degrades the display but doesn't invalidate the link). Starts
+   * the ARQ ticker. */
   async connect(opts: ConnectOptions = {}): Promise<void> {
     this.startTicker()
-    const wakeDelayMs = opts.wakeDelayMs ?? 120
-    for (let i = 0; i < (opts.wakeCount ?? 3); i += 1) {
-      this.sendRaw(wake())
-      if (wakeDelayMs > 0) await delay(wakeDelayMs)
-    }
-    this.events.onPhase?.('handshake')
-    await this.submitAndWait(comMode()).catch(() => undefined)
-    await this.submitAndWait(comMode()).catch(() => undefined)
     const mode = opts.readMode ?? 0x07
     this.liveReadMode = mode
-    let phase: SessionPhase | null = null
+    const maxAttempts = Math.max(1, opts.startupAttempts ?? 2)
+
+    // HANDSHAKE GATE (required, retried): without COM mode nothing downstream is valid, so a
+    // failure here aborts the connect rather than enumerating into emptiness. The first COM_MODE
+    // probe is flaky by design (radio waking) — a fresh wake+probe usually lands, so retry the
+    // whole handshake before surfacing the error.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        await this.handshake(opts, mode)
+        break
+      } catch (e) {
+        if (e instanceof StartupError && !this.closed && attempt < maxAttempts) continue
+        throw e
+      }
+    }
+
+    // ENUMERATION (best-effort): the firmware register was already read as the handshake proof.
+    let phase: SessionPhase = 'info'
     for (const reg of opts.enumeration ?? ENUMERATION_REGISTERS) {
+      if (reg === HANDSHAKE_PROOF_REGISTER) continue
       const p = phaseForRegister(reg)
       if (p !== phase) this.events.onPhase?.((phase = p))
       await this.submitAndWait(readRegister(reg, mode)).catch(() => undefined)
@@ -261,6 +301,29 @@ export class Session {
       const zone = this.current.sides[side].zoneNumber
       if (zone != null) void this.readChannelCount(side, zone)
     }
+  }
+
+  /** The REQUIRED handshake: wake pulses → COM_MODE ×2 → prove COM mode by reading the firmware
+   * id. COM_MODE (0x01) is not retransmit-safe (one shot each; the first is flaky by design), so
+   * the bounded firmware read is the real proof — a reply means we're in COM mode (and populates
+   * identity); repeated timeout means the radio never entered it → StartupError. Re-fires the
+   * 'handshake' phase each call, so a retry visibly bounces the connect stepper back. */
+  private async handshake(opts: ConnectOptions, mode: number): Promise<void> {
+    this.events.onPhase?.('handshake')
+    const wakeDelayMs = opts.wakeDelayMs ?? 120
+    for (let i = 0; i < (opts.wakeCount ?? 3); i += 1) {
+      this.sendRaw(wake())
+      if (wakeDelayMs > 0) await delay(wakeDelayMs)
+    }
+    await this.submitAndWait(comMode()).catch(() => undefined)
+    await this.submitAndWait(comMode()).catch(() => undefined)
+    this.events.onPhase?.('info')
+    const proven = await this.submitAndWait(readRegister(HANDSHAKE_PROOF_REGISTER, mode), {
+      maxAttempts: HANDSHAKE_PROOF_ATTEMPTS,
+    })
+      .then(() => true)
+      .catch(() => false)
+    if (!proven) throw new StartupError('the radio did not enter COM mode — check it is on and in range, then try again')
   }
 
   /** Read a zone's channel count (04 27 member list) and store it on `side`. submitAndWait
@@ -306,6 +369,10 @@ export class Session {
       clearInterval(this.ticker)
       this.ticker = null
     }
+    if (this.dmrLockTimer !== null) {
+      clearTimeout(this.dmrLockTimer)
+      this.dmrLockTimer = null
+    }
     const err = new Error('session closed')
     for (const w of this.waiters.values()) w.reject(err)
     this.waiters.clear()
@@ -336,8 +403,8 @@ export class Session {
    * is set on a DMR channel, else the plain frame. Manual dial + release must be a matched pair
    * (same tail), so we key off the SAME manualDial value for both. */
   private pttFrameFor(on: boolean): Uint8Array {
-    const dial = this.current.manualDial
     const side = this.current.selectedSide
+    const dial = this.current.manualDial[side] // PTT uses the SELECTED side's dial
     const isDigital = this.current.sides[side].channel?.type !== 'analog'
     if (dial && isDigital) return manualDialPtt(on, side, dial.target, dial.callType)
     return on ? pttKey() : pttUnkey()
@@ -375,18 +442,18 @@ export class Session {
     this.link.submit(this.pttFrameFor(false), { retransmitSafe: true })
   }
 
-  /** Set the sticky manual-dial override (local — no radio write; it shapes the next DMR PTT).
-   * Throws on an invalid target before any state change. */
-  setManualDial(target: number, callType: 'group' | 'private'): void {
+  /** Set a SIDE's sticky manual-dial override (local — no radio write; shapes that side's next DMR
+   * PTT and gives resolveDmrSide a per-side TG to match). Throws on an invalid target first. */
+  setManualDial(side: SideKey, target: number, callType: 'group' | 'private'): void {
     if (!Number.isInteger(target) || target <= 0 || target > 0xffffff) {
       throw new Error(`manual-dial target ${target} out of 24-bit range`)
     }
-    this.dispatch({ kind: 'manualDial', dial: { target, callType } })
+    this.dispatch({ kind: 'manualDial', side, dial: { target, callType } })
   }
 
-  /** Clear the manual-dial override — the next PTT uses the channel's programmed contact again. */
-  clearManualDial(): void {
-    this.dispatch({ kind: 'manualDial', dial: null })
+  /** Clear a SIDE's manual-dial override — that side's next PTT uses its channel contact again. */
+  clearManualDial(side: SideKey): void {
+    this.dispatch({ kind: 'manualDial', side, dial: null })
   }
 
   /** Submit an 0x08 menu write (setting / side-select / zone-select) and run `apply` with its
@@ -496,10 +563,13 @@ export class Session {
     void this.ensureSideReady(side).then(run, () => fail?.())
   }
 
-  /** Toggle VFO vs memory mode on a side (57 3d). Selects the side first if needed. */
+  /** Toggle VFO vs memory mode on a side (57 3d). Selects the side first if needed. Retransmit-
+   * safe: it carries the ABSOLUTE target mode (not a toggle), so a re-send just re-applies the
+   * same state — a lost ack auto-retries instead of leaving the button a silent no-op. This is NOT
+   * a `2f` channel-record write, so the anti-corruption reason `2f` stays unsafe doesn't apply. */
   setVfoMode(side: SideKey, vfo: boolean): void {
     this.withSide(side, () => {
-      void this.submitAndWait(vfoMemoryMode(vfo), { retransmitSafe: false })
+      void this.submitAndWait(vfoMemoryMode(vfo), { retransmitSafe: true })
         .then(() => this.link.submit(readRegister(side === 'b' ? 0x2d : 0x2c, this.liveReadMode)))
         .catch(() => undefined)
     })
@@ -688,12 +758,21 @@ export class Session {
    * the scan side's LIVE `04 2c/2d 01` register — NOT the base `…07`, which is stale post-scan (it
    * holds the scan working slot). Mirrors the BT-01's stop sequence. */
   stopScan(): void {
-    const side = this.scanSide
-    this.clearScanFollow()
-    void this.submitAndWait(scanStartStop(false), { retransmitSafe: false })
+    // Tear the follow down + capture the side ONLY on the confirmed stop. Clearing on SEND was a
+    // bug: a failed first stop (57 48 is not retransmit-safe) nulled scanSide, so a retry captured
+    // side=null and skipped the channel-restore read — the side was left on the stale scan-cursor
+    // channel instead of its real current one (live 2026-07-14 02:51: RMRL BROOMFIELD shown for a
+    // channel that was actually COLCON DENVER). scanSide stays valid across the failed attempt.
+    // Retransmit-safe: a scan STOP is idempotent (stopping an already-stopped scan just re-acks),
+    // so a lost ack auto-retries instead of silently leaving the scan running — the radio's own
+    // scan-flag keeps the title honest meanwhile (same idempotent-release logic as unkey). START
+    // stays non-retransmit-safe: a failed start is self-evident (the scan simply doesn't begin).
+    void this.submitAndWait(scanStartStop(false), { retransmitSafe: true })
       .then(() => {
+        const side = this.scanSide ?? this.current.selectedSide
+        this.clearScanFollow()
         this.dispatch({ kind: 'scan', active: false, listName: null })
-        if (side) this.link.submit(readRegister(side === 'b' ? 0x2d : 0x2c, 0x01))
+        this.link.submit(readRegister(side === 'b' ? 0x2d : 0x2c, 0x01))
       })
       .catch(() => undefined)
   }
@@ -749,9 +828,9 @@ export class Session {
     this.setScanPaused(this.sideReceiving(otherSide))
 
     if (this.sideReceiving(scanSide)) {
-      if (this.current.scan.dwell) {
-        // Re-key INSIDE the dropout window: the radio re-opens the same channel without hopping
-        // (that is what the dwell is for) — relock immediately, no confirm window. lockedChannel
+      if (this.scanLockRead && !this.current.scan.locked) {
+        // Re-key while still PARKED (dropout window or other-side pause): the radio re-opens the
+        // same channel without hopping — relock immediately, no confirm window. lockedChannel
         // is kept (no placeholder flash) but we re-read anyway: if a fast hop slipped between 5a
         // pushes the reply reconciles the name ~1 RTT later.
         this.dispatch({ kind: 'scanRelock' })
@@ -785,11 +864,13 @@ export class Session {
         this.scanLockTimer = null
       }
       if (this.scanLockRead) {
-        if (this.current.scan.parked) {
-          // Signal gone but the radio is still PARKED — the dropout-delay DWELL. The channel
-          // data stays current (still sitting on it); scanLockRead stays armed so a re-key
-          // relocks and the park-clear below resumes.
-          this.dispatch({ kind: 'scanDwell' })
+        if (this.current.scan.parked || this.scanPaused) {
+          // Signal gone but the scan is still HELD: the radio's park bit (dropout delay), or an
+          // active PAUSE — the park bit is NOT reliable while the other side receives (wire
+          // 2026-07-13 22:32), but a paused scan cannot have hopped, so the pause is hold
+          // evidence in its own right. The channel data stays current (still sitting on it);
+          // scanLockRead stays armed so a re-key relocks and the true release below resumes.
+          this.dispatch({ kind: 'scanHold' })
         } else {
           // Park lifted (or the fixture predates the byte-3 bit): the hop resumed.
           this.scanLockRead = false
@@ -911,6 +992,22 @@ export class Session {
   private onPttOutcome(command: Command, event: 'acked' | 'failed'): void {
     // Order-independent: the ack can resolve synchronously inside submit(); we key off the op.
     if (command.op !== PTT_OP) return
+    this.cancelPttDrain() // any fresh PTT outcome supersedes a pending drain
+    // RELEASE DRAIN: the unkey ACK confirms the radio ACCEPTED the release — not that RF is
+    // down. On DMR the radio keeps transmitting the call terminator ~0.5 s past the ack
+    // (wire-measured 2026-07-13), during which the 5e TX call state still reads "transmitting";
+    // flipping to idle here made the view re-derive confirmed-RED from that leftover (the
+    // yellow→red→green flash). Hold `unkeying` — 'releasing' literally means "unkey sent, radio
+    // still transmitting" — until the radio's own TX indications clear (checkPttDrain, driven by
+    // the same frames that carry the end-of-call), capped so a lost end push can't wedge it.
+    if (event === 'acked' && command.frame[1] === 0x00 && this.radioStillTransmitting()) {
+      this.pttDrainTimer = setTimeout(() => {
+        this.pttDrainTimer = null
+        this.dispatch({ kind: 'ptt', phase: nextPttPhase(this.current.ptt, 'acked') })
+      }, PTT_DRAIN_CAP_MS)
+      this.pttDrainTimer.unref?.()
+      return
+    }
     this.dispatch({ kind: 'ptt', phase: nextPttPhase(this.current.ptt, event) })
     if (event !== 'failed') {
       // Key-down confirmed but the operator ALREADY released during the retry window → honor the
@@ -960,6 +1057,10 @@ export class Session {
     const next = applyEvent(this.current, event)
     if (next === this.current) return
     this.current = next
+    // Every state change re-evaluates the 59 lock window (arm/cancel) — scan flips and lock
+    // events arrive through here, not only the frame path. Self-guarding: the timer's own
+    // dmrNoLock event flips the wanted-condition off, so no re-arm loop.
+    this.watchDmrLock()
     this.events.onState?.(this.current)
   }
 
@@ -986,6 +1087,30 @@ export class Session {
     }
   }
 
+  /** True while the radio's OWN state says it is transmitting: the 5a byte-7 flag, or a live DMR
+   * TX call (the 5e stream spans the post-unkey terminator). The ptt phase is deliberately NOT
+   * consulted — this is the radio-truth side of the release drain. */
+  private radioStillTransmitting(): boolean {
+    const rs = this.current
+    return rs.transmitting || rs.dmr?.direction === 'tx'
+  }
+
+  private pttDrainTimer: ReturnType<typeof setTimeout> | null = null
+  private cancelPttDrain(): void {
+    if (this.pttDrainTimer) {
+      clearTimeout(this.pttDrainTimer)
+      this.pttDrainTimer = null
+    }
+  }
+
+  /** Complete the release drain the moment the radio's TX indications clear (called from the
+   * frame path — the 5e dir=00 / 5c / 5a frames that clear them are what drives it). */
+  private checkPttDrain(): void {
+    if (this.pttDrainTimer === null || this.radioStillTransmitting()) return
+    this.cancelPttDrain()
+    this.dispatch({ kind: 'ptt', phase: nextPttPhase(this.current.ptt, 'acked') })
+  }
+
   private apply(frame: DecodedFrame): void {
     // 5a data near a side swap (push OR read) may be in either side's frame of reference —
     // hold the last known per-side signal through the settle window (see suppress5aUntil).
@@ -1004,6 +1129,35 @@ export class Session {
     if (this.current.scan.active !== scanWasActive) this.onScanActiveChanged(this.current.scan.active)
     this.enrichDmrCaller()
     this.scanFollow()
+    this.checkPttDrain()
+  }
+
+  // ── the 59 LOCK WINDOW ──────────────────────────────────────────────────────
+  // "Did the 59 come?" is a TIME question, not a frame-count one: an audible call's 59 (the
+  // radio's call-log write — sent only for calls it routes) lands within ~0.5 s of the call's
+  // first 5e (wire-measured), while the muted 5e stream is far too sparse for counting frames to
+  // bound the wait (2-4 frames per transmission, multi-second gaps — live 2026-07-14). So the
+  // session arms a timer when an unlocked RX slice appears; if it expires the radio is NOT
+  // taking the call and the `dmrNoLock` event drives the NO MATCH pill. A lock/clear/scan
+  // cancels; the reducer's dmrRemnant carries the verdict across a conversation's idles.
+  private static readonly DMR_LOCK_WINDOW_MS = 2000
+  private dmrLockTimer: ReturnType<typeof setTimeout> | null = null
+
+  private watchDmrLock(): void {
+    const d = this.current.dmr
+    const wanted = d !== null && d.direction === 'rx' && !d.presented && !d.noLock && !this.current.scan.active
+    if (!wanted) {
+      if (this.dmrLockTimer !== null) {
+        clearTimeout(this.dmrLockTimer)
+        this.dmrLockTimer = null
+      }
+      return
+    }
+    if (this.dmrLockTimer !== null) return // window already running for this call
+    this.dmrLockTimer = setTimeout(() => {
+      this.dmrLockTimer = null
+      this.dispatch({ kind: 'dmrNoLock' })
+    }, Session.DMR_LOCK_WINDOW_MS)
   }
 
   /** The radio's own scan truth (5a byte 12) flipped scan.active in the reducer — reconcile the

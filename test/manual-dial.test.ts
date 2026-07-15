@@ -44,18 +44,31 @@ class FakeTransport implements Transport {
 test('setManualDial stores the override in state (no radio write until PTT)', () => {
   const tp = new FakeTransport()
   const s = new Session(tp, { timeoutMs: 1000, maxAttempts: 3, gapMs: 0 }, () => 0)
-  s.setManualDial(123, 'group')
-  assert.deepEqual(s.state.manualDial, { target: 123, callType: 'group' })
+  s.setManualDial('a', 123, 'group')
+  assert.deepEqual(s.state.manualDial.a, { target: 123, callType: 'group' })
+  assert.equal(s.state.manualDial.b, null, 'the other side keeps its own (unset) dial')
   assert.equal(tp.writes.length, 0, 'dial is a local override — nothing sent yet')
-  s.clearManualDial()
-  assert.equal(s.state.manualDial, null)
+  s.clearManualDial('a')
+  assert.equal(s.state.manualDial.a, null)
+})
+
+test('each side keeps its own manual dial (both DMR)', () => {
+  const tp = new FakeTransport()
+  const s = new Session(tp, { timeoutMs: 1000, maxAttempts: 3, gapMs: 0 }, () => 0)
+  s.setManualDial('a', 700, 'group')
+  s.setManualDial('b', 720, 'group')
+  assert.deepEqual(s.state.manualDial.a, { target: 700, callType: 'group' })
+  assert.deepEqual(s.state.manualDial.b, { target: 720, callType: 'group' })
+  s.clearManualDial('a')
+  assert.equal(s.state.manualDial.a, null)
+  assert.deepEqual(s.state.manualDial.b, { target: 720, callType: 'group' }, 'clearing one leaves the other')
 })
 
 test('PTT on a DMR channel with a dial set sends the manual-dial frame; plain PTT otherwise', () => {
   const tp = new FakeTransport()
   const s = new Session(tp, { timeoutMs: 1000, maxAttempts: 3, gapMs: 0 }, () => 0)
   s.state.sides.a.channel = DIGITAL
-  s.setManualDial(123, 'group')
+  s.setManualDial('a', 123, 'group')
   s.key()
   assert.ok(tp.writes[0]!.startsWith('56 01 00 00 06 01 00 00 00 7b'), 'manual-dial key frame')
   s.unkey()
@@ -66,7 +79,7 @@ test('manual dial is ignored on an analog channel (plain PTT)', () => {
   const tp = new FakeTransport()
   const s = new Session(tp, { timeoutMs: 1000, maxAttempts: 3, gapMs: 0 }, () => 0)
   s.state.sides.a.channel = { ...DIGITAL, type: 'analog' }
-  s.setManualDial(123, 'group')
+  s.setManualDial('a', 123, 'group')
   s.key()
   assert.ok(tp.writes[0]!.startsWith('56 01 00 01'), 'plain analog PTT, dial ignored')
 })

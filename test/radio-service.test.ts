@@ -36,6 +36,33 @@ test('disconnect tears down session + transport + ACL and resets state', async (
   assert.ok(s.bt.calls.includes('disconnectAcl'))
 })
 
+test('disconnect reports a DISCONNECTING phase until the teardown confirms', async () => {
+  const s = newController()
+  await s.c.connect(ADDR)
+  let release!: () => void
+  s.bt.disconnectGate = new Promise<void>((r) => (release = r)) // hold the ACL drop mid-teardown
+
+  const states: string[] = []
+  s.c.onChange((st) => states.push(st.connection))
+  const done = s.c.disconnect()
+
+  // status flips to 'disconnecting' immediately; address is retained so the UI can grey the
+  // last-known radio rather than blank it
+  assert.equal(s.c.appState.connection, 'disconnecting')
+  assert.equal(s.c.appState.address, ADDR)
+
+  // our own transport close during teardown must NOT be treated as an unexpected drop
+  s.transport!.dropHandler()
+  assert.equal(s.c.appState.connection, 'disconnecting', 'onDrop is a no-op while disconnecting')
+  assert.equal(s.c.appState.error, null)
+
+  release()
+  await done
+  assert.equal(s.c.appState.connection, 'disconnected')
+  assert.equal(s.c.appState.address, null)
+  assert.deepEqual(states, ['disconnecting', 'disconnected'])
+})
+
 test('live ops require a connection; setSetting flows a state change once connected', async () => {
   const { c } = newController()
   assert.throws(() => c.key(), /not connected/)

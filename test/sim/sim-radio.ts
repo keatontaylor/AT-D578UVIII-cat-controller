@@ -29,6 +29,7 @@ import {
   firmwareBlock,
   identityBlock,
   lastCallBlock,
+  lastCallPush,
   opaqueBlock,
   scanListBlock,
   sealed,
@@ -324,10 +325,17 @@ export class SimRadio implements Transport {
           dest,
         })
       } else {
-        this.endDmrCall()
+        // The real radio keeps the TX call up past the unkey ack while it transmits the DMR
+        // terminator — 5e dir=00 lands ~0.5 s later (wire-measured 451/625 ms, 2026-07-13).
+        // Modeled so the session's release drain is exercised; dmrTxTailMs is a scenario knob.
+        setTimeout(() => this.endDmrCall(), this.dmrTxTailMs)
       }
     }
   }
+
+  /** Post-unkey DMR terminator duration (see onPtt) — tests may stretch it to force the
+   * release-drain CAP path (a lost end-of-call push). */
+  dmrTxTailMs = 500
 
   private onChannelSelect(side: SideKey, target: number, _dir: number): void {
     const s = this.slot[side]
@@ -354,7 +362,7 @@ export class SimRadio implements Transport {
 
   /** Begin a DMR call stream: 5b gate opens (see gateOpen for the scan-held exception), 5a
    * carries the call side's open bit + full RSSI (wire-pinned), 5e voice/control frames at
-   * cadence, one 58 alias. */
+   * cadence, plus the presentation choreography (58 talker line, then the 59 call-log write). */
   startDmrCall(spec: DmrCallSpec): void {
     this.endDmrCall(true)
     const gateWas = this.gateOpen()
@@ -367,9 +375,13 @@ export class SimRadio implements Transport {
     this.pushGateIfChanged(gateWas)
     this.emit(dmrVoicePush(spec))
     this.pushSmeter() // the call side's 5a open/RSSI (streams ~1 s in on the real wire)
-    // CALL PRESENTATION: the real radio pushes 58 for every call it presents (with the caller id;
-    // the name field may be empty/stale) — RX calls only render once this arrives.
-    if (spec.present ?? true) this.emit(aliasPush(spec.source, spec.alias ?? ''))
+    // CALL PRESENTATION choreography: 58 (talker line) then 59 (the call-log write). The radio
+    // pushes the 59 ONLY for calls it routes to audio — the 59 is the render+audio LOCK; the 58
+    // alone locks nothing (it fires even for muted calls in some DigiMon states).
+    if (spec.present ?? true) {
+      this.emit(aliasPush(spec.source, spec.alias ?? ''))
+      if (spec.direction === 'rx') this.emit(lastCallPush({ dest: spec.dest, callerId: spec.source }))
+    }
   }
 
   /** End the DMR call: 5e idle + gate closes (unless an analog carrier holds it), then the 5c
@@ -516,6 +528,11 @@ export class SimRadio implements Transport {
 
   private smeterFields(reference: SideKey) {
     const other: SideKey = reference === 'a' ? 'b' : 'a'
+    // FOCUS (byte 4, ABSOLUTE — live-pinned 2026-07-13): the selected side, EXCEPT while the
+    // unselected side is the sole active receiver. (The real radio also tail-holds it briefly;
+    // the sim models the level, not the tail.)
+    const unselected: SideKey = this.selectedSide === 'a' ? 'b' : 'a'
+    const focusB = this.sideOpen(unselected) && !this.sideOpen(this.selectedSide) ? unselected === 'b' : this.selectedSide === 'b'
     return {
       selectedRssi: this.sideRssi(reference),
       otherRssi: this.sideRssi(other),
@@ -523,7 +540,12 @@ export class SimRadio implements Transport {
       otherOpen: this.sideOpen(other),
       transmitting: this.transmitting,
       scanning: this.scanning !== null, // 5a byte 12 — the radio reports its own scan truth
-      parked: this.scanning?.landed != null, // byte 3 bit 0x20 — parked through lock + dwell
+      // byte 3 bit 0x20 — set for SCANNING-SIDE stops (a landed hit / carrier on the scan side,
+      // held through the dropout dwell until scanResume). Deliberately NOT set for pauses: the
+      // real radio's bit is unreliable at pause onset (wire 2026-07-13 22:32) — the sim models
+      // the adversarial variant so pause handling can never lean on the bit.
+      parked: this.scanning != null && (this.scanning.landed != null || this.sideOpen(this.scanning.side)),
+      focusB,
     }
   }
 

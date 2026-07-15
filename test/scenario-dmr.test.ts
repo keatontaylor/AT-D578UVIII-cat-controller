@@ -296,7 +296,7 @@ test('manual dial: PTT on a DMR channel keys the dialed target end-to-end', asyn
   const rig = await Rig.create(t)
   rig.session.selectChannel('a', 2) // MIDSOUTH on the selected side
   await rig.advance(200)
-  rig.session.setManualDial(5042450, 'group')
+  rig.session.setManualDial('a', 5042450, 'group')
   rig.session.key()
   await rig.advance(200)
   assert.equal(rig.state.ptt, 'keyed')
@@ -304,9 +304,33 @@ test('manual dial: PTT on a DMR channel keys the dialed target end-to-end', asyn
   assert.equal(rig.state.dmr?.dest, 5042450, 'the radio transmits to the DIALED target')
   rig.session.unkey()
   await rig.advance(200)
+  // RELEASE DRAIN: the unkey is acked but the radio is still transmitting the DMR terminator
+  // (~0.5 s) — the phase must HOLD 'unkeying' (yellow), never flash back to a confirmed-red idle+
+  // leftover state, until the radio's own end-of-call clears it.
+  assert.equal(rig.state.ptt, 'unkeying', 'releasing holds while the terminator transmits')
+  assert.equal(rig.state.dmr?.direction, 'tx')
+  await rig.advance(600)
   assert.equal(rig.state.ptt, 'idle')
   assert.equal(rig.state.dmr, null)
   rig.expectConsistent()
+  rig.assertClean()
+})
+
+test('release drain cap: a lost end-of-call push cannot wedge the releasing state', async (t) => {
+  const rig = await Rig.create(t)
+  rig.session.selectChannel('a', 2)
+  await rig.advance(200)
+  rig.sim.dmrTxTailMs = 60_000 // the 5e dir=00 never (usefully) arrives
+  rig.session.key()
+  await rig.advance(200)
+  assert.equal(rig.state.ptt, 'keyed')
+  rig.session.unkey()
+  await rig.advance(200)
+  assert.equal(rig.state.ptt, 'unkeying', 'draining on the stale TX call state')
+  await rig.advance(2000) // PTT_DRAIN_CAP_MS
+  assert.equal(rig.state.ptt, 'idle', 'the cap releases the phase — the unkey WAS acked')
+  await rig.advance(60_000) // let the sim finally end the call; nothing should blow up
+  assert.equal(rig.state.dmr, null)
   rig.assertClean()
 })
 

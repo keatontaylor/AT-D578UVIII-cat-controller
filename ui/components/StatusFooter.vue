@@ -4,12 +4,16 @@
 // dialog (per-event retransmit/failure history + copy-as-JSON).
 import { computed, ref } from 'vue'
 import LinkStatsDialog from './LinkStatsDialog.vue'
+import WebRtcStats from './WebRtcStats.vue'
 import type { RadioState } from '../../src/domain/state'
 import type { LinkMetrics } from '../../src/services/radio-service'
 
 const props = defineProps<{ radio: RadioState; metrics?: LinkMetrics | null }>()
 
 const statsOpen = ref(false)
+// WebRTC audio-peer stats — self-contained (WebRtcStats polls the live peer and shows
+// "enable audio first" when there's none), so it's always pressable, not gated on listening.
+const rtcOpen = ref(false)
 
 const pad = (n: number): string => String(n).padStart(2, '0')
 const clockText = computed(() => {
@@ -50,9 +54,17 @@ const linkText = computed(() => {
           @click="statsOpen = true"
         >{{ linkText }}</button>
       </template>
+      ·
+      <button
+        type="button"
+        class="footer-link-btn"
+        title="WebRTC audio connection stats"
+        @click="rtcOpen = true"
+      >Audio Stats</button>
     </span>
 
     <LinkStatsDialog v-if="statsOpen" @close="statsOpen = false" />
+    <WebRtcStats v-if="rtcOpen" @close="rtcOpen = false" />
   </footer>
 </template>
 

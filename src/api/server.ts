@@ -11,9 +11,10 @@ import Fastify, { type FastifyInstance } from 'fastify'
 import fastifyWebsocket from '@fastify/websocket'
 import fastifyStatic from '@fastify/static'
 import { z } from 'zod'
-import { createReadStream } from 'node:fs'
+import { createReadStream, statSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import type { AppState, RadioController } from '../services/radio-service'
+import { basename } from 'node:path'
+import type { AppState, RadioController, WireCaptureInfo } from '../services/radio-service'
 import type { AudioBridge, RtcAudioSession } from '../audio/rtc'
 import type { Recorder } from '../audio/recorder'
 import type { PacketService } from '../packet/service'
@@ -21,6 +22,17 @@ import type { StateBroadcaster } from './broadcast'
 import { fail, idOf, notify, ok, RpcErrorCode, RpcRequest } from './jsonrpc'
 import { HEARTBEAT_MS, makeHeartbeat } from './heartbeat'
 import { dispatch } from './router'
+
+/** Metadata for the current wire capture (name + size), or null when there's no readable file —
+ * synchronous because it augments the link.stats response inline. */
+function wireCaptureInfo(path: string | null): WireCaptureInfo | null {
+  if (!path) return null
+  try {
+    return { filename: basename(path), sizeBytes: statSync(path).size }
+  } catch {
+    return null // logging enabled but the file isn't there yet / was removed
+  }
+}
 
 const RtcOfferParams = z.object({ type: z.literal('offer'), sdp: z.string().min(1).max(1_000_000) })
 const RtcIceParams = z.object({
@@ -45,6 +57,10 @@ export interface ServerDeps {
   saveTxGain?: (gain: number) => void
   /** Packet TNC (direwolf bridge). Omitted → packet.* methods report unavailable. */
   packet?: PacketService
+  /** Current session's diagnostics wire capture — absolute path, or null when logging is off /
+   * nothing captured yet. Surfaced in link.stats (wireCapture metadata) and downloadable at
+   * `${base}/wire/current` so users can hand a capture to a maintainer for debugging. */
+  wireCapture?: () => string | null
 }
 
 export interface ServerOptions {
@@ -321,12 +337,34 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
         return
       }
       void dispatch(deps.controller, raw).then((response) => {
+        // Augment link.stats at the API boundary with the downloadable wire capture — the pure
+        // engine report is filesystem-free, so the wire path is injected here, never in dispatch().
+        if (response && method === 'link.stats' && 'result' in response && response.result && typeof response.result === 'object') {
+          ;(response.result as { wireCapture: unknown }).wireCapture = wireCaptureInfo(deps.wireCapture?.() ?? null)
+        }
         if (response) send(response)
       })
     })
     socket.on('close', cleanup)
     socket.on('error', cleanup)
   })
+
+  // Download the current session's wire capture (link-stats dialog "Download" button). The path
+  // is server-owned (never client input) so there's no traversal surface; served as an attachment
+  // with the capture's own filename. 404 when logging is off or nothing's captured yet.
+  if (deps.wireCapture) {
+    const getWire = deps.wireCapture
+    app.get(`${base}/wire/current`, async (_req, reply) => {
+      const path = getWire()
+      const info = wireCaptureInfo(path)
+      if (!path || !info) return reply.code(404).send('no wire capture available')
+      return reply
+        .header('Content-Type', 'application/x-ndjson')
+        .header('Content-Length', info.sizeBytes)
+        .header('Content-Disposition', `attachment; filename="${info.filename}"`)
+        .send(createReadStream(path))
+    })
+  }
 
   // Serve recorded clips as WAV downloads/playback sources (path-traversal guarded by wavPath).
   // Range support is REQUIRED: Safari/iOS <audio> refuses to play a source that doesn't advertise

@@ -29,6 +29,7 @@ import { toneLabel, type ToneType } from '../codec/tones'
 import type { DmrActivity, Smeter } from '../codec/decode'
 import { READ_HEAD } from '../codec/frame-table'
 import type { PttPhase } from './ptt'
+import { pickDmrSide } from './dmr-side'
 import type { RadioState, Side, SideKey } from './state'
 
 /** One pending/failed write overlay entry ({ desired, phase }). */
@@ -51,11 +52,12 @@ export type DomainEvent =
   | { kind: 'volume'; side: SideKey; level: number }
   | { kind: 'scan'; active: boolean; listName: string | null }
   | { kind: 'scanLock'; locked: boolean }
-  | { kind: 'scanDwell' }
+  | { kind: 'scanHold' }
   | { kind: 'scanRelock' }
   | { kind: 'scanResume' }
   | { kind: 'scanPause'; paused: boolean }
-  | { kind: 'manualDial'; dial: { target: number; callType: 'group' | 'private' } | null }
+  | { kind: 'manualDial'; side: SideKey; dial: { target: number; callType: 'group' | 'private' } | null }
+  | { kind: 'dmrNoLock' }
   | { kind: 'dmrCaller'; callerId: number; callsign: string | null; name: string | null; location: string | null }
 
 /** A copy of `map` without `key` (immutably clear one pending overlay). */
@@ -168,27 +170,78 @@ function applySmeter(state: RadioState, s: Smeter | null): RadioState {
   // OFF transition resets the slice exactly like a stop ack. Corpus: the flag flips on the very
   // next push after the ack, so the two sources never fight.
   let scan = state.scan
-  // While scanning, mirror the radio's PARK truth (byte-3 bit) — the session's dwell/resume
+  // While scanning, mirror the radio's PARK truth (byte-3 bit) — the session's hold/resume
   // state machine keys off it.
   if (s.scanning === scan.active && scan.active && scan.parked !== s.parked) {
     scan = { ...scan, parked: s.parked }
   }
   if (s.scanning !== scan.active) {
     scan = s.scanning
-      ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, parked: s.parked, dwell: false, lockedChannel: null, lastLock: null }
-      : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, parked: false, dwell: false, lockedChannel: null, lastLock: null }
+      ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, parked: s.parked, lockedChannel: null, lastLock: null }
+      : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, parked: false, lockedChannel: null, lastLock: null }
+  }
+  const aOpen = selA ? s.selectedOpen : s.otherOpen
+  const bOpen = selA ? s.otherOpen : s.selectedOpen
+  // The per-side open bits are AUDIO truth, not carrier presence — wire-proven 2026-07-14: a
+  // DigiMon-off MUTED DMR call streams RSSI but its open bit stays 0 for the call's whole life,
+  // so a muted call can never grab this latch. No decode-only filtering is needed here.
+  // AUDIO HOLDER latch (ear+clip-proven 2026-07-13): the radio's mono audio path is a latch —
+  // first side to open keeps the audio; when the holder releases while the other side is
+  // receiving, audio transfers INSTANTLY; the released side reopening does NOT reclaim it. The
+  // latch survives its own squelch close (tail audio) until the whole gate is down.
+  let holder = state.signal.holder
+  if (holder === null) {
+    if (aOpen !== bOpen) holder = aOpen ? 'a' : 'b'
+    // Both rise in one frame (unobserved on the wire): the selected side is the radio's default.
+    else if (aOpen && bOpen) holder = state.selectedSide
+    // 5b-only audio (no per-side bits — undecoded DMR): the radio's FOCUS field names the sole
+    // active side when it points away from the selected side; focus==selected is ambiguous
+    // (idle default) and stays unlatched for the downstream inference to handle.
+    else if (state.audioGate && s.focusSide !== state.selectedSide) holder = s.focusSide
+  } else {
+    const holderOpen = holder === 'a' ? aOpen : bOpen
+    const otherOpen = holder === 'a' ? bOpen : aOpen
+    if (!holderOpen && otherOpen) holder = holder === 'a' ? 'b' : 'a'
+  }
+  // Whole gate down (no 5b audio, no squelch) → nothing is playing; the latch resets.
+  if (!state.audioGate && !aOpen && !bOpen) holder = null
+  // SCAN-HELD DMR call END: during a scan the radio suppresses BOTH the 5e stream and the
+  // end-of-call 5c (see the 5c case — it dismisses the presentation early), so the ONLY signal a
+  // scan-held DMR call has ended is its side's per-side bit going open→closed. Clear the
+  // now-stale slice on that edge, or dmrRxOn would keep the smeter lit for a call that ended.
+  // Scoped to a running scan: normal calls keep their 5c-driven hang display untouched.
+  let dmr = state.dmr
+  if (dmr && scan.active && dmr.side) {
+    const dside = dmr.side
+    const wasOpen = dside === 'a' ? state.signal.aOpen : state.signal.bOpen
+    const nowOpen = dside === 'a' ? aOpen : bOpen
+    if (wasOpen && !nowOpen) dmr = null
+  }
+  // Audio-evidence latch, backup to the 59 LOCK: the call's side's OWN 5a open bit RISING while
+  // the call is live — per-side audio truth (a muted call streams RSSI but never sets its bit,
+  // cap 07-12T17-30-40). EDGE-triggered, never level: a DigiMon-off toggle MID-call tears the
+  // presented slice down while the bit is still up from the audible phase, and the rebuilt muted
+  // slice must not inherit that stale level as evidence (live bug 2026-07-14 15:08 — the call
+  // came back with audioRouted true / presented false and rendered neither RX nor BUSY).
+  if (dmr && !dmr.audioRouted && dmr.direction === 'rx' && dmr.side) {
+    const was = dmr.side === 'a' ? state.signal.aOpen : state.signal.bOpen
+    const now = dmr.side === 'a' ? aOpen : bOpen
+    if (!was && now) dmr = { ...dmr, audioRouted: true }
   }
   return {
     ...state,
     signal: {
       aRssi: selA ? s.selectedRssi : s.otherRssi,
       bRssi: selA ? s.otherRssi : s.selectedRssi,
-      aOpen: selA ? s.selectedOpen : s.otherOpen,
-      bOpen: selA ? s.otherOpen : s.selectedOpen,
+      aOpen,
+      bOpen,
+      holder,
+      focus: s.focusSide,
     },
     // TX is side-agnostic (it happens on the selected side by definition) — no mapping needed.
     transmitting: s.transmitting,
     scan,
+    ...(dmr !== state.dmr ? { dmr } : {}),
   }
 }
 
@@ -199,16 +252,92 @@ function applySmeter(state: RadioState, s: Smeter | null): RadioState {
  * programmed contact. So we LATCH: keep the last-known identity fields and only overwrite them when
  * a newer frame actually carries them. `a === null` is the explicit end-of-call (5e status byte 0)
  * — that, and only that, clears the slice. (Alias rides a separate 58 push and is preserved too.) */
+
+/** Does a 59 last-call record belong to the LIVE call? Group calls match on dest (the TG rides
+ * both). PRIVATE calls need the caller field: wire-pinned 2026-07-14 (cap 16-30-21, parrot
+ * private calls) — the record's dest slot holds the STALE last-group TG (5067498) while the
+ * caller field carries the actual transmitting station (310997 = the call's other party, the
+ * slice's src or dest). A dest-only guard silently rejected every private 59 → the call never
+ * locked → NO MATCH on an audibly-playing call. */
+function lastCallMatches(dmr: NonNullable<RadioState['dmr']>, last: { dest: number | null; callerId: number | null }): boolean {
+  if (last.dest != null && last.dest === dmr.dest) return true
+  if (last.callerId != null && (last.callerId === dmr.dest || last.callerId === dmr.source)) return true
+  return false
+}
+
+/** The 5b AUDIO gate (async push and the 04 5b read share this): sets audioGate and resets the
+ * holder latch on a full close. Deliberately NOT audio evidence for the DMR slice — the gate is
+ * global mono and can belong to the other side; the 59 lock + own-bit cover every audible call. */
+function applyAudioGate(state: RadioState, open: boolean): RadioState {
+  // Gate fully closed (no audio, no squelch) → the audio-holder latch resets (see applySmeter).
+  const clearHolder = !open && !state.signal.aOpen && !state.signal.bOpen && state.signal.holder !== null
+  return { ...state, audioGate: open, signal: clearHolder ? { ...state.signal, holder: null } : state.signal }
+}
+
 function applyDmr(state: RadioState, a: DmrActivity | null, presented = false): RadioState {
-  if (a === null) return state.dmr === null ? state : { ...state, dmr: null }
+  if (a === null) {
+    if (state.dmr === null) return state
+    // An UNLOCKED RX call dying leaves a REMNANT {dest, frames}: the muted 5e stream is sparse
+    // and idles between transmissions, so without carrying the earned frames the NO MATCH info
+    // flickers or never shows (see state.dmrRemnant). Locked calls never stash — 59 re-locks
+    // their next transmission within a frame or two.
+    const d = state.dmr
+    const stash = !d.presented && d.direction === 'rx' && d.dest != null ? { dest: d.dest, noLock: d.noLock } : state.dmrRemnant
+    return { ...state, dmr: null, ...(stash !== state.dmrRemnant ? { dmrRemnant: stash } : {}) }
+  }
   const prev = state.dmr
+  // DUAL-RECEIVE SCAN GUARD (live bug 2026-07-14): the DMR slice is a single top-level slice, but
+  // when one side holds a PRESENTED call and the other side SCANS, two 5e sources feed it — the
+  // live call, and the scan engine's SAMPLES of other channels. A sample is unpresented and
+  // carries a DIFFERENT destination; without this guard it overwrites the presented call's dest,
+  // so resolveDmrSide loses the call's side and the smeter/caller vanish until the call ends. An
+  // unpresented frame whose non-null dest differs from a presented call's dest is a foreign
+  // sample — ignore it entirely. (Same-call voice frames match dest; non-voice frames carry null
+  // dest and latch as before; a genuinely new call re-presents via its own 58 after the 5e idle.)
+  if (prev?.presented && !presented && a.dest != null && prev.dest != null && a.dest !== prev.dest) {
+    return state
+  }
+  // Side is LATCHED at onset (first frame of the call) and held — 5e carries no side, and only one
+  // DMR call decodes at a time, so first-wins by the open 5a (audio) bit is exact and stable. TX
+  // keys on the selected side by definition.
+  const side =
+    prev?.side ??
+    (a.direction === 'tx'
+      ? state.selectedSide
+      : pickDmrSide(
+          a,
+          state.sides.a.channel,
+          state.sides.b.channel,
+          state.selectedSide,
+          state.signal.aOpen,
+          state.signal.bOpen,
+          state.manualDial.a?.target ?? null,
+          state.manualDial.b?.target ?? null,
+        ))
+  // The verdict seeds from the REMNANT when the same dest reappears — a muted conversation's
+  // next transmission shows its NO MATCH pill instantly instead of re-waiting the lock window.
+  const noLock = prev ? prev.noLock : (state.dmrRemnant != null && state.dmrRemnant.dest === a.dest && state.dmrRemnant.noLock)
+  const nowPresented = (prev?.presented ?? false) || presented
   return {
     ...state,
+    // A LOCK clears the remnant: an audible call's transmissions must never seed-inherit an
+    // amber flash from an earlier muted phase of the same TG (DigiMon flipped on mid-QSO).
+    ...(nowPresented && state.dmrRemnant !== null ? { dmrRemnant: null } : {}),
     dmr: {
       direction: a.direction,
-      // Presentation is sticky for the call's lifetime; async 5e alone never presents (scan
-      // samples), but the 04 5e READ does — it is the radio's own call-state register.
-      presented: (prev?.presented ?? false) || presented,
+      // THE 59 LOCK: an RX call renders (tuple/caller) only once the radio's call-log write
+      // arrives (the 0x59 push handler sets this) or the 04 5e READ says a call is live (the
+      // mid-call-connect path — the radio's own call-state register). Async 5e alone NEVER
+      // presents: a muted (DigiMon-off non-matching) call streams identical identity-bearing
+      // frames — and 58s in some DigiMon states — for its whole life. Unlocked activity shows
+      // as live RSSI + the amber NO MATCH pill/info (view.dmrBusy), never as a live call.
+      presented: nowPresented,
+      // AUDIBLE: the 59 lock (0x59 handler), the read (param), or the own-bit RISING edge
+      // (applySmeter). Deliberately NO level check here — a slice rebuilt mid-carrier (DigiMon
+      // toggled off during a call) must not inherit the stale open bit as audio evidence.
+      audioRouted: (prev?.audioRouted ?? false) || presented,
+      noLock,
+      side,
       colorCode: a.colorCode ?? prev?.colorCode ?? null,
       slot: a.slot ?? prev?.slot ?? null,
       source: a.source ?? prev?.source ?? null,
@@ -229,7 +358,7 @@ export function applyFrame(state: RadioState, frame: DecodedFrame): RadioState {
     case 0x5a:
       return applySmeter(state, decodeSmeter(frame.bytes))
     case 0x5b:
-      return { ...state, audioGate: decodeAudioGate(frame.bytes) }
+      return applyAudioGate(state, decodeAudioGate(frame.bytes))
     case 0x5e:
       return applyDmr(state, decodeDmr(frame.bytes))
     case 0x58: {
@@ -243,29 +372,48 @@ export function applyFrame(state: RadioState, frame: DecodedFrame): RadioState {
       if (!a) return state
       const alias = a.alias || state.dmr.alias
       const callerId = a.id ?? state.dmr.callerId
-      if (state.dmr.presented && alias === state.dmr.alias && callerId === state.dmr.callerId) return state
-      return { ...state, dmr: { ...state.dmr, alias, callerId, presented: true } }
+      // The 58 ENRICHES (talker id + display line) but does NOT lock: the radio pushes 58s for
+      // DigiMon-off non-matching calls it mutes (wire-pinned 2026-07-14, cap 05-54-31: 58 on
+      // every transmission, 5b never opened). The 59 call-log write is the lock (see 0x59).
+      if (alias === state.dmr.alias && callerId === state.dmr.callerId) return state
+      return { ...state, dmr: { ...state.dmr, alias, callerId } }
     }
     case 0x59: {
-      // Raw last-call PUSH — part of the presentation choreography (fires with the 58). Same
-      // layout as the 04 59 read shifted DOWN one byte; pad the front so one decoder serves both.
-      // The caller-NAME field in the push form starts with a NUL (stale residue follows) — only
-      // the ids are usable. Guarded on dest matching the live call, like the read path.
+      // Raw last-call PUSH — the radio WRITING ITS CALL LOG, which it does ONLY for calls it
+      // routes to audio: corpus-tallied 2026-07-14 across 7 captures, 59-push count tracks the
+      // 5b-open count exactly (0↔0 in both muted captures — including the DigiMon state that
+      // pushes 58s for muted calls — nonzero wherever audio flowed). So unlike the 58 popup,
+      // this IS per-call audio truth, and it self-correlates: the record carries the dest.
+      // Same layout as the 04 59 read shifted DOWN one byte; pad the front so one decoder
+      // serves both. The caller-NAME field in the push form starts with a NUL (stale residue
+      // follows) — only the ids are usable. Guarded on dest matching the live call.
       if (state.dmr === null || state.dmr.direction !== 'rx') return state
       const padded = new Uint8Array(frame.bytes.length + 1)
       padded.set(frame.bytes, 1)
       const last = decodeLastCall(padded)
-      if (!last || last.dest == null || state.dmr.dest !== last.dest) return state
+      if (!last || !lastCallMatches(state.dmr, last)) return state
       const callerId = state.dmr.callerId ?? last.callerId
-      if (state.dmr.presented && callerId === state.dmr.callerId) return state
-      return { ...state, dmr: { ...state.dmr, callerId, presented: true } }
+      if (state.dmr.presented && state.dmr.audioRouted && callerId === state.dmr.callerId) return state
+      // Locking also clears any muted-phase remnant of this TG (see applyDmr's seed logic).
+      return { ...state, dmr: { ...state.dmr, callerId, presented: true, audioRouted: true }, dmrRemnant: null }
     }
     case 0x5c: {
-      // Hang-time teardown (live-QSO-pinned 2026-07-13: fires ~1.2 s after the audio gate closes,
-      // `5c 07 01 …` — the call slot is DONE). The authoritative end-of-call: clear the slice
-      // rather than waiting to infer it from 5e going idle.
-      if (frame.bytes[1] !== 0x07) return state
-      return state.dmr === null ? state : { ...state, dmr: null }
+      // Hang-time teardown (`5c 07 01 …`). NORMALLY the authoritative end-of-call — it fires
+      // ~1.2 s AFTER the audio gate closes, when the call's side has already gone quiet.
+      //
+      // BUT starting a scan makes the radio DISMISS the DMR PRESENTATION with a 5c while the call
+      // is STILL LIVE (wire-pinned 2026-07-14 04:15:02: scan start → 5c, yet 5a shows the call's
+      // side open and it keeps receiving; the 5e stream just stops for the scan). Clearing then
+      // wiped the smeter/caller for a call that hadn't ended, and it never returned (no fresh
+      // 5e/58 arrives during the scan). So honor the teardown only when the CALL'S SIDE has
+      // actually gone quiet; while it's still open, keep the slice (the per-side 5a bit stays
+      // live for a scan-held DMR call — memory: only the per-side bits stream during a scan).
+      if (frame.bytes[1] !== 0x07 || state.dmr === null) return state
+      // The call's side is the value latched at onset; if it's still open, this 5c is a scan
+      // dismissal, not an end-of-call — keep the slice. Unknown side (never latched) → honor it.
+      const side = state.dmr.side
+      const sideStillOpen = side != null && (side === 'a' ? state.signal.aOpen : state.signal.bOpen)
+      return sideStillOpen ? state : { ...state, dmr: null }
     }
     case READ_HEAD:
       return frame.reg === undefined ? state : applyRead(state, frame.reg, frame.bytes)
@@ -340,11 +488,11 @@ function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
     case 0x59: {
       if (!state.dmr || state.dmr.direction !== 'rx') return state
       const last = decodeLastCall(b)
-      if (!last || last.dest == null || state.dmr.dest !== last.dest) return state
+      if (!last || !lastCallMatches(state.dmr, last)) return state
       const callerId = state.dmr.callerId ?? last.callerId
       const alias = state.dmr.alias ?? (last.callerName || null)
       if (state.dmr.presented && callerId === state.dmr.callerId && alias === state.dmr.alias) return state
-      return { ...state, dmr: { ...state.dmr, callerId, alias, presented: true } }
+      return { ...state, dmr: { ...state.dmr, callerId, alias, presented: true }, dmrRemnant: null }
     }
     // `04 5a` / `04 5b` reads (startup enumeration + post-side-swap refresh) carry the same
     // payload as the async pushes, shifted by the `04` prefix — reuse the push decoders so the
@@ -352,7 +500,7 @@ function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
     case 0x5a:
       return applySmeter(state, decodeSmeter(b.slice(1)))
     case 0x5b:
-      return { ...state, audioGate: decodeAudioGate(b.slice(1)) }
+      return applyAudioGate(state, decodeAudioGate(b.slice(1)))
     case 0x5e:
       // The 04 5e READ is the radio's own current-call register — an active call here IS
       // presented (this is the mid-call-connect path; scan-sample ambiguity is async-only).
@@ -482,7 +630,7 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
 
     case 'scan':
       // Start/stop resets the lock + pause (a fresh scan hasn't locked or paused yet).
-      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, parked: false, dwell: false, lockedChannel: null, lastLock: null } }
+      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, parked: false, lockedChannel: null, lastLock: null } }
 
     case 'scanLock': {
       if (state.scan.locked === event.locked) return state
@@ -494,31 +642,33 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
         if (side.channelName) lastLock = { name: side.channelName, freqMHz: side.freqMHz, at: Date.now() }
       }
       // a fresh lock is UNREAD until the lock-follow read names lockedChannel; a drop clears it
-      return { ...state, scan: { ...state.scan, locked: event.locked, dwell: false, lockedChannel: null, lastLock } }
+      return { ...state, scan: { ...state.scan, locked: event.locked, lockedChannel: null, lastLock } }
     }
 
-    case 'scanDwell':
-      // Signal ended but the radio is still PARKED (dropout delay): the locked channel's values
-      // stay current and displayed — only the badge/status changes.
-      if (!state.scan.locked && state.scan.dwell) return state
-      return { ...state, scan: { ...state.scan, locked: false, dwell: true } }
+    case 'scanHold':
+      // Signal ended but the radio is still PARKED (dropout delay / other-side pause — the wire
+      // never says which): the lock releases but the channel's values stay current and displayed
+      // (still sitting on it); the view reads parked-not-receiving as WAITING.
+      if (!state.scan.locked) return state
+      return { ...state, scan: { ...state.scan, locked: false } }
 
     case 'scanRelock':
-      // Re-key inside the dropout window: the radio re-opens the SAME channel without hopping —
-      // lockedChannel is KEPT (no placeholder flash); the session re-reads to reconcile anyway.
+      // Re-key while still parked (dropout window or pause): the radio re-opens the SAME channel
+      // without hopping — lockedChannel is KEPT (no placeholder flash); the session re-reads to
+      // reconcile anyway.
       if (state.scan.locked) return state
-      return { ...state, scan: { ...state.scan, locked: true, dwell: false } }
+      return { ...state, scan: { ...state.scan, locked: true } }
 
     case 'scanResume': {
       // The park lifted — the hop resumed. The channel it sat on becomes the "Last:" history.
       const scan = state.scan
-      if (!scan.locked && !scan.dwell && scan.lockedChannel === null) return state
+      if (!scan.locked && scan.lockedChannel === null) return state
       let lastLock = scan.lastLock
       const side = state.sides[state.selectedSide]
       if (scan.lockedChannel && side.channelName) {
         lastLock = { name: side.channelName, freqMHz: side.freqMHz, at: Date.now() }
       }
-      return { ...state, scan: { ...scan, locked: false, dwell: false, lockedChannel: null, lastLock } }
+      return { ...state, scan: { ...scan, locked: false, lockedChannel: null, lastLock } }
     }
 
     case 'scanPause':
@@ -527,7 +677,14 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
       return { ...state, scan: { ...state.scan, paused: event.paused, pausedChannel: event.paused ? state.scan.pausedChannel : null } }
 
     case 'manualDial':
-      return { ...state, manualDial: event.dial }
+      return { ...state, manualDial: { ...state.manualDial, [event.side]: event.dial } }
+
+    case 'dmrNoLock':
+      // The session's 59 LOCK WINDOW expired (~2 s, wire-measured: an audible call's 59 lands
+      // within ~0.5 s of its first 5e) with the slice still unlocked → the radio is NOT taking
+      // this call. Guarded: a lock racing the timer wins.
+      if (!state.dmr || state.dmr.direction !== 'rx' || state.dmr.presented || state.dmr.noLock) return state
+      return { ...state, dmr: { ...state.dmr, noLock: true } }
 
     case 'dmrCaller':
       // Resolved RadioID caller-id for the CURRENT call only (guard on callerId so a late lookup

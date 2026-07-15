@@ -28,28 +28,28 @@ test('scan lock: the confirm timer reads the locked channel while the radio is q
   assert.equal(rig.state.sides.a.freqMHz, 462.6)
   rig.expectConsistent()
 
-  // signal drops but the radio stays PARKED (dropout delay) → DWELL: values stay current
+  // signal drops but the radio stays PARKED (dropout delay) → WAITING: values stay current
   rig.sim.clearCarrier('a')
   await rig.advance(100)
   assert.equal(rig.state.scan.locked, false)
-  assert.equal(rig.state.scan.dwell, true, 'parked post-signal = dwell')
-  assert.equal(rig.state.scan.lockedChannel, 'GMRS 17', 'the channel is STILL current through the dwell')
+  assert.equal(rig.state.scan.parked, true, 'parked post-signal = the WAITING hold')
+  assert.equal(rig.state.scan.lockedChannel, 'GMRS 17', 'the channel is STILL current through the hold')
 
   // re-key inside the dropout window: relock instantly, same channel, no confirm wait
   rig.sim.setCarrier('a', 3)
   await rig.advance(100)
-  assert.equal(rig.state.scan.locked, true, 're-key inside dwell relocks immediately')
-  assert.equal(rig.state.scan.dwell, false)
+  assert.equal(rig.state.scan.locked, true, 're-key inside the hold relocks immediately')
   assert.equal(rig.state.scan.lockedChannel, 'GMRS 17', 'no placeholder flash on relock')
 
   // signal ends again, then the park lifts → the hop RESUMES; the channel becomes history
   rig.sim.clearCarrier('a')
   await rig.advance(100)
-  assert.equal(rig.state.scan.dwell, true)
+  assert.equal(rig.state.scan.locked, false)
+  assert.equal(rig.state.scan.parked, true)
   rig.sim.scanResume() // park bit clears — the radio's own resume signal
   await rig.advance(100)
   assert.equal(rig.state.scan.locked, false)
-  assert.equal(rig.state.scan.dwell, false)
+  assert.equal(rig.state.scan.parked, false)
   assert.equal(rig.state.scan.lockedChannel, null)
   assert.equal(rig.state.scan.lastLock?.name, 'GMRS 17', 'the dwelled channel became the Last: history')
   assert.equal(rig.state.scan.active, true, 'still scanning')
@@ -92,6 +92,33 @@ test('stop scan restores the pre-scan channel from the live register and resets 
   assert.equal(rig.state.scan.locked, false)
   assert.equal(rig.state.scan.paused, false)
   assert.equal(rig.state.sides.a.channelName, 'LOCAL FM', 'the restore read re-synced the display')
+  rig.expectConsistent()
+  rig.assertClean()
+})
+
+test('stop scan survives a dropped ack: retransmit stops it AND still restores the channel', async (t) => {
+  // Live bug (2026-07-14 02:51): the first 57 48 00 stop got no ack (non-retransmit-safe), and
+  // stopScan had ALREADY nulled scanSide on send — so the retry captured side=null and skipped
+  // the channel-restore read, leaving the side on the stale scan-cursor channel (RMRL BROOMFIELD
+  // shown for what was actually COLCON DENVER). Now: the stop is retransmit-safe, and the follow
+  // teardown + side capture happen on the CONFIRMED ack, so one stop press recovers fully.
+  const rig = await Rig.create(t)
+  rig.session.startScan('a', 0, 'FIRE')
+  await rig.advance(100)
+  rig.sim.scanLand(1, 1, 2) // lands on GMRS 19
+  await rig.advance(1200)
+  assert.equal(rig.state.scan.locked, true)
+  assert.equal(rig.state.sides.a.channelName, 'GMRS 19')
+  rig.sim.scanResume()
+  await rig.advance(50)
+
+  rig.sim.ignoreNext(0x57) // the radio drops the FIRST stop frame (no ack)
+  rig.session.stopScan() // ONE press
+  await rig.advance(1300) // past the ARQ timeout → the stop retransmits and acks
+
+  assert.equal(rig.state.scan.active, false, 'the retransmitted stop still stopped the scan')
+  assert.equal(rig.state.scan.locked, false)
+  assert.equal(rig.state.sides.a.channelName, 'LOCAL FM', 'the restore read fired with the correct side')
   rig.expectConsistent()
   rig.assertClean()
 })
@@ -254,18 +281,22 @@ test('pause parks: the pause-confirm read names the PARKED channel, and a hit th
   assert.equal(rig.state.scan.pausedChannel, parked, 'the parked channel was read and named')
   assert.equal(rig.state.sides.a.channelName, parked, 'the side state carries the parked channel')
 
-  // The user-reported race: the PARKED channel gets signal while the pause still holds — the
-  // recorder must attribute the clip to the parked channel, not the stale pre-scan one.
+  // The user-reported race: the PARKED channel gets signal while the pause still holds. The
+  // audio LATCH means B (first to open) keeps the audio through the overlap — the parked
+  // channel's audio only starts when B releases (the handoff). The recorder must split there
+  // and attribute the second clip to the parked channel, not the stale pre-scan one.
   rig.sim.setCarrier('a', 3)
-  await rig.feedAudio(1500) // through the lock-confirm window (scanning side now receiving)
+  await rig.feedAudio(1500) // overlap: B still holds the audio; A's lock-confirm window runs
+  rig.sim.clearCarrier('b') // B ends while A receives → handoff → split
+  await rig.feedAudio(1500)
   rig.sim.clearCarrier('a')
-  rig.sim.clearCarrier('b')
   await rig.feedAudio(800)
 
-  const clips = await rig.clips(1)
-  assert.ok(clips.length >= 1, 'the parked-channel hit was recorded')
-  assert.equal(clips[0]!.side, 'a')
-  assert.equal(clips[0]!.channelName, parked, 'attributed to the PARKED channel, not the pre-scan one')
+  const clips = await rig.clips(2)
+  assert.equal(clips.length, 2, 'the handoff split the pause-holder clip from the parked-channel hit')
+  assert.equal(clips[0]!.side, 'b', "first clip: B's transmission (the pause holder)")
+  assert.equal(clips[1]!.side, 'a')
+  assert.equal(clips[1]!.channelName, parked, 'attributed to the PARKED channel, not the pre-scan one')
   rig.assertClean()
 })
 
@@ -346,13 +377,17 @@ test('lock first, pause joins, lock drops: pause remains and the parked-channel 
   assert.equal(rig.state.scan.locked, true)
   assert.equal(rig.state.scan.paused, true, 'pause and lock at the same time')
 
-  // the locked channel drops while the other side still receives: lock clears, pause holds,
-  // and the re-armed parked read names the channel the scan is still parked on
+  // the locked channel drops while the other side still receives: the lock releases but the
+  // PAUSE holds the scan — and the radio's park bit is NOT trustworthy here (the sim models the
+  // adversarial bit-clear variant, wire 2026-07-13 22:32). The hold must survive on the pause
+  // alone: the lock's channel data stays current and displayed (WAITING), never a premature
+  // resume that blanks the frequency/name the moment the signal ends (live-reported bug).
   rig.sim.clearCarrier('a')
   await rig.feedAudio(1500)
   assert.equal(rig.state.scan.locked, false)
   assert.equal(rig.state.scan.paused, true)
-  assert.equal(rig.state.scan.pausedChannel, locked, 'parked right where the lock was')
+  assert.equal(rig.state.scan.parked, false, 'park bit reads clear — the adversarial pause variant')
+  assert.equal(rig.state.scan.lockedChannel, locked, 'the held channel stays current through the pause')
 
   rig.sim.clearCarrier('b')
   await rig.feedAudio(1000)

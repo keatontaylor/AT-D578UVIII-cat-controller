@@ -42,12 +42,12 @@ export interface SessionLike {
   listZones(force?: boolean): Promise<{ index: number; name: string }[]>
   listZoneChannels(zoneIndex: number, force?: boolean): Promise<{ position: number; name: string }[]>
   selectZoneChannel(side: SideKey, zoneIndex: number, position: number): void
-  setManualDial(target: number, callType: 'group' | 'private'): void
-  clearManualDial(): void
+  setManualDial(side: SideKey, target: number, callType: 'group' | 'private'): void
+  clearManualDial(side: SideKey): void
   readonly metrics: { retransmits: number }
 }
 
-export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected'
+export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'disconnecting'
 
 /** Startup progress, shown while `connection === 'connecting'` (null otherwise). 'bluetooth' is the
  * link/pairing step the controller owns; the rest are the Session's enumeration steps. */
@@ -81,6 +81,14 @@ export interface LinkEvent {
 }
 
 /** The link-stats report served by `link.stats` — self-contained JSON for pasting into an issue. */
+/** The diagnostics wire capture available for download (populated by the API layer, not the
+ * engine — the pure engine never touches the filesystem). Null when wire logging is off or no
+ * capture exists yet for this session. */
+export interface WireCaptureInfo {
+  readonly filename: string
+  readonly sizeBytes: number
+}
+
 export interface LinkReport {
   readonly generatedAt: string
   readonly connection: ConnectionStatus
@@ -89,6 +97,9 @@ export interface LinkReport {
   readonly metrics: LinkMetrics
   readonly linkConfig: LinkConfig
   readonly events: readonly LinkEvent[]
+  /** Set by the API layer (see ServerDeps.wireCapture) — the current session's downloadable wire
+   * capture, or null when logging is off / nothing captured yet. Absent from the raw engine report. */
+  readonly wireCapture?: WireCaptureInfo | null
 }
 
 const LINK_EVENT_CAP = 200
@@ -387,7 +398,13 @@ export class RadioController {
       await this.pendingTeardown
       return
     }
-    if (this.status === 'disconnected') return
+    if (this.status === 'disconnected' || this.status === 'disconnecting') return
+    // DISCONNECTING is a real, user-visible phase: the teardown (session close, SPP socket, BT
+    // ACL drop) takes seconds, and reporting 'disconnected' only when it's DONE lets the UI grey
+    // out the last-known state instead of lying that the link is already down. It also makes
+    // onDrop (fired by our own transport close) a no-op via its 'connected'-only guard, and
+    // blocks a concurrent connect() until the teardown finished.
+    this.setStatus('disconnecting', this.address)
     await (this.pendingTeardown = this.teardown())
     this.error = null
     this.setStatus('disconnected', null)
@@ -519,11 +536,11 @@ export class RadioController {
   selectZoneChannel(side: SideKey, zoneIndex: number, position: number): void {
     this.requireSession().selectZoneChannel(side, zoneIndex, position)
   }
-  setManualDial(target: number, callType: 'group' | 'private'): void {
-    this.requireSession().setManualDial(target, callType)
+  setManualDial(side: SideKey, target: number, callType: 'group' | 'private'): void {
+    this.requireSession().setManualDial(side, target, callType)
   }
-  clearManualDial(): void {
-    this.requireSession().clearManualDial()
+  clearManualDial(side: SideKey): void {
+    this.requireSession().clearManualDial(side)
   }
 
   private requireSession(): SessionLike {
@@ -580,7 +597,9 @@ export class RadioController {
    * reconnect awaits the ACL drop instead of racing it, then (if the reconnect policy is on and we
    * weren't deliberately disconnected) schedules a capped-backoff re-establish (F1.3). */
   private onDrop(): void {
-    if (this.status === 'disconnected') return
+    // 'disconnecting' = OUR teardown closed the transport — the explicit disconnect() owns the
+    // status transition and there's nothing unexpected to report or reconnect to.
+    if (this.status === 'disconnected' || this.status === 'disconnecting') return
     this.pendingTeardown = this.teardown()
     this.error = 'radio link dropped'
     this.setStatus('disconnected', null)

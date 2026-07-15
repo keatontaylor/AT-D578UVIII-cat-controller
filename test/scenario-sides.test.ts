@@ -169,27 +169,55 @@ test('dual-RX split: B records first; when B ends while A still receives, the cl
   rig.assertClean()
 })
 
-test('dual-RX bounce guard: a brief blip on the clip side while the other side is open does NOT split', async (t) => {
+test('holder handoff: the clip side releasing while the other side is open IS a handoff — split, and reopening does NOT reclaim', async (t) => {
+  // The live-mislabeled case (2026-07-13 19:43:52): B held the audio, blipped 527 ms while A was
+  // receiving, and relocked — but the radio's audio latch had ALREADY handed the audio to A, and
+  // B reopening did not take it back (ear+clip-proven holder-keeps). The old timeout model
+  // bridged the blip and fused 42 s of A's audio into B's clip; the holder model splits at the
+  // true handoff moment.
   const rig = await Rig.create(t, { recorder: true })
   rig.session.selectChannel('b', 1)
   await rig.advance(1500)
 
   rig.sim.setCarrier('b', 3)
   await rig.feedAudio(1500)
-  rig.sim.setCarrier('a', 2) // both open
+  rig.sim.setCarrier('a', 2) // both open — B holds (first to open)
   await rig.feedAudio(500)
 
-  rig.sim.clearCarrier('b') // B bounces for LESS than the tail window…
+  rig.sim.clearCarrier('b') // B releases while A receives → the audio hands to A NOW
   await rig.feedAudio(300)
-  rig.sim.setCarrier('b', 3) // …and comes right back (same conversation)
+  rig.sim.setCarrier('b', 3) // B relocks — but A keeps the audio (no reclaim)
   await rig.feedAudio(1500)
 
   rig.sim.clearCarrier('b')
   rig.sim.clearCarrier('a')
   await rig.feedAudio(1000)
 
+  const clips = await rig.clips(2)
+  assert.equal(clips.length, 2, 'the handoff splits the recording at the true audio boundary')
+  assert.equal(clips[0]!.side, 'b', "first clip: B's transmission (it held until its release)")
+  assert.equal(clips[0]!.channelName, 'RPT ALPHA')
+  assert.equal(clips[1]!.side, 'a', "second clip: A's audio from the handoff moment on")
+  assert.equal(clips[1]!.channelName, 'LOCAL FM')
+  rig.assertClean()
+})
+
+test('holder bounce guard: a brief blip on the holder with NOBODY else receiving does not split or transfer', async (t) => {
+  const rig = await Rig.create(t, { recorder: true })
+  rig.session.selectChannel('b', 1)
+  await rig.advance(1500)
+
+  rig.sim.setCarrier('b', 3)
+  await rig.feedAudio(1500)
+  rig.sim.clearCarrier('b') // FM flutter — no other receiver, so the latch has nowhere to go
+  await rig.feedAudio(300)
+  rig.sim.setCarrier('b', 3)
+  await rig.feedAudio(1500)
+  rig.sim.clearCarrier('b')
+  await rig.feedAudio(1000)
+
   const clips = await rig.clips(1)
-  assert.equal(clips.length, 1, 'a sub-tail bounce bridges — one clip, no split')
+  assert.equal(clips.length, 1, 'a sub-tail flutter bridges — one clip, no split')
   assert.equal(clips[0]!.side, 'b')
   assert.equal(clips[0]!.channelName, 'RPT ALPHA')
   rig.assertClean()

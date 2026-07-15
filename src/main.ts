@@ -14,6 +14,7 @@ import { BluealsaHfp } from './audio'
 import { AudioBridge, wired48kTo8k, type IceServer } from './audio/rtc'
 import { cloudflareTurn, staticIce } from './audio/ice'
 import { Recorder } from './audio/recorder'
+import { ScoKick } from './audio/sco-kick'
 import { PacketService } from './packet/service'
 import { createBtManager, resolveSppChannel } from './bluetooth'
 import { RadioController } from './services/radio-service'
@@ -41,6 +42,9 @@ void radioid
   .catch((e) => console.log(`[radioid] load failed: ${(e as Error).message}`))
 
 const audioLink = new BluealsaHfp((m) => console.log(`[audio] ${m}`))
+// The current session's wire-capture file (set per connect in createTransport; null when logging
+// is disabled). Exposed to the server for the link-stats download.
+let currentWirePath: string | null = null
 const controller = new RadioController({
   resolveCaller: (id) => radioid.lookup(id),
   bt: createBtManager({ ...(ADDRESS ? { address: ADDRESS } : {}), log: (m) => console.log(`[bt] ${m}`) }),
@@ -48,12 +52,18 @@ const controller = new RadioController({
   createTransport: (addr, ch) => {
     const t = new RfcommTransport(addr, ch)
     t.connect()
-    // ANYTONE_WIRE_LOG=1 → NDJSON wire capture per connect (diagnostics; relay-capture schema).
-    // '1' logs under ~/anytone/captures; any other value is used as the target directory.
+    // NDJSON wire capture per connect (diagnostics; relay-capture schema), downloadable from the
+    // link-stats dialog so users can hand a maintainer a capture. ON BY DEFAULT — the download is
+    // meaningless otherwise. ANYTONE_WIRE_LOG: '0'/'off' disables; '1' or unset → ~/anytone/
+    // captures; any other value is the target directory.
     const wireLog = process.env['ANYTONE_WIRE_LOG']
-    if (!wireLog) return t
-    const dir = wireLog === '1' ? `${process.env['HOME']}/anytone/captures` : wireLog
+    if (wireLog === '0' || wireLog === 'off') {
+      currentWirePath = null
+      return t
+    }
+    const dir = !wireLog || wireLog === '1' ? `${process.env['HOME']}/anytone/captures` : wireLog
     const path = `${dir}/v2-wire-${new Date().toISOString().replace(/[:.]/g, '-')}.ndjson`
+    currentWirePath = path
     console.log(`[link] wire tap → ${path}`)
     return tapTransport(t, path)
   },
@@ -214,7 +224,7 @@ const txRecorder = new Recorder(
     // The TG we're transmitting TO: the manual-dial override, the live TX call's dest, else the
     // channel's programmed contact (DMR channels only).
     const talkgroup =
-      rs.manualDial?.target ??
+      rs.manualDial[side]?.target ??
       (rs.dmr?.direction === 'tx' ? rs.dmr.dest : null) ??
       (s.channel && s.channel.type !== 'analog' ? s.channel.contact?.talkgroup ?? null : null)
     return {
@@ -259,6 +269,27 @@ if (RECORDER_AUTOSTART) {
   })
 }
 
+
+// SCO kick experiment (ANYTONE_SCO_KICK=1): at audio-gate open, acquire the HFP sink from OUR
+// side so eSCO comes up ~1.6 s before the radio's own call choreography would bring it up —
+// testing whether the radio sources audio early for an accessory that asks (see sco-kick.ts).
+if (process.env['ANYTONE_SCO_KICK'] === '1') {
+  const scoKick = new ScoKick(
+    () => {
+      const addr = controller.appState.address
+      return addr ? audioLink.playCommand(audioLink.pcmSinkPath(addr, null)) : null
+    },
+    (m) => console.log(`[sco-kick] ${m}`),
+  )
+  controller.onChange((s) => {
+    scoKick.update({
+      gateOpen: audioGateOpen(s.radio),
+      pttBusy: s.radio.ptt !== 'idle',
+      connected: s.connection === 'connected',
+    })
+  })
+  console.log('[sco-kick] experiment enabled — HF-initiated eSCO at audio-gate open')
+}
 
 // Packet TNC (direwolf bridge): RX audio tees to direwolf over UDP, direwolf's TX audio returns
 // via the snd-aloop loopback into the same HFP sink the browser mic uses, and its PTT drives our
@@ -322,6 +353,7 @@ const app = await createServer(
       runtimeCfg.txGain = gain
       saveRuntimeCfg()
     },
+    wireCapture: () => currentWirePath,
   },
   DEV
     ? { viteRoot: fileURLToPath(new URL('../ui', import.meta.url)), basePath: BASE_PATH, pttDeadmanMs: PTT_DEADMAN_MS }

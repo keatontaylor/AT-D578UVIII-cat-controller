@@ -47,6 +47,12 @@ async function copyJson(): Promise<void> {
 const fmtTime = (iso: string): string => new Date(iso).toLocaleTimeString([], { hour12: false })
 const KIND_LABEL: Record<string, string> = { retransmit: 'RETRY', failed: 'FAIL', framing: 'FRAME' }
 
+// The raw wire capture (NDJSON) for the current session — a maintainer can replay it. Served as a
+// download attachment at <base>/wire/current; present only when wire logging captured this session.
+const wireUrl = `${import.meta.env.BASE_URL}wire/current`
+const fmtBytes = (n: number): string =>
+  n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`
+
 const onKey = (e: KeyboardEvent): void => {
   if (e.key === 'Escape') emit('close')
 }
@@ -90,6 +96,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                 <dd>{{ report.metrics.framingIncidents }}</dd>
                 <dt>ARQ config</dt>
                 <dd>timeout {{ report.linkConfig.timeoutMs }} ms · {{ report.linkConfig.maxAttempts }} attempts · gap {{ report.linkConfig.gapMs }} ms<template v-if="report.linkConfig.rxQuietMs"> · RX-quiet {{ report.linkConfig.rxQuietMs }} ms</template></dd>
+                <dt>Wire capture</dt>
+                <dd v-if="report.wireCapture">
+                  <a class="link-stats-wire" :href="wireUrl" :download="report.wireCapture.filename">{{ report.wireCapture.filename }}</a>
+                  · {{ fmtBytes(report.wireCapture.sizeBytes) }}
+                </dd>
+                <dd v-else class="link-stats-muted">not capturing (set ANYTONE_WIRE_LOG=1)</dd>
               </dl>
             </section>
 
@@ -135,6 +147,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 }
 .link-stats-error { margin: 0; color: var(--red, #f85149); font-size: 12px; }
 .link-stats-empty { margin: 0; font-size: 12px; color: var(--text-muted, #8b949e); }
+.link-stats-muted { color: var(--text-muted, #8b949e); font-style: italic; }
+/* Wire-capture download reads as a link (underlined) but white, not the accent blue. */
+.link-stats-wire { color: var(--text, #e6edf3); text-decoration: underline; text-underline-offset: 2px; }
+@media (hover: hover) {
+  .link-stats-wire:hover { color: #fff; }
+}
 .link-stats-count {
   margin-left: 6px; padding: 1px 7px; border-radius: 999px;
   background: var(--surface-2, #21262d); color: var(--text-muted, #8b949e);

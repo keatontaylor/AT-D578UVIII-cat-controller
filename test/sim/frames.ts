@@ -237,17 +237,20 @@ export interface SmeterFields {
   readonly scanning?: boolean
   /** Scan PARKED on a channel (byte 3 bit 0x20) — lock + dropout-delay dwell (live-pinned). */
   readonly parked?: boolean
+  /** FOCUS side (byte 4 bit 0x40, ABSOLUTE): true = side B, false/absent = side A. */
+  readonly focusB?: boolean
 }
 
-/** `5a` async smeter push (16 B): selected RSSI @1, other @2, open mask @5 (bit1 selected /
- * bit2 other), radio-state byte @7 (0x86 = TX, 0x89 = idle — the live-pinned values), native-scan
- * flag @12 (0x02 while a scan runs). */
+/** `5a` async smeter push (16 B): selected RSSI @1, other @2, focus @4 (bit 0x40 = side B,
+ * ABSOLUTE), open mask @5 (bit1 selected / bit2 other), radio-state byte @7 (0x86 = TX, 0x89 =
+ * idle — the live-pinned values), native-scan flag @12 (0x02 while a scan runs). */
 export function smeterPush(f: SmeterFields): Uint8Array {
   const b = new Uint8Array(16)
   b[0] = 0x5a
   b[1] = f.selectedRssi & 0xff
   b[2] = f.otherRssi & 0xff
   b[3] = f.parked ? 0x20 : 0x00
+  b[4] = f.focusB ? 0x40 : 0x00
   b[5] = (f.selectedOpen ? 0x02 : 0) | (f.otherOpen ? 0x04 : 0)
   b[7] = f.transmitting ? 0x86 : 0x89
   b[12] = f.scanning ? 0x02 : 0x00
@@ -281,7 +284,9 @@ export interface DmrCallFields {
 }
 
 /** `5e` DMR link-state push (18 B), VOICE frame: status @1, 0x61 @2, CC @7, src BCD @8-11,
- * slot @12, dest BCD @13-16. A group call carries the TG in BOTH src and dest. */
+ * slot @12, dest BCD @13-16. A group call carries the TG in BOTH src and dest. (A muted
+ * DigiMon-off call sends the SAME frames — muted-vs-monitored is signaled by the ABSENCE of the
+ * 58/59 presentation pushes, not by anything in the 5e itself; byte3-0x20 was falsified live.) */
 export function dmrVoicePush(f: DmrCallFields): Uint8Array {
   const b = new Uint8Array(18)
   b[0] = 0x5e
