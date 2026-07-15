@@ -373,44 +373,80 @@ export function vfoView(rs: RadioState, side: SideKey, connected = true): VfoVie
 // gives us. Lives HERE (not in the composable) so the integration suite exercises the exact
 // strings the lock screen shows — and so it can never disagree with the cards.
 
-/** One side as a lock-screen line. While the scan position is UNKNOWN (hopping, or a stop whose
- * lock-follow read hasn't landed) the zone-line scan status IS the line — `A · SCANNING · SHORT
- * FAVORITES` / `ACQUIRING` / `WAITING` — the same freshness rule (`sweeping`) that keeps the
- * card from flashing the previous channel's values with a LOCK badge. Once a read names the
- * stop: channel + frequency + mode (+ live DMR call) with the scan badge appended. */
+/** One side as a compact lock-screen line: `A · BCSO SOUTH · 159.270`. Used for the idle title
+ * and wherever the OTHER side appears — nothing was demoted into it, so it's just identity.
+ * While the scan position is UNKNOWN (hopping, or a stop whose lock-follow read hasn't landed)
+ * the zone-line scan status IS the line — `A · SCANNING · SHORT FAVORITES` / `ACQUIRING` /
+ * `WAITING` — the same freshness rule (`sweeping`) that keeps the card from flashing the
+ * previous channel's values as current. */
 export function lockScreenSummary(rs: RadioState, side: SideKey): string {
   const v = vfoView(rs, side)
   const s = side.toUpperCase()
   if (v.scanBadge && v.sweeping) return `${s} · ${v.zoneReadout.text}`
   const freq = v.freqMHz != null ? ` · ${v.freqMHz.toFixed(3)}` : ''
-  const dmr = v.dmrLive ? ` · ${v.dmrLive.label}` : ''
-  const lock = v.scanBadge ? ` · ${v.scanBadge.label}` : ''
-  return `${s} ${v.channelName || v.memoryDisplay}${freq} · ${v.typeLabel}${dmr}${lock}`
+  return `${s} · ${v.channelName || v.memoryDisplay}${freq}`
 }
 
-/** The two lock-screen lines (title = the prominent one). Two promotions, strongest first:
+/** The two lock-screen lines. CAR RULE: many car head units show ONLY the title, so it must be
+ * self-sufficient in every state — the identity of what you're hearing (the channel on analog,
+ * the caller on DMR), always led by the owning side (`A ·`/`B ·`). The second line (iOS shows
+ * it, cars don't) carries whatever the title demoted; when nothing was demoted it's the other
+ * side. States, strongest first:
  *
- *  CALLER-ID: an identified, PRESENTED RX DMR call names the caller in the title (same gates as
- *  the on-card caller badge — a muted decode-only call never presents, so it can never be named
- *  here), with the call's channel context as the artist.
+ *  CALLER-ID: an identified PRESENTED RX DMR call (a muted decode-only call never presents, so
+ *  it can never be named here) → `B · KF0WWS · Keaton · Parker, CO · TG 700` (first name only —
+ *  full badge scrolls in a car) / artist = channel + tuple. No `RX ·` prefix: the caller format
+ *  IS the receiving signal.
  *
- *  RX: while audio is flowing (the effective gate — 5b or either 5a squelch bit) and we're not
- *  transmitting, the RECEIVING side takes the title with an `RX ·` prefix. The side is the
- *  recorder's first-RX-wins attribution (activeReceive / the audio-holder latch), so the lock
- *  screen, the cards, and the clip labels always agree about who owns the audio — including
- *  through overlaps and the holder's tail, and including a scan stop (where the line is the
- *  honest ACQUIRING/locked-channel progression from lockScreenSummary).
+ *  RX: while audio flows (the effective gate) and we're not transmitting, the RECEIVING side
+ *  takes the title with an `RX ·` prefix — attributed by the recorder's first-RX-wins holder
+ *  latch (activeReceive), so the lock screen, the cards, and the clip labels always agree who
+ *  owns the audio, through overlaps and the tail. A presented-but-unidentified DMR call keeps
+ *  the TG on the title (`RX · B · JOENX · TG 700`). Analog demotes the freq to the artist
+ *  (`SHERIF RX · 159.270`). Scan info appears ONLY while the position is unknown (`RX · A ·
+ *  ACQUIRING · list`); a locked stop with the read landed is a plain RX title whose artist says
+ *  how it got there (`LOCKED · list`).
  *
  *  Idle: selected side as title, other side as artist. */
 export function lockScreenLines(rs: RadioState): { title: string; artist: string } {
-  const callSide = rs.dmr?.direction === 'rx' ? dmrSideFor(rs) : null
-  const caller = callSide ? dmrCallerBadge(rs.dmr) : null
-  if (caller && callSide) return { title: caller, artist: lockScreenSummary(rs, callSide) }
+  const d = rs.dmr
+  const callSide = d?.direction === 'rx' ? dmrSideFor(rs) : null
+  const otherLine = (side: SideKey): string => lockScreenSummary(rs, side === 'a' ? 'b' : 'a')
+
+  // CALLER-ID promotion — callsign · first-name · location · TG, side-led, parts as available.
+  if (callSide && d && (d.callsign || d.name)) {
+    const target = d.dest != null ? `${d.private ? 'PRIV' : 'TG'} ${d.dest}` : null
+    const title = [callSide.toUpperCase(), d.callsign, d.name?.trim().split(/\s+/)[0], d.location, target]
+      .filter(Boolean).join(' · ')
+    const v = vfoView(rs, callSide)
+    const artist = [v.channelName || v.memoryDisplay, `TS${d.slot} CC${d.colorCode}`].filter(Boolean).join(' · ')
+    return { title, artist }
+  }
+
   const open = audioGateOpen(rs)
   if (open && !isTransmitting(rs)) {
     const rx = activeReceive(rs, open).side
-    return { title: `RX · ${lockScreenSummary(rs, rx)}`, artist: lockScreenSummary(rs, rx === 'a' ? 'b' : 'a') }
+    const v = vfoView(rs, rx)
+    const s = rx.toUpperCase()
+    // scan position unknown → the status is the whole story (SCANNING/ACQUIRING/WAITING · list)
+    if (v.scanBadge && v.sweeping) return { title: `RX · ${s} · ${v.zoneReadout.text}`, artist: otherLine(rx) }
+    const name = v.channelName || v.memoryDisplay
+    // presented DMR call with no DB identity: keep the live TG on the title
+    if (callSide === rx && d && d.dest != null) {
+      const title = `RX · ${s} · ${name} · ${d.private ? 'PRIV' : 'TG'} ${d.dest}`
+      const artist = [v.zoneName || null, `TS${d.slot} CC${d.colorCode}`].filter(Boolean).join(' · ')
+      return { title, artist: artist || otherLine(rx) }
+    }
+    // analog (or no decoded call): the channel name IS the identity; freq demotes to the artist.
+    // A locked scan stop reads as a plain RX — the artist says the scanner is holding it.
+    const freq = v.freqMHz != null ? v.freqMHz.toFixed(3) : null
+    const title = `RX · ${s} · ${name || freq || '—'}`
+    const artist = v.scanBadge
+      ? v.zoneReadout.text // LOCKED · list (or ACQUIRING/WAITING per the zone line's honesty)
+      : [v.zoneName || null, freq].filter(Boolean).join(' · ')
+    return { title, artist: artist || otherLine(rx) }
   }
+
   const sel = rs.selectedSide
-  return { title: lockScreenSummary(rs, sel), artist: lockScreenSummary(rs, sel === 'a' ? 'b' : 'a') }
+  return { title: lockScreenSummary(rs, sel), artist: otherLine(sel) }
 }
