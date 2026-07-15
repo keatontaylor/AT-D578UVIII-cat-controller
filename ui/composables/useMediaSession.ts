@@ -15,8 +15,7 @@
 
 import { onBeforeUnmount, watch, type Ref } from 'vue'
 import { useRadio } from './useRadio'
-import { dmrCallerBadge, dmrSideFor, vfoView } from '../../src/domain/view'
-import type { RadioState, SideKey } from '../../src/domain/state'
+import { lockScreenLines } from '../../src/domain/view'
 
 const ARTWORK_SOURCE = `${import.meta.env.BASE_URL}media/radio.svg`
 const ARTWORK_SIZES = [96, 256, 512] as const
@@ -52,19 +51,6 @@ function renderSvgArtworkAsPng(src: string): Promise<Artwork[]> {
   })
 }
 
-/** One side as a lock-screen line, built on vfoView — the SAME render model the cards use, so
- * the wording (and the scan attribution) always matches the app. While hopping/paused the badge
- * IS the line (`A · SCAN · SHORT FAVORITES`); a locked scan shows the locked channel with the
- * LOCK badge appended; otherwise channel + frequency + mode (+ live DMR call). */
-function sideSummary(rs: RadioState, side: SideKey): string {
-  const v = vfoView(rs, side)
-  if (v.scanBadge && !v.scanBadge.locked) return `${side.toUpperCase()} · ${v.scanBadge.label}`
-  const freq = v.freqMHz != null ? ` · ${v.freqMHz.toFixed(3)}` : ''
-  const dmr = v.dmrLive ? ` · ${v.dmrLive.label}` : ''
-  const lock = v.scanBadge ? ` · ${v.scanBadge.label}` : ''
-  return `${side.toUpperCase()} ${v.channelName || v.memoryDisplay}${freq} · ${v.typeLabel}${dmr}${lock}`
-}
-
 /** Safari 17+ audio routing hint — see the file comment. No-op elsewhere. */
 export function setAudioSessionType(type: 'playback' | 'play-and-record' | 'auto'): void {
   const session = (navigator as unknown as { audioSession?: { type?: string } }).audioSession
@@ -95,17 +81,11 @@ export function useMediaSession(hooks: MediaSessionHooks): void {
   const applyMetadata = (): void => {
     const rs = radio.state.value?.radio
     if (!rs || typeof MediaMetadata === 'undefined') return
-    const sel = (rs.selectedSide ?? 'a') as SideKey
-    const other: SideKey = sel === 'a' ? 'b' : 'a'
-    // CALLER-ID PROMOTION: while an identified RX DMR call is live (presented + the RadioID
-    // lookup resolved a real operator), the caller takes the TITLE — the most prominent lock-
-    // screen line — with the call's channel context (TG/TS/CC via sideSummary) as the artist.
-    // Same gates as the on-card caller badge (dmrSideFor + dmrCallerBadge), so the lock screen
-    // never names a caller the app itself wouldn't show. Reverts on the hang-time teardown.
-    const callSide = rs.dmr?.direction === 'rx' ? dmrSideFor(rs) : null
-    const caller = callSide ? dmrCallerBadge(rs.dmr) : null
-    const title = caller ?? sideSummary(rs, sel)
-    const artist = caller && callSide ? sideSummary(rs, callSide) : sideSummary(rs, other)
+    // The two lines are DOMAIN (lockScreenLines, tested with the view model): caller-id
+    // promotion for a presented RX DMR call, RX promotion of the first-wins receiving side
+    // (the recorder's holder-latch attribution) for everything audible — analog included —
+    // and the scan-honest ACQUIRING/locked progression while the scanner owns a side.
+    const { title, artist } = lockScreenLines(rs)
     const album = radio.state.value?.connected ? 'Remote RX · AT-D578UVIII' : 'Remote RX'
     const key = [title, artist, album, artworkLoaded ? 'png' : 'svg'].join('\u0000')
     if (key === lastKey) return

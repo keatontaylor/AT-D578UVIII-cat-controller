@@ -4,7 +4,7 @@
 // HERE, not in component computeds, means the tests exercise the exact code path the browser
 // renders: there is no second copy of rendering logic to drift.
 
-import { audioGateOpen } from './receive'
+import { activeReceive, audioGateOpen } from './receive'
 import type { RadioState, Scan, SideKey } from './state'
 
 type Dmr = NonNullable<RadioState['dmr']>
@@ -366,4 +366,51 @@ export function vfoView(rs: RadioState, side: SideKey, connected = true): VfoVie
     zoneReadout: zoneReadout(s.zoneName, s.mode, scan, openFor(rs, side)),
     scanLastLock: scanLastLock(scan),
   }
+}
+
+// ── the lock-screen media surface (Media Session metadata) ──────────────────────
+// Same render model as the cards (vfoView), composed into the two lines an OS media widget
+// gives us. Lives HERE (not in the composable) so the integration suite exercises the exact
+// strings the lock screen shows — and so it can never disagree with the cards.
+
+/** One side as a lock-screen line. While the scan position is UNKNOWN (hopping, or a stop whose
+ * lock-follow read hasn't landed) the zone-line scan status IS the line — `A · SCANNING · SHORT
+ * FAVORITES` / `ACQUIRING` / `WAITING` — the same freshness rule (`sweeping`) that keeps the
+ * card from flashing the previous channel's values with a LOCK badge. Once a read names the
+ * stop: channel + frequency + mode (+ live DMR call) with the scan badge appended. */
+export function lockScreenSummary(rs: RadioState, side: SideKey): string {
+  const v = vfoView(rs, side)
+  const s = side.toUpperCase()
+  if (v.scanBadge && v.sweeping) return `${s} · ${v.zoneReadout.text}`
+  const freq = v.freqMHz != null ? ` · ${v.freqMHz.toFixed(3)}` : ''
+  const dmr = v.dmrLive ? ` · ${v.dmrLive.label}` : ''
+  const lock = v.scanBadge ? ` · ${v.scanBadge.label}` : ''
+  return `${s} ${v.channelName || v.memoryDisplay}${freq} · ${v.typeLabel}${dmr}${lock}`
+}
+
+/** The two lock-screen lines (title = the prominent one). Two promotions, strongest first:
+ *
+ *  CALLER-ID: an identified, PRESENTED RX DMR call names the caller in the title (same gates as
+ *  the on-card caller badge — a muted decode-only call never presents, so it can never be named
+ *  here), with the call's channel context as the artist.
+ *
+ *  RX: while audio is flowing (the effective gate — 5b or either 5a squelch bit) and we're not
+ *  transmitting, the RECEIVING side takes the title with an `RX ·` prefix. The side is the
+ *  recorder's first-RX-wins attribution (activeReceive / the audio-holder latch), so the lock
+ *  screen, the cards, and the clip labels always agree about who owns the audio — including
+ *  through overlaps and the holder's tail, and including a scan stop (where the line is the
+ *  honest ACQUIRING/locked-channel progression from lockScreenSummary).
+ *
+ *  Idle: selected side as title, other side as artist. */
+export function lockScreenLines(rs: RadioState): { title: string; artist: string } {
+  const callSide = rs.dmr?.direction === 'rx' ? dmrSideFor(rs) : null
+  const caller = callSide ? dmrCallerBadge(rs.dmr) : null
+  if (caller && callSide) return { title: caller, artist: lockScreenSummary(rs, callSide) }
+  const open = audioGateOpen(rs)
+  if (open && !isTransmitting(rs)) {
+    const rx = activeReceive(rs, open).side
+    return { title: `RX · ${lockScreenSummary(rs, rx)}`, artist: lockScreenSummary(rs, rx === 'a' ? 'b' : 'a') }
+  }
+  const sel = rs.selectedSide
+  return { title: lockScreenSummary(rs, sel), artist: lockScreenSummary(rs, sel === 'a' ? 'b' : 'a') }
 }
