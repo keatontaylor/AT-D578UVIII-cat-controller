@@ -33,12 +33,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         </p>
         <p class="setting-desc">You can change this anytime on the radio or in Settings → Display.</p>
 
-        <label class="subch-dismiss">
-          <input v-model="dontShowAgain" type="checkbox" />
-          <span>Don't show this again</span>
-        </label>
-
-        <div class="value-actions">
+        <div class="value-actions subch-actions">
+          <label class="subch-dismiss">
+            <input v-model="dontShowAgain" type="checkbox" />
+            <span>Don't show this again</span>
+          </label>
           <button type="button" class="btn btn-ghost" @click="emit('keep', dontShowAgain)">Keep it on</button>
           <button type="button" class="btn btn-primary" @click="emit('turnOff', dontShowAgain)">Turn off Sub Channel</button>
         </div>
@@ -48,18 +47,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </template>
 
 <style scoped>
-.subch-dismiss {
-  display: flex;
+/* Footer row: the dismiss checkbox sits left, actions right — one line, wraps on narrow phones. */
+.subch-actions {
   align-items: center;
-  gap: 0.45rem;
-  margin: 0.35rem 0 0.15rem;
-  font-size: 0.82rem;
-  opacity: 0.75;
+  flex-wrap: wrap;
+}
+.subch-dismiss {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  font-size: 12.5px;
+  color: var(--text-muted, #8b949e);
   cursor: pointer;
   user-select: none;
 }
 .subch-dismiss input {
-  accent-color: var(--accent, #4a9eda);
+  margin: 0;
+  accent-color: var(--accent, #58a6ff);
   cursor: pointer;
 }
 </style>
