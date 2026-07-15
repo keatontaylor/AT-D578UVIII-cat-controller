@@ -66,14 +66,14 @@ Everything is optional; defaults suit a Pi with one radio.
 | `ANYTONE_API_PORT` / `ANYTONE_API_HOST` | `8080` / `0.0.0.0` | HTTP/WS bind |
 | `ANYTONE_BASE_PATH` | `/anytone-v2` | Subpath the SPA + API mount at |
 | `ANYTONE_BLUEALSA_DBUS` | `anytone` | Isolated BlueALSA D-Bus suffix |
-| `ANYTONE_RADIOID_CSV` | `~/anytone/data/radioid_user.csv` | RadioID.net user DB for DMR caller ID |
+| `ANYTONE_RADIOID_CSV` | `<repo>/data/radioid_user.csv` | RadioID.net user DB for DMR caller ID |
 | `ANYTONE_RECORDER_AUTOSTART` | on | Squelch/TX recorders arm on connect (`0` opts out) |
 | `ANYTONE_AUDIO_TX_GAIN` | `0.6` | Mic → radio gain |
 | `ANYTONE_CF_TURN_KEY_ID` / `ANYTONE_CF_TURN_API_TOKEN` | unset | Mint Cloudflare TURN credentials for WebRTC relay — put these in a mode-600 systemd drop-in, **never** in the repo |
 | `ANYTONE_ICE_SERVERS` | unset | Static ICE server JSON (alternative to Cloudflare TURN) |
 | `ANYTONE_RTC_FORCE_RELAY` | unset | `1` forces WebRTC through TURN |
 | `ANYTONE_PACKET_*` | see `src/main.ts` | Packet TNC: callsign, ports, TXDELAY/TXTAIL… |
-| `ANYTONE_WIRE_LOG` | unset | `1` → NDJSON wire capture per connect (diagnostics) |
+| `ANYTONE_WIRE_LOG` | on | NDJSON wire capture per connect (diagnostics, downloadable from the link-stats dialog); `0` disables, a path targets a custom directory (default `<repo>/captures`) |
 
 ## Architecture
 

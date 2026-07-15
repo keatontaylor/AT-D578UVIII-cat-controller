@@ -130,7 +130,8 @@ REPO="$(cd "$REPO" && pwd)"
 step "Installing npm dependencies (native modules; may take a while on a Pi)"
 as_user env CI=1 npm --prefix "$REPO" install
 step "Building the UI"
-as_user env CI=1 npm --prefix "$REPO" run build
+# ANYTONE_BASE_PATH is baked into the SPA at build time (vite base) — pass the chosen one through.
+as_user env CI=1 ANYTONE_BASE_PATH="$BASE_PATH" npm --prefix "$REPO" run build
 
 # ── 5. Isolated BlueALSA HFP instance ───────────────────────────────────────
 # A private daemon (org.bluealsa.<suffix>) serving HFP-HF/CVSD ONLY, so the system

@@ -5,7 +5,7 @@
 //   npm run build    vite build → dist/
 //   npm start        serve dist/ + /ws
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, unlinkSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { StateBroadcaster } from './api/broadcast'
@@ -35,7 +35,7 @@ const CHANNEL = Number(process.env['ANYTONE_SPP_CHANNEL'] ?? 2)
 // RadioID.net DMR user DB for caller-id (callsign/name/location). Loaded once in the background —
 // a miss (no CSV) just means live calls show the id/alias without operator details.
 const radioid = new RadioIdDb()
-const RADIOID_CSV = process.env['ANYTONE_RADIOID_CSV'] ?? `${process.env['HOME']}/anytone/data/radioid_user.csv`
+const RADIOID_CSV = process.env['ANYTONE_RADIOID_CSV'] ?? fileURLToPath(new URL('../data/radioid_user.csv', import.meta.url))
 void radioid
   .load(RADIOID_CSV)
   .then((n) => console.log(`[radioid] ${n ? `loaded ${n} operators` : `no DB at ${RADIOID_CSV}`}`))
@@ -54,14 +54,22 @@ const controller = new RadioController({
     t.connect()
     // NDJSON wire capture per connect (diagnostics; relay-capture schema), downloadable from the
     // link-stats dialog so users can hand a maintainer a capture. ON BY DEFAULT — the download is
-    // meaningless otherwise. ANYTONE_WIRE_LOG: '0'/'off' disables; '1' or unset → ~/anytone/
-    // captures; any other value is the target directory.
+    // meaningless otherwise. ANYTONE_WIRE_LOG: '0'/'off' disables; '1' or unset → <repo>/captures
+    // (repo-relative like RECORDINGS_DIR, so it lands inside any install dir); any other value is
+    // the target directory.
     const wireLog = process.env['ANYTONE_WIRE_LOG']
     if (wireLog === '0' || wireLog === 'off') {
       currentWirePath = null
       return t
     }
-    const dir = !wireLog || wireLog === '1' ? `${process.env['HOME']}/anytone/captures` : wireLog
+    const dir = !wireLog || wireLog === '1' ? fileURLToPath(new URL('../captures', import.meta.url)) : wireLog
+    // Retention: keep the newest 20 captures. Default-on + per-connect files with no cleanup
+    // would grow without bound on a long-lived install. Timestamped names sort chronologically.
+    try {
+      for (const f of readdirSync(dir).filter((f) => f.startsWith('v2-wire-') && f.endsWith('.ndjson')).sort().slice(0, -20)) {
+        unlinkSync(`${dir}/${f}`)
+      }
+    } catch { /* dir may not exist yet — tapTransport creates it */ }
     const path = `${dir}/v2-wire-${new Date().toISOString().replace(/[:.]/g, '-')}.ndjson`
     currentWirePath = path
     console.log(`[link] wire tap → ${path}`)
