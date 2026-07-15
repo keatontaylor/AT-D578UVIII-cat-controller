@@ -86,12 +86,13 @@ export function useMediaSession(hooks: MediaSessionHooks): void {
     // (the recorder's holder-latch attribution) for everything audible — analog included —
     // and the scan-honest ACQUIRING/locked progression while the scanner owns a side.
     const { title, artist } = lockScreenLines(rs)
-    const album = radio.state.value?.connected ? 'Remote RX · AT-D578UVIII' : 'Remote RX'
-    const key = [title, artist, album, artworkLoaded ? 'png' : 'svg'].join('\u0000')
+    // No album line: a third text row that only ever said the app's name — it clutters the
+    // display on some devices. Title + artist carry everything.
+    const key = [title, artist, artworkLoaded ? 'png' : 'svg'].join('\u0000')
     if (key === lastKey) return
     lastKey = key
     try {
-      session.metadata = new MediaMetadata({ title, artist, album, artwork })
+      session.metadata = new MediaMetadata({ title, artist, artwork })
     } catch {
       /* metadata is best-effort */
     }
