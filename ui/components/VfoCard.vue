@@ -106,9 +106,11 @@ const cardClass = computed(() => (props.label === 'B' ? 'sub-card' : 'main-card'
 const freqClass = computed(() => (props.label === 'B' ? 'freq-sub' : 'freq-main'))
 
 // FM/DMR badge in the header. The detailed enum settings render (editable) via ChannelSettingsGrid.
-const typeLabel = computed(() => viewTypeLabel(props.config))
+// Mid-scan (sweeping) the position is unknown — the type badge and contact chip come from the
+// STALE pre-scan channel record, so they blank out with the same freshness rule as the frequency.
+const typeLabel = computed(() => (sweeping.value ? '--' : viewTypeLabel(props.config)))
 const vfoMemLabel = computed(() => viewVfoMem(props.mode))
-const contactDisplay = computed(() => viewContact(props.config?.contact))
+const contactDisplay = computed(() => (sweeping.value ? '' : viewContact(props.config?.contact)))
 // TX badge derives from the channel/dial (the radio's 5e tuple is inert on TX — see dmrLiveBadge).
 const dmrLive = computed(() => dmrLiveBadge(props.dmr, { channel: props.config ?? null, dial: props.manualDial ?? null }))
 const dmrCaller = computed(() => dmrCallerBadge(props.dmr))
@@ -303,7 +305,7 @@ function clearDial(): void {
 
     <div class="sql-row">
       <span class="sql-badge sql-badge--mode" title="Channel type">{{ typeLabel }}</span>
-      <span v-if="config?.contact" class="sql-badge sql-badge--contact" :title="config.contact.name ? `DMR contact: ${config.contact.name}` : 'DMR contact'">{{ contactDisplay }}</span>
+      <span v-if="config?.contact && !sweeping" class="sql-badge sql-badge--contact" :title="config.contact.name ? `DMR contact: ${config.contact.name}` : 'DMR contact'">{{ contactDisplay }}</span>
       <span
         v-if="dmrLive"
         class="sql-badge sql-badge--dmr-live"

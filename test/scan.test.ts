@@ -254,6 +254,70 @@ test('scan display: VFO mode reads DIRECT FREQUENCY; scan status wins over VFO',
   assert.deepEqual(zoneReadout('ZONE', 'vfo', scanning), { text: 'SCANNING', tone: 'scanning' })
 })
 
+// ── sweeping blanks the STALE channel-record badges (type + contact), same rule as the freq ──
+import { applyFrame } from '../src/domain/reduce'
+import { smeterPush } from './sim/frames'
+import type { ChannelConfig } from '../src/codec/decode'
+import type { RadioState as RS } from '../src/domain/state'
+
+const dmrChannelCfg = { type: 'digital', colorCode: 1, timeSlot: 1, contact: { callType: 'group', talkgroup: 31088, name: 'CO HD' } } as unknown as ChannelConfig
+
+test('sweeping blanks the type badge and contact chip — a DMR channel in the list must not haunt the hop', () => {
+  let rs = initialState()
+  rs = { ...rs, sides: { ...rs.sides, a: { ...rs.sides.a, channelName: 'COLORADO HD', freqMHz: 449.625, channel: dmrChannelCfg, mode: 'memory' as const } } }
+  let v = vfoView(rs, 'a')
+  assert.equal(v.typeLabel, 'DMR')
+  assert.equal(v.contactDisplay, 'TG 31088')
+
+  // scan resumes → position unknown → the stale record's badges blank with the freq
+  rs = applyEvent(rs, { kind: 'scan', active: true, listName: 'FIRE' })
+  v = vfoView(rs, 'a')
+  assert.equal(v.typeLabel, '--', 'type badge placeholders while sweeping')
+  assert.equal(v.contactDisplay, '', 'contact chip hides while sweeping')
+
+  // lock-follow read lands → the record is current again → badges return
+  rs = applyEvent(rs, { kind: 'scanLock', locked: true })
+  rs = { ...rs, scan: { ...rs.scan, lockedChannel: 'COLORADO HD' } }
+  v = vfoView(rs, 'a')
+  assert.equal(v.typeLabel, 'DMR')
+  assert.equal(v.contactDisplay, 'TG 31088')
+})
+
+// ── scan stop mid-DMR-call: the scanning side's call must clear (its teardown never arrives —
+// the presentation was dismissed by the scan-start 5c and 5e is suppressed while scanning) ──
+
+const liveCall = (side: 'a' | 'b'): NonNullable<RS['dmr']> => ({
+  direction: 'rx', colorCode: 1, slot: 1, source: 3223436, dest: 700, private: false,
+  alias: null, callerId: 3223436, callsign: 'KF0WWS', name: 'Keaton', location: null,
+  presented: true, audioRouted: true, side, noLock: false,
+})
+
+test('stop ack mid-call clears the scanning side\'s call — the tuple/caller chips must not latch', () => {
+  let rs = initialState() // selectedSide 'a'
+  rs = applyEvent(rs, { kind: 'scan', active: true, listName: 'FIRE' })
+  rs = { ...rs, dmr: liveCall('a') }
+  rs = applyEvent(rs, { kind: 'scan', active: false, listName: null })
+  assert.equal(rs.dmr, null)
+})
+
+test('stop ack keeps a live call on the NON-scanning side (independent of the scan)', () => {
+  let rs = initialState()
+  rs = applyEvent(rs, { kind: 'scan', active: true, listName: 'FIRE' })
+  rs = { ...rs, dmr: liveCall('b') }
+  rs = applyEvent(rs, { kind: 'scan', active: false, listName: null })
+  assert.ok(rs.dmr, 'the other side\'s call keeps its normal 5c-driven life')
+})
+
+test('radio-truth scan-off (5a flag drop — panel stop) clears the scanning side\'s call too', () => {
+  let rs = initialState()
+  rs = applyEvent(rs, { kind: 'scan', active: true, listName: 'FIRE' })
+  rs = { ...rs, dmr: liveCall('a') }
+  const bytes = smeterPush({ selectedRssi: 0, otherRssi: 0, selectedOpen: false, otherOpen: false, scanning: false })
+  rs = applyFrame(rs, { head: 0x5a, reg: undefined, bytes, checksumOk: true })
+  assert.equal(rs.scan.active, false, 'the 5a flag reconciles the scan off')
+  assert.equal(rs.dmr, null)
+})
+
 // ── channel picker (04 27 members + 04 2e names → listChannels; absolute select) ──
 import { decodeZoneChannelMembers, decodeChannelName } from '../src/codec/decode'
 import { readChannelName } from '../src/codec/commands'

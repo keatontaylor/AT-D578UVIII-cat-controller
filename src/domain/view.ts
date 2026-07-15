@@ -339,6 +339,9 @@ export function vfoView(rs: RadioState, side: SideKey, connected = true): VfoVie
   const dmr = dmrSideFor(rs) === side || unlocked ? rs.dmr : null
   const scan = rs.selectedSide === side ? rs.scan : null
   const s = rs.sides[side]
+  // Mid-scan the channel record is the STALE pre-scan one — the type badge and contact chip
+  // blank out under the same freshness rule as the frequency (scanSweeping).
+  const sweeping = scanSweeping(scan)
   return {
     side,
     selected: rs.selectedSide === side,
@@ -349,10 +352,10 @@ export function vfoView(rs: RadioState, side: SideKey, connected = true): VfoVie
     zoneName: s.zoneName,
     freqMHz: s.freqMHz,
     txFreqMHz: s.txFreqMHz,
-    typeLabel: typeLabel(s.channel),
+    typeLabel: sweeping ? '--' : typeLabel(s.channel),
     vfoMemLabel: vfoMemLabel(s.mode),
     memoryDisplay: memoryDisplay(s.mode, s.channelName, scan),
-    contactDisplay: contactDisplay(s.channel?.contact),
+    contactDisplay: sweeping ? '' : contactDisplay(s.channel?.contact),
     smeter: smeterFor(rs, side),
     indicator: rxTxIndicator(txSide(rs, side), openFor(rs, side)),
     txState: txStateFor(rs, side),
@@ -362,7 +365,7 @@ export function vfoView(rs: RadioState, side: SideKey, connected = true): VfoVie
     dmrBusy: dmrBusy(rs, side),
     dmrCaller: dmrCallerBadge(dmr),
     scanBadge: scanBadge(scan),
-    sweeping: scanSweeping(scan),
+    sweeping,
     zoneReadout: zoneReadout(s.zoneName, s.mode, scan, openFor(rs, side)),
     scanLastLock: scanLastLock(scan),
   }

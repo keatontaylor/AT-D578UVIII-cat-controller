@@ -175,7 +175,9 @@ function applySmeter(state: RadioState, s: Smeter | null): RadioState {
   if (s.scanning === scan.active && scan.active && scan.parked !== s.parked) {
     scan = { ...scan, parked: s.parked }
   }
+  let scanStopped = false
   if (s.scanning !== scan.active) {
+    scanStopped = !s.scanning
     scan = s.scanning
       ? { active: true, listName: scan.listName, locked: false, paused: false, pausedChannel: null, parked: s.parked, lockedChannel: null, lastLock: null }
       : { active: false, listName: null, locked: false, paused: false, pausedChannel: null, parked: false, lockedChannel: null, lastLock: null }
@@ -217,6 +219,10 @@ function applySmeter(state: RadioState, s: Smeter | null): RadioState {
     const nowOpen = dside === 'a' ? aOpen : bOpen
     if (wasOpen && !nowOpen) dmr = null
   }
+  // Scan ENDING (radio truth — covers panel stops) mid-call: same cleanup as the stop-ack event —
+  // an RX call on the scanning side belongs to a channel the radio just left and its teardown
+  // never arrives (5c fired at scan start, 5e suppressed while scanning).
+  if (dmr && scanStopped && dmr.direction === 'rx' && dmr.side === state.selectedSide) dmr = null
   // Audio-evidence latch, backup to the 59 LOCK: the call's side's OWN 5a open bit RISING while
   // the call is live — per-side audio truth (a muted call streams RSSI but never sets its bit,
   // cap 07-12T17-30-40). EDGE-triggered, never level: a DigiMon-off toggle MID-call tears the
@@ -628,9 +634,16 @@ export function applyEvent(state: RadioState, event: DomainEvent): RadioState {
         ? state
         : patchSide(state, event.side, { volume: event.level })
 
-    case 'scan':
+    case 'scan': {
       // Start/stop resets the lock + pause (a fresh scan hasn't locked or paused yet).
-      return { ...state, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, parked: false, lockedChannel: null, lastLock: null } }
+      // STOP mid-call: a live RX call on the SCANNING (selected) side belongs to a channel the
+      // radio just left, and its teardown never arrives — the presentation was dismissed by the
+      // scan-start 5c and the 5e stream is suppressed while scanning, so without this the tuple
+      // and caller chips latch forever (live bug 2026-07-15). A call on the OTHER side is
+      // independent of the scan and keeps its normal 5c-driven life.
+      const dmr = !event.active && state.dmr?.direction === 'rx' && state.dmr.side === state.selectedSide ? null : state.dmr
+      return { ...state, dmr, scan: { active: event.active, listName: event.listName, locked: false, paused: false, pausedChannel: null, parked: false, lockedChannel: null, lastLock: null } }
+    }
 
     case 'scanLock': {
       if (state.scan.locked === event.locked) return state
