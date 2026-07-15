@@ -428,6 +428,23 @@ export function applyFrame(state: RadioState, frame: DecodedFrame): RadioState {
   }
 }
 
+/** A channel read landing a DIFFERENT identity on the side a live RX call is latched to → the
+ * call belongs to the channel we just LEFT (zone/channel navigation — UI acks trigger the
+ * re-read; panel nav is caught by the next read), and its teardown will never arrive: the 5e
+ * stream died with the old channel (same latch class as the scan-stop bug, live 2026-07-15).
+ * Scan-scoped OUT: the lock-follow read lands a new identity mid-call BY DESIGN (the scan paths
+ * have their own cleanup). A missing prior identity (mid-call connect: the 04 5e seed lands
+ * before the first channel read) is not a departure. */
+function clearDepartedCall(next: RadioState, side: SideKey, prev: RadioState): RadioState {
+  const d = next.dmr
+  if (!d || d.direction !== 'rx' || d.side !== side || next.scan.active) return next
+  const before = prev.sides[side]
+  const after = next.sides[side]
+  if (!before.channelName) return next
+  if (before.channelName === after.channelName && before.freqMHz === after.freqMHz) return next
+  return { ...next, dmr: null }
+}
+
 function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
   switch (reg) {
     case 0x02:
@@ -441,10 +458,10 @@ function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
     // The raw record is stored ALONGSIDE its decoded projection in the same reduction — they can
     // never disagree (record-canonical model: raw is truth, decoded fields are views of it).
     case 0x2c: {
-      return reconcilePausedChannel(patchSide(state, 'a', channelProjectionPatch(b)), 'a')
+      return reconcilePausedChannel(clearDepartedCall(patchSide(state, 'a', channelProjectionPatch(b)), 'a', state), 'a')
     }
     case 0x2d: {
-      return reconcilePausedChannel(patchSide(state, 'b', channelProjectionPatch(b)), 'b')
+      return reconcilePausedChannel(clearDepartedCall(patchSide(state, 'b', channelProjectionPatch(b)), 'b', state), 'b')
     }
     case 0x29:
       return patchSide(state, 'a', { zoneName: decodeZoneName(b), zoneNumber: decodeZoneNumber(b) })

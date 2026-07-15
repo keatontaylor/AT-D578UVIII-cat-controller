@@ -382,3 +382,44 @@ test('decodeClock reads the calendar date; unset (implausible year) → null dat
   const short = decodeClock(hexToBytes('04 51 15 1c 02'))
   assert.equal(short?.year, null)
 })
+
+// ── navigation away from a live call: the channel read that lands the NEW identity clears the
+// call latched to the OLD one (its 5e stream died with the channel — no teardown ever arrives;
+// same latch class as the scan-stop bug, live 2026-07-15) ────────────────────────────────────
+import { channelBlock } from './sim/frames'
+
+const chFrame = (side: 'a' | 'b', name: string, rxMHz: number, digital = true) => {
+  const bytes = channelBlock(side, { name, rxMHz, type: digital ? 'digital' : 'analog', colorCode: 1, timeSlot: 1 }, 1)
+  return { head: 0x04, reg: bytes[1]!, bytes, checksumOk: true }
+}
+
+test('zone/channel nav away from a live call clears it on the new channel read', () => {
+  let s = applyFrame(initialState(), chFrame('a', 'JOENX', 449.7))
+  s = applyFrame(s, frame(GROUP_5E))
+  s = applyFrame(s, frame('59 01 00 00 06 74 98 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 06 74 98 00 00 00'))
+  assert.ok(s.dmr, 'call live before the nav')
+  // user steps to another zone → the session re-reads the side → a DIFFERENT identity lands
+  s = applyFrame(s, chFrame('a', 'BCSO SOUTH', 159.27, false))
+  assert.equal(s.dmr, null, 'the departed channel takes its call with it')
+})
+
+test('a same-channel re-read mid-call does NOT clear it', () => {
+  let s = applyFrame(initialState(), chFrame('a', 'JOENX', 449.7))
+  s = applyFrame(s, frame(GROUP_5E))
+  s = applyFrame(s, chFrame('a', 'JOENX', 449.7))
+  assert.ok(s.dmr, 'identity unchanged — the call survives a refresh')
+})
+
+test('nav on the OTHER side leaves the call alone', () => {
+  let s = applyFrame(initialState(), chFrame('a', 'JOENX', 449.7))
+  s = applyFrame(s, frame(GROUP_5E)) // latches side a (first-wins pick on selected side)
+  s = applyFrame(s, chFrame('b', 'WEATHER', 162.55, false))
+  assert.ok(s.dmr, 'side b navigation is independent of side a\'s call')
+})
+
+test('mid-call connect: the FIRST channel read (no prior identity) is not a departure', () => {
+  let s = applyFrame(initialState(), frame(GROUP_5E)) // call seeds before any channel read
+  assert.ok(s.dmr)
+  s = applyFrame(s, chFrame('a', 'JOENX', 449.7))
+  assert.ok(s.dmr, 'the seed survives the connect-time read landing the real identity')
+})
