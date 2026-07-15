@@ -394,15 +394,16 @@ export function lockScreenSummary(rs: RadioState, side: SideKey): string {
  * side. States, strongest first:
  *
  *  CALLER-ID: an identified PRESENTED RX DMR call (a muted decode-only call never presents, so
- *  it can never be named here) → `B · KF0WWS · Keaton · Parker, CO · TG 700` (first name only —
- *  full badge scrolls in a car) / artist = channel + tuple. No `RX ·` prefix: the caller format
- *  IS the receiving signal.
+ *  it can never be named here) → `B · KF0WWS · Keaton · Parker, CO` (first name only — the full
+ *  badge scrolls in a car) / artist = channel + the delimited tuple `TS1 · CC1 · TG 700`. No
+ *  `RX ·` prefix: the caller format IS the receiving signal.
  *
  *  RX: while audio flows (the effective gate) and we're not transmitting, the RECEIVING side
  *  takes the title with an `RX ·` prefix — attributed by the recorder's first-RX-wins holder
  *  latch (activeReceive), so the lock screen, the cards, and the clip labels always agree who
- *  owns the audio, through overlaps and the tail. A presented-but-unidentified DMR call keeps
- *  the TG on the title (`RX · B · JOENX · TG 700`). Analog demotes the freq to the artist
+ *  owns the audio, through overlaps and the tail. A presented-but-unidentified DMR call titles
+ *  the channel with the full tuple below (`RX · B · JOENX` / `HOTSPOT · TS1 · CC1 · TG 700`).
+ *  Analog demotes the freq to the artist
  *  (`SHERIF RX · 159.270`). Scan info appears ONLY while the position is unknown (`RX · A ·
  *  ACQUIRING · list`); a locked stop with the read landed is a plain RX title whose artist says
  *  how it got there (`LOCKED · list`).
@@ -413,13 +414,17 @@ export function lockScreenLines(rs: RadioState): { title: string; artist: string
   const callSide = d?.direction === 'rx' ? dmrSideFor(rs) : null
   const otherLine = (side: SideKey): string => lockScreenSummary(rs, side === 'a' ? 'b' : 'a')
 
-  // CALLER-ID promotion — callsign · first-name · location · TG, side-led, parts as available.
+  // The full call tuple lives on the SECOND line — slot · color code · talkgroup, delimited.
+  const tuple = (dd: NonNullable<RadioState['dmr']>): string =>
+    [`TS${dd.slot}`, `CC${dd.colorCode}`, dd.dest != null ? `${dd.private ? 'PRIV' : 'TG'} ${dd.dest}` : null]
+      .filter(Boolean).join(' · ')
+
+  // CALLER-ID promotion — callsign · first-name · location, side-led, parts as available.
   if (callSide && d && (d.callsign || d.name)) {
-    const target = d.dest != null ? `${d.private ? 'PRIV' : 'TG'} ${d.dest}` : null
-    const title = [callSide.toUpperCase(), d.callsign, d.name?.trim().split(/\s+/)[0], d.location, target]
+    const title = [callSide.toUpperCase(), d.callsign, d.name?.trim().split(/\s+/)[0], d.location]
       .filter(Boolean).join(' · ')
     const v = vfoView(rs, callSide)
-    const artist = [v.channelName || v.memoryDisplay, `TS${d.slot} CC${d.colorCode}`].filter(Boolean).join(' · ')
+    const artist = [v.channelName || v.memoryDisplay, tuple(d)].filter(Boolean).join(' · ')
     return { title, artist }
   }
 
@@ -431,11 +436,10 @@ export function lockScreenLines(rs: RadioState): { title: string; artist: string
     // scan position unknown → the status is the whole story (SCANNING/ACQUIRING/WAITING · list)
     if (v.scanBadge && v.sweeping) return { title: `RX · ${s} · ${v.zoneReadout.text}`, artist: otherLine(rx) }
     const name = v.channelName || v.memoryDisplay
-    // presented DMR call with no DB identity: keep the live TG on the title
-    if (callSide === rx && d && d.dest != null) {
-      const title = `RX · ${s} · ${name} · ${d.private ? 'PRIV' : 'TG'} ${d.dest}`
-      const artist = [v.zoneName || null, `TS${d.slot} CC${d.colorCode}`].filter(Boolean).join(' · ')
-      return { title, artist: artist || otherLine(rx) }
+    // presented DMR call with no DB identity: channel title, the full tuple (incl. TG) below
+    if (callSide === rx && d) {
+      const artist = [v.zoneName || null, tuple(d)].filter(Boolean).join(' · ')
+      return { title: `RX · ${s} · ${name}`, artist: artist || otherLine(rx) }
     }
     // analog (or no decoded call): the channel name IS the identity; freq demotes to the artist.
     // A locked scan stop reads as a plain RX — the artist says the scanner is holding it.

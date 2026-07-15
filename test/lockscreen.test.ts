@@ -96,7 +96,7 @@ test('a muted decode-only DMR call never lights the RX title (no gate, no open b
 
 // ── DMR promotions: caller identity on top, TG always on the title ─────────────
 
-test('identified caller: side · callsign · first name · location · TG; artist = channel + tuple', () => {
+test('identified caller: side · callsign · first name · location; artist = channel + delimited tuple with TG', () => {
   const s = state((st) => {
     st.selectedSide = 'a'
     st.audioGate = true
@@ -104,8 +104,8 @@ test('identified caller: side · callsign · first name · location · TG; artis
     st.dmr = rxCall({ callerId: 3223436, callsign: 'KF0WWS', name: 'Keaton Taylor', location: 'Parker, CO' })
   })
   const { title, artist } = lockScreenLines(s)
-  assert.equal(title, 'B · KF0WWS · Keaton · Parker, CO · TG 700')
-  assert.equal(artist, 'JOENX · TS1 CC1')
+  assert.equal(title, 'B · KF0WWS · Keaton · Parker, CO')
+  assert.equal(artist, 'JOENX · TS1 · CC1 · TG 700')
 })
 
 test('identified caller with sparse DB row: parts render as available', () => {
@@ -114,10 +114,10 @@ test('identified caller with sparse DB row: parts render as available', () => {
     st.signal.holder = 'b'
     st.dmr = rxCall({ callsign: 'KF0WWS' })
   })
-  assert.equal(lockScreenLines(s).title, 'B · KF0WWS · TG 700')
+  assert.equal(lockScreenLines(s).title, 'B · KF0WWS')
 })
 
-test('presented call, no DB identity: RX title keeps the live TG; artist = zone + tuple', () => {
+test('presented call, no DB identity: channel title; artist = zone + delimited tuple with TG', () => {
   const s = state((st) => {
     st.selectedSide = 'a'
     st.audioGate = true
@@ -125,17 +125,19 @@ test('presented call, no DB identity: RX title keeps the live TG; artist = zone 
     st.dmr = rxCall()
   })
   const { title, artist } = lockScreenLines(s)
-  assert.equal(title, 'RX · B · JOENX · TG 700')
-  assert.equal(artist, 'HOTSPOT · TS1 CC1')
+  assert.equal(title, 'RX · B · JOENX')
+  assert.equal(artist, 'HOTSPOT · TS1 · CC1 · TG 700')
 })
 
-test('private call renders PRIV, not TG', () => {
+test('private call renders PRIV in the tuple, not TG', () => {
   const s = state((st) => {
     st.audioGate = true
     st.signal.holder = 'b'
     st.dmr = rxCall({ private: true, dest: 3223436, callsign: 'KF0WWS', name: 'Keaton Taylor' })
   })
-  assert.equal(lockScreenLines(s).title, 'B · KF0WWS · Keaton · PRIV 3223436')
+  const { title, artist } = lockScreenLines(s)
+  assert.equal(title, 'B · KF0WWS · Keaton')
+  assert.equal(artist, 'JOENX · TS1 · CC1 · PRIV 3223436')
 })
 
 // ── scan honesty: status only while the position is unknown ────────────────────
