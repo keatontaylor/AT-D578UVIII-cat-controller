@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, shallowRef, watchEffect } from 'vue'
+import { computed, ref, shallowRef, watchEffect } from 'vue'
 import { useRadio } from './composables/useRadio'
 import ConnectBar from './components/ConnectBar.vue'
 import VfoCard from './components/VfoCard.vue'
@@ -7,6 +7,7 @@ import RecordingsPanel from './components/RecordingsPanel.vue'
 import StatusFooter from './components/StatusFooter.vue'
 import ConnectProgress from './components/ConnectProgress.vue'
 import PairingPanel from './components/PairingPanel.vue'
+import SubChannelDialog from './components/SubChannelDialog.vue'
 // ALL per-card render derivations live in the shared view model (src/domain/view.ts) — the
 // integration suite asserts on the same functions, so what the tests prove is what renders.
 // Do NOT re-derive rendering logic locally; add it to view.ts (and vfoView) instead.
@@ -80,6 +81,34 @@ function selectSide(side: 'a' | 'b'): void {
 }
 function setVfoMode(side: 'a' | 'b', vfo: boolean): void {
   void radio.setVfoMode(side, vfo)
+}
+
+// Sub-Channel safety net: once per connect, when the settings read lands with sub_channel ON —
+// the mono BT stream carries no side labels, so side attribution is inference; the popup offers
+// the recommended single-receiver state (one settings write) without nagging a deliberate
+// dual-watch operator ("don't show again" persists in localStorage).
+const SUBCH_HINT_KEY = 'anytone.subChannelHintDismissed'
+const showSubChHint = ref(false)
+const subChHintDone = ref(false) // once per connect; re-arms on disconnect
+watchEffect(() => {
+  if (!connected.value) {
+    showSubChHint.value = false
+    subChHintDone.value = false
+    return
+  }
+  if (subChHintDone.value || showSubChHint.value) return
+  if (rs.value?.settings?.['sub_channel'] !== 'on') return
+  if (localStorage.getItem(SUBCH_HINT_KEY) === '1') {
+    subChHintDone.value = true
+    return
+  }
+  showSubChHint.value = true
+})
+function subChHintClose(turnOff: boolean, dontShowAgain: boolean): void {
+  showSubChHint.value = false
+  subChHintDone.value = true
+  if (dontShowAgain) localStorage.setItem(SUBCH_HINT_KEY, '1')
+  if (turnOff) void radio.setSetting('sub_channel', 'off')
 }
 </script>
 
@@ -171,6 +200,12 @@ function setVfoMode(side: 'a' | 'b', vfo: boolean): void {
     <PairingPanel v-else />
 
     <StatusFooter v-if="(connected || disconnecting) && rs" :radio="rs" :metrics="state?.metrics ?? null" />
+
+    <SubChannelDialog
+      v-if="showSubChHint"
+      @turn-off="(d: boolean) => subChHintClose(true, d)"
+      @keep="(d: boolean) => subChHintClose(false, d)"
+    />
   </div>
 </template>
 
