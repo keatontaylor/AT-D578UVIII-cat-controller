@@ -33,11 +33,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         </p>
         <p class="setting-desc">You can change this anytime on the radio or in Settings → Display.</p>
 
-        <div class="value-actions subch-actions">
-          <label class="subch-dismiss">
-            <input v-model="dontShowAgain" type="checkbox" />
-            <span>Don't show this again</span>
-          </label>
+        <label class="subch-dismiss">
+          <input v-model="dontShowAgain" type="checkbox" />
+          <span>Don't show this again</span>
+        </label>
+
+        <div class="value-actions">
           <button type="button" class="btn btn-ghost" @click="emit('keep', dontShowAgain)">Keep it on</button>
           <button type="button" class="btn btn-primary" @click="emit('turnOff', dontShowAgain)">Turn off Sub Channel</button>
         </div>
@@ -47,16 +48,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </template>
 
 <style scoped>
-/* Footer row: the dismiss checkbox sits left, actions right — one line, wraps on narrow phones. */
-.subch-actions {
-  align-items: center;
-  flex-wrap: wrap;
-}
+/* Own row, indented to the body-text gutter (same 14px as .setting-desc) so it reads as the
+   last line of the copy — the footer keeps just the two buttons. */
 .subch-dismiss {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  margin-right: auto;
+  gap: 7px;
+  padding: 10px 14px 0;
   font-size: 12.5px;
   color: var(--text-muted, #8b949e);
   cursor: pointer;

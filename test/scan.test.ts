@@ -138,6 +138,55 @@ test('scan-lock follow: the confirm TIMER fires the lock read with NO further fr
   }
 })
 
+test('PTT mid-scan pauses the follow and names the TX channel (no blind WAITING)', async () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    class PttTransport extends FakeTransport {
+      override write(bytes: Uint8Array): void {
+        if (bytes[0] === 0x56) {
+          this.writes.push(bytesToHex(bytes))
+          this.handler(hexToBytes('03 56 00 00 59'))
+          return
+        }
+        if (bytes[0] === 0x04 && bytes[1] === 0x2c) {
+          this.writes.push(bytesToHex(bytes))
+          this.handler(channelBlock('a', { name: 'BCSO SOUTH', rxMHz: 159.27, type: 'analog' }, 5))
+          return
+        }
+        super.write(bytes)
+      }
+    }
+    const tp = new PttTransport()
+    const s = new Session(tp, { timeoutMs: 1000, maxAttempts: 3, gapMs: 0 }, () => Date.now())
+    s.startScan('a', null, 'FIRE')
+    await flush()
+    assert.equal(s.state.scan.active, true)
+
+    // keyup: the ack (not a later push) engages the pause — the radio parks the scan for our TX
+    s.key()
+    await flush()
+    assert.equal(s.state.ptt, 'keyed')
+    assert.equal(s.state.scan.paused, true, 'confirmed TX parks the scan follow')
+
+    // the pause-confirm window fires the live-channel read → the card names the TX channel
+    // instead of sitting on the sweeping placeholder for the whole keyup
+    mock.timers.tick(1100)
+    await flush()
+    assert.ok(tp.writes.some((w) => w.startsWith('04 2c 01')), 'TX-channel read issued')
+    assert.equal(s.state.scan.pausedChannel, 'BCSO SOUTH')
+    assert.equal(scanSweeping(s.state.scan), false, 'named channel releases the placeholder')
+
+    // release → pause lifts, the scan resumes hopping (pausedChannel cleared with it)
+    s.unkey()
+    await flush()
+    assert.equal(s.state.ptt, 'idle')
+    assert.equal(s.state.scan.paused, false, 'TX end releases the PTT-held pause')
+    assert.equal(s.state.scan.pausedChannel, null)
+  } finally {
+    mock.timers.reset()
+  }
+})
+
 test('scan-lock: RX on the NON-scanning side pauses the scan (no false lock)', async () => {
   mock.timers.enable({ apis: ['setTimeout'] })
   try {
@@ -256,7 +305,7 @@ test('scan display: VFO mode reads DIRECT FREQUENCY; scan status wins over VFO',
 
 // ── sweeping blanks the STALE channel-record badges (type + contact), same rule as the freq ──
 import { applyFrame } from '../src/domain/reduce'
-import { smeterPush } from './sim/frames'
+import { channelBlock, smeterPush } from './sim/frames'
 import type { ChannelConfig } from '../src/codec/decode'
 import type { RadioState as RS } from '../src/domain/state'
 

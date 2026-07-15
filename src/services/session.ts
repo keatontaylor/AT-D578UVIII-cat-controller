@@ -36,6 +36,7 @@ import { decodeChannelName, decodeScanListName, decodeZoneBrowseName, decodeZone
 import { hexStrToBytes } from '../codec/record'
 import { applyEvent, type DomainEvent } from '../domain/reduce'
 import { activeReceive, audioGateOpen } from '../domain/receive'
+import { isTransmitting } from '../domain/view'
 import { initialState, type RadioState, type SideKey } from '../domain/state'
 import { LinkLayer, type Command, type FailReason, type LinkConfig, type SubmitOptions } from '../link/link'
 import type { Transport } from '../transport/types'
@@ -824,8 +825,12 @@ export class Session {
     const otherSide: SideKey = scanSide === 'a' ? 'b' : 'a'
 
     // The radio pauses (parks) the scan while the OTHER side is receiving — regardless of what
-    // the parked channel itself is doing.
-    this.setScanPaused(this.sideReceiving(otherSide))
+    // the parked channel itself is doing. It ALSO parks while WE transmit (PTT keys the current
+    // channel mid-scan): treating that as the same pause is what fires the pause-confirm read
+    // and names the channel the operator is transmitting on — without it the card sat on the
+    // sweeping placeholder for the whole keyup (live bug 2026-07-15). isTransmitting = CONFIRMED
+    // TX only, so an unacked key-down request can't park the display.
+    this.setScanPaused(this.sideReceiving(otherSide) || isTransmitting(this.current))
 
     if (this.sideReceiving(scanSide)) {
       if (this.scanLockRead && !this.current.scan.locked) {
@@ -1004,11 +1009,16 @@ export class Session {
       this.pttDrainTimer = setTimeout(() => {
         this.pttDrainTimer = null
         this.dispatch({ kind: 'ptt', phase: nextPttPhase(this.current.ptt, 'acked') })
+        this.scanFollow() // TX ended → release a PTT-held scan pause
       }, PTT_DRAIN_CAP_MS)
       this.pttDrainTimer.unref?.()
       return
     }
     this.dispatch({ kind: 'ptt', phase: nextPttPhase(this.current.ptt, event) })
+    // PTT state changes park/release the scan (see scanFollow's pause driver) but don't ride the
+    // frame path — re-evaluate here so a keyup mid-scan engages the pause (and its confirm read,
+    // which names the TX channel) on the ACK, not a push later.
+    this.scanFollow()
     if (event !== 'failed') {
       // Key-down confirmed but the operator ALREADY released during the retry window → honor the
       // stored intent right away (the transmitter must never outlive the button press).
@@ -1109,6 +1119,7 @@ export class Session {
     if (this.pttDrainTimer === null || this.radioStillTransmitting()) return
     this.cancelPttDrain()
     this.dispatch({ kind: 'ptt', phase: nextPttPhase(this.current.ptt, 'acked') })
+    this.scanFollow() // TX ended → release a PTT-held scan pause (runs after the frame path's own follow)
   }
 
   private apply(frame: DecodedFrame): void {
