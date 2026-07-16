@@ -35,10 +35,16 @@
 #   ANYTONE_NGINX_TLS=0        plain HTTP only    (default: TLS on, self-signed)
 #   ANYTONE_NGINX_TLS_DAYS     self-signed validity in days (default: 3650)
 #
-set -euo pipefail
+set -eu
+# pipefail is bash/ksh only — enable it where available, but stay POSIX so `curl … | sh`
+# (any /bin/sh: dash, ash) runs this one-shot without a "Bad substitution" / literal-escape mess.
+( set -o pipefail ) 2>/dev/null && set -o pipefail || true
 
 # ── Pretty output ───────────────────────────────────────────────────────────
-if [ -t 1 ]; then BOLD=$'\033[1m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; RESET=$'\033[0m'
+# printf-generated ESC (POSIX) instead of $'\033' ANSI-C quoting (bash-only).
+if [ -t 1 ]; then
+  ESC="$(printf '\033')"
+  BOLD="${ESC}[1m"; GREEN="${ESC}[32m"; YELLOW="${ESC}[33m"; RED="${ESC}[31m"; RESET="${ESC}[0m"
 else BOLD=""; GREEN=""; YELLOW=""; RED=""; RESET=""; fi
 step() { printf '\n%s==> %s%s\n' "$BOLD$GREEN" "$*" "$RESET"; }
 info() { printf '    %s\n' "$*"; }
@@ -103,7 +109,9 @@ fi
 # ── 3. Source checkout ──────────────────────────────────────────────────────
 is_repo() { [ -f "$1/package.json" ] && [ -f "$1/src/main.ts" ]; }
 REPO=""
-self="${BASH_SOURCE[0]:-}"
+# $0 (POSIX) locates the script when run as a file (./install.sh, sh install.sh); when piped
+# (curl … | sh) $0 is the shell name and [ -f ] is false → fall through to PWD / clone.
+self="$0"
 if [ -n "$self" ] && [ -f "$self" ]; then
   sdir="$(cd "$(dirname "$self")" && pwd)"
   if is_repo "$sdir"; then REPO="$sdir"; fi
