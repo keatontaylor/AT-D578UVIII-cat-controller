@@ -8,12 +8,11 @@ const uiDir = fileURLToPath(new URL('./ui', import.meta.url))
 // server serves in production. `~` is the PoC's project-root alias (kept so the copied
 // index.vue resolves `~/components/*` and `~/utils/*` unchanged).
 export default defineConfig({
-  // Mounted behind nginx at ftx.invertedorigin.com/anytone-v2/ (and served directly at
-  // :8080/anytone-v2/). Assets, /ws and /recordings all carry this prefix — the default here
-  // stays in lock-step with main.ts's ANYTONE_BASE_PATH default and the nginx location block,
-  // and a custom ANYTONE_BASE_PATH at build time re-bases the whole SPA (the installer passes
-  // it through).
-  base: `${(process.env['ANYTONE_BASE_PATH'] ?? '/anytone-v2').replace(/\/+$/, '')}/`,
+  // Default mount = ROOT (base '/'), matching main.ts's ANYTONE_BASE_PATH default. Set
+  // ANYTONE_BASE_PATH at BUILD time to re-base the whole SPA under a subpath (assets, /ws,
+  // /recordings all carry the prefix) — the installer passes the chosen path through. Trailing
+  // slashes are stripped, then exactly one is re-added ('' → '/', '/anytone-v2' → '/anytone-v2/').
+  base: `${(process.env['ANYTONE_BASE_PATH'] ?? '').replace(/\/+$/, '')}/`,
   root: uiDir,
   resolve: {
     alias: [

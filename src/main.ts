@@ -28,7 +28,9 @@ const HOST = process.env['ANYTONE_API_HOST'] ?? '0.0.0.0'
 const DEV = process.env['DEV'] === '1'
 // URL sub-path the app is mounted under (behind nginx at ftx.invertedorigin.com/anytone-v2).
 // Must match the Vite `base` the SPA was built with (vite.config.ts). Set '' to serve at root.
-const BASE_PATH = (process.env['ANYTONE_BASE_PATH'] ?? '/anytone-v2').replace(/\/+$/, '')
+// Default mount = ROOT (served straight at http://<host>:PORT/). Set ANYTONE_BASE_PATH to a
+// subpath when serving several apps behind one host; trailing slashes are stripped ('/' → '').
+const BASE_PATH = (process.env['ANYTONE_BASE_PATH'] ?? '').replace(/\/+$/, '')
 const ADDRESS = process.env['ANYTONE_BT_ADDR']
 const CHANNEL = Number(process.env['ANYTONE_SPP_CHANNEL'] ?? 2)
 

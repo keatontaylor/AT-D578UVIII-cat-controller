@@ -73,9 +73,31 @@ REPO_URL="${ANYTONE_REPO_URL:-https://github.com/keatontaylor/AT-D578UVIII-cat-c
 BRANCH="${ANYTONE_BRANCH:-main}"
 INSTALL_DIR="${ANYTONE_INSTALL_DIR:-$USER_HOME/anytone}"
 API_PORT="${ANYTONE_API_PORT:-8080}"
-BASE_PATH="${ANYTONE_BASE_PATH:-/anytone-v2}"
+# Default mount = ROOT: the app serves straight at http://<ip>:PORT/ . Set ANYTONE_BASE_PATH
+# to a subpath (e.g. /anytone-v2) when serving several apps behind one host. Trailing slashes
+# are stripped so both "/foo" and "/foo/" normalize to "/foo" (and "/" → "" = root).
+BASE_PATH="${ANYTONE_BASE_PATH:-}"
+BASE_PATH="$(printf '%s' "$BASE_PATH" | sed 's:/*$::')"
 BLUEALSA_SUFFIX="${ANYTONE_BLUEALSA_DBUS:-anytone}"
 BLUEALSA_SERVICE="bluealsa-${BLUEALSA_SUFFIX}.service"
+
+# ── nginx: OPT-IN (default = direct IP) ─────────────────────────────────────
+# The app serves plain HTTP on :PORT. Browsers only allow MICROPHONE capture (PTT voice) over
+# HTTPS, so without the nginx TLS proxy the mic/PTT won't work (RX listen still does). Honor an
+# explicit env choice; otherwise ASK (reading /dev/tty so it works even under `curl … | sh`);
+# no terminal → default to no proxy (direct IP).
+if [ "${ANYTONE_NO_NGINX:-0}" = "1" ]; then WANT_NGINX=0
+elif [ "${ANYTONE_NGINX:-0}" = "1" ]; then WANT_NGINX=1
+elif [ -r /dev/tty ]; then
+  printf '\n%s?? %s%s\n' "$YELLOW" "Install an nginx HTTPS reverse proxy?" "$RESET"
+  printf '    Without it the app is reachable at http://<this-host>:%s/ over plain HTTP —\n' "$API_PORT"
+  printf '    but the microphone (PTT voice) needs HTTPS, so mic/PTT will NOT work. RX audio still will.\n'
+  printf '    Install nginx + a self-signed HTTPS proxy now? [y/N] '
+  read ans </dev/tty || ans=""
+  case "$ans" in [Yy]*) WANT_NGINX=1 ;; *) WANT_NGINX=0 ;; esac
+else
+  WANT_NGINX=0
+fi
 
 # ── 1. System packages ──────────────────────────────────────────────────────
 # bluez            -> BlueZ stack + sdptool (SPP channel discovery)
@@ -88,7 +110,7 @@ step "Installing system packages"
 as_root apt-get update -qq
 PKGS="git curl ca-certificates dbus rfkill bluez bluez-alsa-utils alsa-utils avahi-utils"
 [ "${ANYTONE_NO_PACKET:-0}" = "1" ] || PKGS="$PKGS direwolf"
-[ "${ANYTONE_NO_NGINX:-0}" = "1" ] || PKGS="$PKGS nginx openssl"
+[ "$WANT_NGINX" = "1" ] && PKGS="$PKGS nginx openssl"
 # shellcheck disable=SC2086
 as_root apt-get install -y $PKGS
 
@@ -254,8 +276,9 @@ EOF
 fi
 
 # ── 8. nginx reverse proxy (HTTPS) ──────────────────────────────────────────
-if [ "${ANYTONE_NO_NGINX:-0}" = "1" ]; then
-  warn "ANYTONE_NO_NGINX=1 — skipping nginx. The app listens on :$API_PORT directly."
+if [ "$WANT_NGINX" != "1" ]; then
+  warn "No nginx proxy — the app listens on :$API_PORT directly (http://<this-host>:$API_PORT${BASE_PATH}/)."
+  warn "Microphone / PTT voice needs HTTPS; over plain HTTP only RX listen works. Re-run with ANYTONE_NGINX=1 to add it."
 else
   step "Installing nginx site 'anytone'"
   SERVER_NAME="${ANYTONE_NGINX_SERVER_NAME:-_}"
@@ -278,9 +301,18 @@ server {
   ssl_certificate     /etc/nginx/ssl/anytone.crt;
   ssl_certificate_key /etc/nginx/ssl/anytone.key;"
   fi
+  # Root mount (default): one plain `location /`. Subpath mount: proxy the prefix WITHOUT
+  # stripping it (the app is subpath-native), plus redirects for the bare prefix and root.
+  if [ -z "$BASE_PATH" ]; then
+    LOCATION_BLOCK="  location / { proxy_pass http://127.0.0.1:${API_PORT}; }"
+  else
+    LOCATION_BLOCK="  location = ${BASE_PATH} { return 302 ${BASE_PATH}/; }
+  location ${BASE_PATH}/ { proxy_pass http://127.0.0.1:${API_PORT}; }
+  location = / { return 302 ${BASE_PATH}/; }"
+  fi
   as_root tee /etc/nginx/sites-available/anytone >/dev/null <<EOF
 # Managed by the AnyTone installer.
-# The app is subpath-native at ${BASE_PATH}/ — proxy WITHOUT stripping the prefix.
+# Proxies the app on :${API_PORT}$( [ -n "$BASE_PATH" ] && printf ' (subpath-native at %s/ — prefix NOT stripped)' "$BASE_PATH" ).
 map \$http_upgrade \$connection_upgrade {
   default upgrade;
   ''      close;
@@ -298,9 +330,7 @@ server {
   proxy_read_timeout 1h;
   proxy_send_timeout 1h;
 
-  location = ${BASE_PATH} { return 302 ${BASE_PATH}/; }
-  location ${BASE_PATH}/ { proxy_pass http://127.0.0.1:${API_PORT}; }
-  location = / { return 302 ${BASE_PATH}/; }
+$LOCATION_BLOCK
 }
 EOF
   as_root ln -sf /etc/nginx/sites-available/anytone /etc/nginx/sites-enabled/anytone
@@ -309,6 +339,10 @@ EOF
 fi
 
 step "Done"
-info "Open:  https://<this-host>${BASE_PATH}/   (or http://<this-host>:${API_PORT}${BASE_PATH}/ without nginx)"
+if [ "$WANT_NGINX" = "1" ]; then
+  info "Open:  https://<this-host>${BASE_PATH}/   (HTTPS — mic/PTT voice works)"
+else
+  info "Open:  http://<this-host>:${API_PORT}${BASE_PATH}/   (plain HTTP — RX audio only; mic/PTT needs HTTPS, re-run with ANYTONE_NGINX=1)"
+fi
 info "Put the radio in pairing mode (Menu → Bluetooth → Pairing), then Scan → Pair → Connect."
 info "Logs:  systemctl --user status anytone-v2"
