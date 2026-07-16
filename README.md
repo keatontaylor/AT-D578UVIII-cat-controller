@@ -51,8 +51,8 @@ the app as a **user** systemd service (`anytone-v2`). The header comments in
 `install.sh` document every `ANYTONE_NO_*` opt-out and env override.
 
 By default the app serves **HTTPS straight at `https://<pi>:8080/`** — open that,
-accept the self-signed certificate warning once, put the radio in pairing mode
-(Menu → Bluetooth → Pairing), scan, pair, connect.
+accept the self-signed certificate warning once, turn the radio on with Bluetooth
+enabled (Menu → Bluetooth → on), then scan, pair, connect.
 
 > **HTTPS is built in** so the microphone (PTT voice) works — browsers only allow mic
 > capture on a secure origin. The app auto-generates a self-signed cert on first boot

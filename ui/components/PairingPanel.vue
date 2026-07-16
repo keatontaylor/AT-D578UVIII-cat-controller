@@ -73,7 +73,7 @@ onMounted(() => void radio.refreshRadios())
           </button>
         </li>
         <li v-if="!radios.length" class="bt-radio-empty">
-          No radios known yet — power the radio on, make it pairable, then Scan.
+          No radios known yet — power the radio on with Bluetooth enabled, then Scan.
         </li>
       </ul>
     </div>

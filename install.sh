@@ -341,5 +341,5 @@ else
   info "Open:  https://<this-host>:${API_PORT}${BASE_PATH}/   (the app's own HTTPS)"
   info "Self-signed cert: your browser warns once — accept it to allow the microphone (PTT voice)."
 fi
-info "Put the radio in pairing mode (Menu → Bluetooth → Pairing), then Scan → Pair → Connect."
+info "Turn the radio on with Bluetooth enabled (Menu → Bluetooth → on), then Scan → Pair → Connect."
 info "Logs:  systemctl --user status anytone-v2"
