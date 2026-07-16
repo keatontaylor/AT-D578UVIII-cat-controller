@@ -170,8 +170,8 @@ export function memoryDisplay(mode: ChannelMode, channelName: string, scan: Scan
  * the operator programmed; the numeric ID stays available on the chip's tooltip (contactId). */
 export function contactDisplay(contact: Contact | null | undefined): string {
   if (!contact) return ''
-  if (contact.name) return contact.name
   const prefix = contact.callType === 'private' ? 'Priv' : contact.callType === 'all' ? 'All' : 'TG'
+  if (contact.name) return `${prefix} ${contact.name}`
   if (contact.talkgroup != null) return `${prefix} ${contact.talkgroup}`
   return contact.callType ? contact.callType.toUpperCase() : '--'
 }
@@ -217,8 +217,25 @@ export function dmrLiveBadge(dmr: Dmr | null | undefined, tx?: TxIdentity): { di
   if (dmr.colorCode != null) parts.push(`CC${dmr.colorCode}`)
   const isPrivate = dmr.private === true
   const value = isPrivate ? dmr.callerId ?? dmr.source : dmr.dest
-  if (value != null) parts.push(`${isPrivate ? 'PRIV' : 'TG'} ${value}`)
+  // Prefer the programmed TG NAME (from the 59 record; GROUP calls only) over the numeric id —
+  // the numeric stays available via dmrLiveTgId (the chip tooltip).
+  const shown = !isPrivate && dmr.destName ? dmr.destName : value
+  if (value != null) parts.push(`${isPrivate ? 'PRIV' : 'TG'} ${shown}`)
   return { direction: 'rx', label: parts.join(' · ') || 'DMR' }
+}
+
+/** The numeric TG / target of the live badge, prefixed (TG 700 / PRIV 310997), for the chip
+ * tooltip so the actual number stays visible even when the label shows a name. '' when unknown. */
+export function dmrLiveTgId(dmr: Dmr | null | undefined, tx?: TxIdentity): string {
+  if (!dmr) return ''
+  if (dmr.direction === 'tx') {
+    const isPrivate = tx?.dial ? tx.dial.callType === 'private' : tx?.channel?.contact?.callType === 'private'
+    const target = tx?.dial?.target ?? tx?.channel?.contact?.talkgroup ?? null
+    return target != null ? `${isPrivate ? 'PRIV' : 'TG'} ${target}` : ''
+  }
+  const isPrivate = dmr.private === true
+  const value = isPrivate ? dmr.callerId ?? dmr.source : dmr.dest
+  return value != null ? `${isPrivate ? 'PRIV' : 'TG'} ${value}` : ''
 }
 
 /** RadioID.net caller-id line (callsign · name · location) — only once the talker id resolved to

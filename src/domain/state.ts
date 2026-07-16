@@ -162,6 +162,11 @@ export const DmrState = z.object({
   presented: z.boolean(),
   /** Caller alias from the 58 talker push (radio's contact-list lookup), when known. */
   alias: z.string().nullable(),
+  /** Programmed contact-list NAME for the call's DESTINATION talkgroup, from the 59 last-call
+   * record (GROUP calls only — a private 59's dest is a stale last-group, so it's not trusted).
+   * Lets the live tuple render "TG RMHAM RM WIDE" instead of "TG 700". Optional: the reducer
+   * always sets it (string|null) when it builds the slice; the key is relaxed for test fixtures. */
+  destName: z.string().nullable().optional(),
   /** The talker's DMR id (58 push) — the key for the RadioID caller-id lookup. */
   callerId: z.number().nullable(),
   /** RadioID.net caller-id (resolved server-side from callerId): a real operator has a callsign,

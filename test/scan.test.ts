@@ -313,12 +313,12 @@ const dmrChannelCfg = { type: 'digital', colorCode: 1, timeSlot: 1, contact: { c
 
 // The contact chip shows the programmed contact-list NAME (channel record byte 79) over the ID.
 const contact = (over: Record<string, unknown>) => ({ callType: 'group', talkgroup: 700, name: '', ...over }) as never
-test('contactDisplay prefers the programmed name; contactId is the numeric companion', () => {
-  assert.equal(contactDisplay(contact({ name: 'RMHAM RM WIDE' })), 'RMHAM RM WIDE')
-  assert.equal(contactId(contact({ name: 'RMHAM RM WIDE' })), 'TG 700')
+test('contactDisplay prefixes the programmed name (TG …); contactId is the numeric companion', () => {
+  assert.equal(contactDisplay(contact({ name: 'NXDN JOE' })), 'TG NXDN JOE')
+  assert.equal(contactId(contact({ name: 'NXDN JOE' })), 'TG 700')
   // no name → fall back to the call-type-prefixed id
   assert.equal(contactDisplay(contact({ name: '' })), 'TG 700')
-  assert.equal(contactDisplay(contact({ name: '', callType: 'private', talkgroup: 310997 })), 'Priv 310997')
+  assert.equal(contactDisplay(contact({ name: 'PARROT', callType: 'private', talkgroup: 310997 })), 'Priv PARROT')
   assert.equal(contactId(contact({ name: 'PARROT', callType: 'private', talkgroup: 310997 })), 'Priv 310997')
   // no contact at all
   assert.equal(contactDisplay(null), '')
@@ -330,7 +330,7 @@ test('sweeping blanks the type badge and contact chip — a DMR channel in the l
   rs = { ...rs, sides: { ...rs.sides, a: { ...rs.sides.a, channelName: 'COLORADO HD', freqMHz: 449.625, channel: dmrChannelCfg, mode: 'memory' as const } } }
   let v = vfoView(rs, 'a')
   assert.equal(v.typeLabel, 'DMR')
-  assert.equal(v.contactDisplay, 'CO HD')
+  assert.equal(v.contactDisplay, 'TG CO HD')
 
   // scan resumes → position unknown → the stale record's badges blank with the freq
   rs = applyEvent(rs, { kind: 'scan', active: true, listName: 'FIRE' })
@@ -343,7 +343,7 @@ test('sweeping blanks the type badge and contact chip — a DMR channel in the l
   rs = { ...rs, scan: { ...rs.scan, lockedChannel: 'COLORADO HD' } }
   v = vfoView(rs, 'a')
   assert.equal(v.typeLabel, 'DMR')
-  assert.equal(v.contactDisplay, 'CO HD')
+  assert.equal(v.contactDisplay, 'TG CO HD')
 })
 
 // ── scan stop mid-DMR-call: the scanning side's call must clear (its teardown never arrives —

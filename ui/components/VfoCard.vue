@@ -22,6 +22,7 @@ import {
   contactId as viewContactId,
   dmrCallerBadge,
   dmrLiveBadge,
+  dmrLiveTgId,
   memoryDisplay as viewMemory,
   scanLastLock as viewScanLastLock,
   scanSweeping as viewScanSweeping,
@@ -115,6 +116,7 @@ const contactDisplay = computed(() => (sweeping.value ? '' : viewContact(props.c
 const contactId = computed(() => viewContactId(props.config?.contact))
 // TX badge derives from the channel/dial (the radio's 5e tuple is inert on TX — see dmrLiveBadge).
 const dmrLive = computed(() => dmrLiveBadge(props.dmr, { channel: props.config ?? null, dial: props.manualDial ?? null }))
+const dmrLiveTg = computed(() => dmrLiveTgId(props.dmr, { channel: props.config ?? null, dial: props.manualDial ?? null }))
 const dmrCaller = computed(() => dmrCallerBadge(props.dmr))
 
 // ── scan-time display honesty (view.ts) ──────────────────────────────────────
@@ -311,7 +313,7 @@ function clearDial(): void {
       <span
         v-if="dmrLive"
         class="sql-badge sql-badge--dmr-live"
-        :title="dmrBusy ? 'Decoded call the radio is not taking — its tuple doesn\'t match this channel (Digital Monitor off)' : `DMR ${dmrLive.direction === 'tx' ? 'transmit' : 'receive'}`"
+        :title="dmrBusy ? 'Decoded call the radio is not taking — its tuple doesn\'t match this channel (Digital Monitor off)' : `DMR ${dmrLive.direction === 'tx' ? 'transmit' : 'receive'}${dmrLiveTg ? ' · ' + dmrLiveTg : ''}`"
       >{{ dmrLive.label }}</span>
       <span v-if="dmrCaller" class="sql-badge sql-badge--dmr-caller" :class="{ 'sql-badge--dmr-nomatch': dmrUnlocked }" title="DMR caller (RadioID)">{{ dmrCaller }}</span>
       <!-- No scan status chip here — the zone line carries SCANNING/PAUSED/LOCKED now; the only

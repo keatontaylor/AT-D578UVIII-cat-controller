@@ -423,3 +423,36 @@ test('mid-call connect: the FIRST channel read (no prior identity) is not a depa
   s = applyFrame(s, chFrame('a', 'JOENX', 449.7))
   assert.ok(s.dmr, 'the seed survives the connect-time read landing the real identity')
 })
+
+// ── the live tuple shows the 59 destination NAME over the TG id (group calls) ──
+import { lastCallPush } from './sim/frames'
+import { dmrLiveBadge, dmrLiveTgId } from '../src/domain/view'
+
+test('a group call\'s 59 record names the TG in the live tuple; the number stays in the tooltip', () => {
+  // GROUP_5E is TG 67498. The 59 record names it "RMHAM RM WIDE".
+  let s = applyFrame(initialState(), frame(GROUP_5E))
+  assert.equal(dmrLiveBadge(s.dmr)!.label, 'TS1 · CC1 · TG 67498', 'id until the 59 lands')
+  s = applyFrame(s, frame(bytesToHex59(lastCallPush({ dest: 67498, destName: 'RMHAM RM WIDE', callerId: 3115427 }))))
+  assert.equal(s.dmr?.destName, 'RMHAM RM WIDE')
+  assert.equal(dmrLiveBadge(s.dmr)!.label, 'TS1 · CC1 · TG RMHAM RM WIDE', 'name substituted')
+  assert.equal(dmrLiveTgId(s.dmr), 'TG 67498', 'numeric TG stays available for the tooltip')
+})
+
+test('a new call (after the old one ends) starts with no carried name — no stale leak', () => {
+  let s = applyFrame(initialState(), frame(GROUP_5E)) // TG 67498
+  s = applyFrame(s, frame(bytesToHex59(lastCallPush({ dest: 67498, destName: 'RMHAM RM WIDE', callerId: 3115427 }))))
+  assert.equal(s.dmr?.destName, 'RMHAM RM WIDE')
+  // the call ends (5e idle clears the slice), THEN a different TG (700) comes in
+  s = applyFrame(s, frame('5e 00 61 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00'))
+  assert.equal(s.dmr, null, 'idle 5e clears the call')
+  const OTHER_5E = '5e 01 61 00 00 00 00 01 00 00 07 00 00 00 00 07 00 00' // TG 700
+  s = applyFrame(s, frame(OTHER_5E))
+  assert.equal(s.dmr?.dest, 700)
+  assert.equal(s.dmr?.destName ?? null, null, 'the fresh call has no stale name')
+  assert.equal(dmrLiveBadge(s.dmr)!.label, 'TS1 · CC1 · TG 700')
+})
+
+// helper: a raw 59 push frame → the frame() shape (head 0x59, no reg)
+function bytesToHex59(bytes: Uint8Array): string {
+  return Array.from(bytes, (x) => x.toString(16).padStart(2, '0')).join(' ')
+}

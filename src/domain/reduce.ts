@@ -351,6 +351,9 @@ function applyDmr(state: RadioState, a: DmrActivity | null, presented = false): 
       private: a.private ?? prev?.private ?? null,
       // Alias + RadioID caller-id ride the 58 push (and its lookup) — carry them across 5e frames.
       alias: prev?.alias ?? null,
+      // The 59 destination name belongs to a specific TG — carry it only while the dest is
+      // unchanged; a new call (different dest) resets it so a stale name never leaks across calls.
+      destName: prev != null && a.dest === prev.dest ? prev.destName ?? null : null,
       callerId: prev?.callerId ?? null,
       callsign: prev?.callsign ?? null,
       name: prev?.name ?? null,
@@ -399,9 +402,12 @@ export function applyFrame(state: RadioState, frame: DecodedFrame): RadioState {
       const last = decodeLastCall(padded)
       if (!last || !lastCallMatches(state.dmr, last)) return state
       const callerId = state.dmr.callerId ?? last.callerId
-      if (state.dmr.presented && state.dmr.audioRouted && callerId === state.dmr.callerId) return state
+      // Programmed TG name — GROUP calls only, and only when the record's dest IS this call's dest
+      // (a private 59 carries a stale last-group dest, so its destName is not ours).
+      const destName = !state.dmr.private && last.dest === state.dmr.dest && last.destName ? last.destName : state.dmr.destName ?? null
+      if (state.dmr.presented && state.dmr.audioRouted && callerId === state.dmr.callerId && destName === (state.dmr.destName ?? null)) return state
       // Locking also clears any muted-phase remnant of this TG (see applyDmr's seed logic).
-      return { ...state, dmr: { ...state.dmr, callerId, presented: true, audioRouted: true }, dmrRemnant: null }
+      return { ...state, dmr: { ...state.dmr, callerId, destName, presented: true, audioRouted: true }, dmrRemnant: null }
     }
     case 0x5c: {
       // Hang-time teardown (`5c 07 01 …`). NORMALLY the authoritative end-of-call — it fires
@@ -514,8 +520,9 @@ function applyRead(state: RadioState, reg: number, b: Uint8Array): RadioState {
       if (!last || !lastCallMatches(state.dmr, last)) return state
       const callerId = state.dmr.callerId ?? last.callerId
       const alias = state.dmr.alias ?? (last.callerName || null)
-      if (state.dmr.presented && callerId === state.dmr.callerId && alias === state.dmr.alias) return state
-      return { ...state, dmr: { ...state.dmr, callerId, alias, presented: true }, dmrRemnant: null }
+      const destName = !state.dmr.private && last.dest === state.dmr.dest && last.destName ? last.destName : state.dmr.destName ?? null
+      if (state.dmr.presented && callerId === state.dmr.callerId && alias === state.dmr.alias && destName === (state.dmr.destName ?? null)) return state
+      return { ...state, dmr: { ...state.dmr, callerId, alias, destName, presented: true }, dmrRemnant: null }
     }
     // `04 5a` / `04 5b` reads (startup enumeration + post-side-swap refresh) carry the same
     // payload as the async pushes, shifted by the `04` prefix — reuse the push decoders so the
