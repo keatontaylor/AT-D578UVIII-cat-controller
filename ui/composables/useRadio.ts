@@ -32,6 +32,9 @@ export interface RecordingClip {
   freqMHz: number | null
   mode: string | null
   talkgroup: number | null
+  /** Programmed contact name for the talkgroup (59 destName / channel contact), preferred over
+   * the numeric id in the timeline lane label. Null when unknown. */
+  talkgroupName?: string | null
   /** 'rx' = radio squelch audio; 'tx' = the operator's own transmission (mic tap). */
   direction?: 'rx' | 'tx'
 }

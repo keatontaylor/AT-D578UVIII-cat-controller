@@ -27,6 +27,9 @@ export interface ClipMeta {
   /** LIVE DMR talkgroup received during the clip, when known — the timeline keys DMR lanes by this
    * so digital-monitor traffic on different TGs lands on separate lines. Null for analog. */
   readonly talkgroup: number | null
+  /** Programmed contact-list NAME for that talkgroup (RX: the 59 last-call record's destName;
+   * TX: the channel contact) — preferred over the numeric id in the timeline. Null when unknown. */
+  readonly talkgroupName: string | null
   /** What this clip captured: 'rx' = radio squelch audio; 'tx' = the OPERATOR's transmission
    * (the browser mic, tapped post-downsample/post-gain — exactly what went to the radio). */
   readonly direction: 'rx' | 'tx'
@@ -58,6 +61,7 @@ export type RadioContext = () => {
   freqMHz: number | null
   mode: string | null
   talkgroup: number | null
+  talkgroupName?: string | null
 }
 
 /** Pushed to subscribers (→ every /ws client) so the timeline updates live with no polling.
@@ -265,7 +269,10 @@ export class Recorder {
         const name = ctx.channelName || null
         const tgChanged = m.talkgroup == null && ctx.talkgroup != null
         const chanChanged = name != null && name !== m.channelName
-        if (tgChanged || chanChanged) {
+        // The 59 destName lands a beat after the call opens (like the TG id) — late-fill it too.
+        const tgName = ctx.talkgroupName ?? null
+        const tgNameChanged = m.talkgroupName == null && tgName != null
+        if (tgChanged || chanChanged || tgNameChanged) {
           c.meta = {
             ...m,
             side: ctx.side,
@@ -273,6 +280,7 @@ export class Recorder {
             freqMHz: ctx.freqMHz ?? m.freqMHz,
             mode: ctx.mode ?? m.mode,
             talkgroup: ctx.talkgroup ?? m.talkgroup,
+            talkgroupName: tgName ?? m.talkgroupName,
           }
           // an applied side upgrade makes the clip evidence-attributed — no further overturns
           if (sideChange) c.openSource = ctx.source
@@ -303,6 +311,7 @@ export class Recorder {
         freqMHz: ctx.freqMHz,
         mode: ctx.mode,
         talkgroup: ctx.talkgroup,
+        talkgroupName: ctx.talkgroupName ?? null,
         direction: this.direction,
       },
       openSource: ctx.source,

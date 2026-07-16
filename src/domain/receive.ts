@@ -37,6 +37,9 @@ export interface ReceiveSnapshot {
    * channel — null otherwise. In digital-monitor mode this differs from the channel's programmed
    * contact, so it's what the recorder keys lanes by (one lane per TG). */
   talkgroup: number | null
+  /** Programmed contact name for that talkgroup (the 59 last-call record's destName; GROUP calls
+   * only) — the recorder prefers it over the numeric TG in the timeline. Null when unknown. */
+  talkgroupName: string | null
   /** FALSE while the attributed side's channel identity is known-stale: the side is mid-scan and
    * the lock-follow read hasn't landed (scan.lockedChannel null). The recorder holds its live
    * announcement (and trusts the late-fill) until this flips true. */
@@ -126,7 +129,10 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
 
   const s = state.sides[side]
   // The live received TG only when this is a DMR RX call landing on a DMR channel.
-  const talkgroup = dmr && dmr.direction === 'rx' && isDmr(s.channel) ? dmr.dest : null
+  const isDmrRx = dmr != null && dmr.direction === 'rx' && isDmr(s.channel)
+  const talkgroup = isDmrRx ? dmr.dest : null
+  // Its programmed name from the 59 record (GROUP calls only — see dmr.destName).
+  const talkgroupName = isDmrRx ? dmr.destName ?? null : null
   return {
     open,
     side,
@@ -137,6 +143,7 @@ export function activeReceive(state: RadioState, open: boolean): ReceiveSnapshot
     freqMHz: s.freqMHz,
     mode: modeLabel(s.channel),
     talkgroup,
+    talkgroupName,
     identityResolved: !(scanUnread && side === state.selectedSide),
   }
 }

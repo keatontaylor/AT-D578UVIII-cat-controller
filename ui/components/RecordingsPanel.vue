@@ -73,10 +73,12 @@ const channelFilter = ref<string>('all')
 type AnyClip = RecordingClip | LiveRecording
 const isDmrClip = (c: AnyClip): boolean => (c.mode === 'DMR' || c.mode === 'D+A') && c.talkgroup != null
 const isTx = (c: AnyClip): boolean => c.direction === 'tx'
+// Lanes stay KEYED by the numeric TG (stable even if the name resolves late), but LABEL with the
+// programmed contact name when we have one (the 59 destName / channel contact) — "TG NXDN JOE".
 const laneKey = (c: AnyClip): string =>
   isDmrClip(c) ? `tg:${c.talkgroup}` : c.channelName || (c.freqMHz != null ? `${c.freqMHz.toFixed(4)} MHz` : (c.side ?? 'clip'))
 const laneLabel = (c: AnyClip): string =>
-  isDmrClip(c) ? `TG ${c.talkgroup}` : c.channelName || (c.freqMHz != null ? `${c.freqMHz.toFixed(4)} MHz` : (c.side ?? 'clip'))
+  isDmrClip(c) ? `TG ${c.talkgroupName || c.talkgroup}` : c.channelName || (c.freqMHz != null ? `${c.freqMHz.toFixed(4)} MHz` : (c.side ?? 'clip'))
 const clipEnd = (c: RecordingClip): number => c.startedAt + c.durationMs
 const passesFilters = (c: RecordingClip): boolean =>
   c.durationMs >= minDurationSec.value * 1000 && (channelFilter.value === 'all' || laneKey(c) === channelFilter.value)

@@ -142,6 +142,40 @@ test("a TX recorder tags direction:'tx' and suffixes ids so same-ms RX/TX clips 
   }
 })
 
+test('the DMR talkgroup NAME is captured and late-fills (like the id) into the clip metadata', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-'))
+  try {
+    const { source, push } = scriptedSource()
+    // The 59 destName resolves a beat after the call opens: start with no name, fill it mid-clip.
+    let open = true
+    let tgName: string | null = null
+    const rec = new Recorder(
+      source as unknown as RxCapture,
+      dir,
+      () => ({ squelchOpen: open, side: 'a' as const, channelName: 'HOTSPOT', freqMHz: 449.7, mode: 'DMR', talkgroup: 700, talkgroupName: tgName }),
+    )
+    const events: RecorderEvent[] = []
+    rec.subscribe((e) => events.push(e))
+    await rec.setEnabled(true)
+    push(30) // clip opens with no name yet
+    const opened = events.find((e) => e.type === 'opened') as { clip: { talkgroup: number; talkgroupName: string | null } }
+    assert.equal(opened.clip.talkgroupName ?? null, null, 'opens before the 59 lands')
+    tgName = 'RMHAM RM WIDE' // the 59 destName arrives
+    push(90) // more audio while open → late-fill applies (well over minDurationMs)
+    open = false
+    push(70) // silence past tailMs → closes the clip
+    await new Promise((r) => setTimeout(r, 50))
+    const saved = events.find((e) => e.type === 'saved') as { clip: { talkgroup: number; talkgroupName: string | null } }
+    assert.ok(saved)
+    assert.equal(saved.clip.talkgroup, 700)
+    assert.equal(saved.clip.talkgroupName, 'RMHAM RM WIDE', 'name late-filled onto the clip')
+    const listed = await rec.list()
+    assert.equal((listed[0] as { talkgroupName?: string }).talkgroupName, 'RMHAM RM WIDE', 'survives the sidecar round-trip')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('list() defaults pre-TX-era sidecars (no direction field) to rx', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rec-'))
   try {

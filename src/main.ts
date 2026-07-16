@@ -223,6 +223,7 @@ const recorder = new Recorder(
       identityResolved: recv.identityResolved,
       mode: recv.mode,
       talkgroup: recv.talkgroup,
+      talkgroupName: recv.talkgroupName,
     }
   },
   (m) => console.log(`[rec] ${m}`),
@@ -249,6 +250,12 @@ const txRecorder = new Recorder(
       rs.manualDial[side]?.target ??
       (rs.dmr?.direction === 'tx' ? rs.dmr.dest : null) ??
       (s.channel && s.channel.type !== 'analog' ? s.channel.contact?.talkgroup ?? null : null)
+    // Its name: the channel's programmed contact name, but only when we're keying THAT contact
+    // (no manual dial to a different target) — a dial has no name to show.
+    const talkgroupName =
+      rs.manualDial[side] == null && s.channel && s.channel.type !== 'analog' && s.channel.contact?.talkgroup === talkgroup
+        ? s.channel.contact?.name || null
+        : null
     return {
       squelchOpen: keyed,
       side,
@@ -256,6 +263,7 @@ const txRecorder = new Recorder(
       freqMHz: s.txFreqMHz ?? s.freqMHz,
       mode: modeLabel(s.channel),
       talkgroup,
+      talkgroupName,
     }
   },
   (m) => console.log(`[rec-tx] ${m}`),
