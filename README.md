@@ -46,16 +46,19 @@ cd ~/anytone && ./install.sh
 
 The installer is idempotent and POSIX-clean (runs under any `/bin/sh` — dash, bash).
 It installs system packages (BlueZ, BlueALSA, Node.js), builds the UI, sets up the
-isolated BlueALSA HFP instance + D-Bus policy + one scoped sudoers rule, installs the
-app as a **user** systemd service (`anytone-v2`), and (optionally) an nginx HTTPS
-reverse proxy. The header comments in `install.sh` document every `ANYTONE_NO_*`
-opt-out and env override.
+isolated BlueALSA HFP instance + D-Bus policy + one scoped sudoers rule, and installs
+the app as a **user** systemd service (`anytone-v2`). The header comments in
+`install.sh` document every `ANYTONE_NO_*` opt-out and env override.
 
-Then open `https://<pi>/anytone-v2/`, put the radio in pairing mode
-(Menu → Bluetooth → Pairing), scan, pair, connect.
+By default the app serves **straight at `http://<pi>:8080/`** — open that, put the
+radio in pairing mode (Menu → Bluetooth → Pairing), scan, pair, connect.
 
-> **HTTPS matters:** browsers only allow microphone capture (PTT voice) on secure
-> origins. The installer's self-signed cert works; a real cert works better.
+> **HTTPS is needed for the mic:** browsers only allow microphone capture (PTT voice)
+> on secure origins, so over plain HTTP **RX listen works but PTT voice does not**. The
+> installer offers to set up an nginx HTTPS reverse proxy (self-signed cert) — answer
+> yes if you want to transmit voice, or add it later with `ANYTONE_NGINX=1`. To mount
+> under a subpath instead of the host root (serving several apps behind one host), set
+> `ANYTONE_BASE_PATH=/anytone-v2`.
 
 > **Tip — Sub Channel:** the radio sends a single mono audio stream with no side
 > label, so the app *infers* which side you're hearing. Recordings, RX indicators, and
@@ -69,7 +72,7 @@ Then open `https://<pi>/anytone-v2/`, put the radio in pairing mode
 npm install
 npm test            # 470+ tests, no radio required (sim rig + captured-wire replays)
 npm run build       # Vite SPA → dist/
-node --import tsx src/main.ts   # Fastify + /ws on :8080, SPA at /anytone-v2/
+node --import tsx src/main.ts   # Fastify + /ws on :8080, SPA at http://localhost:8080/
 ```
 
 ## Configuration (environment)
@@ -79,7 +82,7 @@ Everything is optional; defaults suit a Pi with one radio.
 | Variable | Default | Purpose |
 |---|---|---|
 | `ANYTONE_API_PORT` / `ANYTONE_API_HOST` | `8080` / `0.0.0.0` | HTTP/WS bind |
-| `ANYTONE_BASE_PATH` | `/anytone-v2` | Subpath the SPA + API mount at |
+| `ANYTONE_BASE_PATH` | `` (root) | Subpath to mount the SPA + API under (e.g. `/anytone-v2`); empty = served at `/` |
 | `ANYTONE_BLUEALSA_DBUS` | `anytone` | Isolated BlueALSA D-Bus suffix |
 | `ANYTONE_RADIOID_CSV` | `<repo>/data/radioid_user.csv` | RadioID.net user DB for DMR caller ID |
 | `ANYTONE_RECORDER_AUTOSTART` | on | Squelch/TX recorders arm on connect (`0` opts out) |
