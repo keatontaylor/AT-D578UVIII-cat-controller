@@ -50,15 +50,19 @@ isolated BlueALSA HFP instance + D-Bus policy + one scoped sudoers rule, and ins
 the app as a **user** systemd service (`anytone-v2`). The header comments in
 `install.sh` document every `ANYTONE_NO_*` opt-out and env override.
 
-By default the app serves **straight at `http://<pi>:8080/`** — open that, put the
-radio in pairing mode (Menu → Bluetooth → Pairing), scan, pair, connect.
+By default the app serves **HTTPS straight at `https://<pi>:8080/`** — open that,
+accept the self-signed certificate warning once, put the radio in pairing mode
+(Menu → Bluetooth → Pairing), scan, pair, connect.
 
-> **HTTPS is needed for the mic:** browsers only allow microphone capture (PTT voice)
-> on secure origins, so over plain HTTP **RX listen works but PTT voice does not**. The
-> installer offers to set up an nginx HTTPS reverse proxy (self-signed cert) — answer
-> yes if you want to transmit voice, or add it later with `ANYTONE_NGINX=1`. To mount
-> under a subpath instead of the host root (serving several apps behind one host), set
-> `ANYTONE_BASE_PATH=/anytone-v2`.
+> **HTTPS is built in** so the microphone (PTT voice) works — browsers only allow mic
+> capture on a secure origin. The app auto-generates a self-signed cert on first boot
+> (your browser warns once; accept it). No nginx required. To use your own cert set
+> `ANYTONE_TLS_CERT` / `ANYTONE_TLS_KEY`; for plain HTTP set `ANYTONE_TLS=0` (fine on
+> `localhost`, or behind a TLS-terminating proxy).
+>
+> Prefer a managed TLS front (real cert, one host for several apps)? Install with
+> `ANYTONE_NGINX=1` for an nginx reverse proxy (it terminates TLS; the app then runs
+> plain HTTP behind it). Mount under a subpath with `ANYTONE_BASE_PATH=/anytone-v2`.
 
 > **Tip — Sub Channel:** the radio sends a single mono audio stream with no side
 > label, so the app *infers* which side you're hearing. Recordings, RX indicators, and
@@ -72,7 +76,7 @@ radio in pairing mode (Menu → Bluetooth → Pairing), scan, pair, connect.
 npm install
 npm test            # 470+ tests, no radio required (sim rig + captured-wire replays)
 npm run build       # Vite SPA → dist/
-node --import tsx src/main.ts   # Fastify + /ws on :8080, SPA at http://localhost:8080/
+node --import tsx src/main.ts   # Fastify + /ws on :8080 (HTTPS; ANYTONE_TLS=0 for plain http on localhost)
 ```
 
 ## Configuration (environment)
@@ -83,6 +87,8 @@ Everything is optional; defaults suit a Pi with one radio.
 |---|---|---|
 | `ANYTONE_API_PORT` / `ANYTONE_API_HOST` | `8080` / `0.0.0.0` | HTTP/WS bind |
 | `ANYTONE_BASE_PATH` | `` (root) | Subpath to mount the SPA + API under (e.g. `/anytone-v2`); empty = served at `/` |
+| `ANYTONE_TLS` | on | App serves HTTPS directly (self-signed, auto-generated). `0` = plain HTTP (localhost dev / behind a TLS proxy) |
+| `ANYTONE_TLS_CERT` / `ANYTONE_TLS_KEY` | unset | Use your own PEM cert+key instead of the self-signed one |
 | `ANYTONE_BLUEALSA_DBUS` | `anytone` | Isolated BlueALSA D-Bus suffix |
 | `ANYTONE_RADIOID_CSV` | `<repo>/data/radioid_user.csv` | RadioID.net user DB for DMR caller ID |
 | `ANYTONE_RECORDER_AUTOSTART` | on | Squelch/TX recorders arm on connect (`0` opts out) |
