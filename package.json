@@ -34,10 +34,11 @@
     "koffi": "^3.0.2",
     "zod": "^3.25.76"
   },
-  "comment:overrides": "dbus-next's runtime XML parser (xml2js) → patched; its OPTIONAL usocket build toolchain (node-gyp→request/tar/…) → modern node-gyp (no `request`) + safe tar. usocket is unused (BlueZ system bus uses a filesystem socket plain net handles) and its native build is skipped here, so these clear lockfile-phantom audit findings.",
+  "comment:overrides": "xml2js: dbus-next's runtime XML parser (prototype-pollution fix). node-gyp/tar/glob: modernize the build toolchain that dbus-next's OPTIONAL usocket drags in — node-gyp@11 drops the deprecated `request` and its critical form-data/tough-cookie/uuid/qs chain (audit 11→0), and glob@13 (the current, non-deprecated line — also what @fastify/static@10 uses) silences the isaacs deprecation warning. usocket itself is unused: BlueZ's system bus is a filesystem socket plain net handles.",
   "overrides": {
     "xml2js": "^0.6.2",
     "node-gyp": "^11.0.0",
-    "tar": "^7.4.3"
+    "tar": "^7.4.3",
+    "glob": "^13.0.0"
   }
 }
