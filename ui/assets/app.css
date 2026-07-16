@@ -3113,9 +3113,9 @@ button.recordings-lane-label {
   border-radius: var(--radius, 8px);
   transition: transform .05s;
 }
-wrapped (Scan / VFO-MEM / Manual Dial / Packet) or
+/* Tiles are either wrapped (Scan / VFO-MEM / Manual Dial / Packet) or
    bare (tones, settings). Tiles with an active status color keep it: that color is an inline
-   style,
+   style. */
 .ctl-box--open > .badge {
   border-color: var(--accent, #58a6ff);
   background: rgba(88, 166, 255, .08);
