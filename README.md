@@ -31,16 +31,25 @@ the radio; operate from any browser on the LAN (or beyond, behind a reverse prox
 
 ## Quick start (Raspberry Pi OS / Debian)
 
+One-shot from a fresh machine:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/keatontaylor/AT-D578UVIII-cat-controller/main/install.sh | sh
+```
+
+or from a clone:
+
 ```sh
 git clone https://github.com/keatontaylor/AT-D578UVIII-cat-controller.git ~/anytone
 cd ~/anytone && ./install.sh
 ```
 
-The installer is idempotent. It installs system packages (BlueZ, BlueALSA, Node.js),
-builds the UI, sets up the isolated BlueALSA HFP instance + D-Bus policy + one scoped
-sudoers rule, installs the app as a **user** systemd service (`anytone-v2`), and
-(optionally) an nginx HTTPS reverse proxy. The header comments in `install.sh`
-document every `ANYTONE_NO_*` opt-out.
+The installer is idempotent and POSIX-clean (runs under any `/bin/sh` — dash, bash).
+It installs system packages (BlueZ, BlueALSA, Node.js), builds the UI, sets up the
+isolated BlueALSA HFP instance + D-Bus policy + one scoped sudoers rule, installs the
+app as a **user** systemd service (`anytone-v2`), and (optionally) an nginx HTTPS
+reverse proxy. The header comments in `install.sh` document every `ANYTONE_NO_*`
+opt-out and env override.
 
 Then open `https://<pi>/anytone-v2/`, put the radio in pairing mode
 (Menu → Bluetooth → Pairing), scan, pair, connect.
@@ -48,11 +57,17 @@ Then open `https://<pi>/anytone-v2/`, put the radio in pairing mode
 > **HTTPS matters:** browsers only allow microphone capture (PTT voice) on secure
 > origins. The installer's self-signed cert works; a real cert works better.
 
+> **Tip — Sub Channel:** the radio sends a single mono audio stream with no side
+> label, so the app *infers* which side you're hearing. Recordings, RX indicators, and
+> the media-player display are most reliable with the radio's **Sub Channel off**
+> (single receiver). On connect the app offers a one-click switch; dual-watch still
+> works, just best-effort on side attribution.
+
 ## Manual run (development)
 
 ```sh
 npm install
-npm test            # 400+ tests, no radio required (sim rig + captured-wire replays)
+npm test            # 470+ tests, no radio required (sim rig + captured-wire replays)
 npm run build       # Vite SPA → dist/
 node --import tsx src/main.ts   # Fastify + /ws on :8080, SPA at /anytone-v2/
 ```
