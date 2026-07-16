@@ -9,15 +9,16 @@
 #   ./install.sh
 #
 # What it does (idempotent — safe to re-run):
-#   1. Installs system packages (BlueZ, BlueALSA, ALSA, Avahi, optional direwolf/nginx).
+#   1. Installs system packages (BlueZ, BlueALSA, ALSA, Avahi, openssl, optional direwolf/nginx).
 #   2. Ensures Node.js >= 20 (via NodeSource if missing/too old).
 #   3. Gets the source (uses the current clone, or clones it for you).
 #   4. npm install + npm run build.
 #   5. Installs the isolated BlueALSA HFP instance (org.bluealsa.anytone) + D-Bus policy.
 #   6. Installs ONE scoped sudoers rule (start that BlueALSA service, nothing else).
 #   7. Installs + enables the app as a USER systemd service (anytone-v2) with linger,
-#      so it starts at boot without running as root.
-#   8. (Optional) Installs an nginx HTTPS reverse proxy for the UI.
+#      so it starts at boot without running as root. The app serves HTTPS ITSELF
+#      (auto self-signed cert) so the microphone/PTT works with no proxy.
+#   8. (Optional, ANYTONE_NGINX=1) Installs an nginx TLS front instead.
 #
 # Configurable via env vars:
 #   ANYTONE_REPO_URL     git URL to clone from    (default below)
@@ -25,14 +26,16 @@
 #   ANYTONE_INSTALL_DIR  where to clone if needed (default: <run-user-home>/anytone)
 #   ANYTONE_RUN_USER     user the service runs as (default: the invoking user)
 #   ANYTONE_API_PORT     app port                 (default: 8080)
-#   ANYTONE_BASE_PATH    URL subpath              (default: /anytone-v2)
+#   ANYTONE_BASE_PATH    URL subpath              (default: '' = served at root /)
+#   ANYTONE_TLS=0          serve plain HTTP (default: app-served HTTPS, self-signed)
+#   ANYTONE_TLS_CERT / ANYTONE_TLS_KEY  use your own PEM cert+key (default: self-signed)
+#   ANYTONE_NGINX=1        add an nginx TLS front (app then runs HTTP behind it)
 #   ANYTONE_NO_SERVICE=1   skip the app systemd service
 #   ANYTONE_NO_BT_SETUP=1  skip the BlueALSA service/D-Bus setup
 #   ANYTONE_NO_SUDOERS=1   skip the sudoers rule
-#   ANYTONE_NO_NGINX=1     skip nginx install/configure
 #   ANYTONE_NO_PACKET=1    skip installing direwolf (packet TNC stays available if present)
 #   ANYTONE_NGINX_SERVER_NAME  server_name value  (default: _)
-#   ANYTONE_NGINX_TLS=0        plain HTTP only    (default: TLS on, self-signed)
+#   ANYTONE_NGINX_TLS=0        nginx plain HTTP    (default: nginx TLS on, self-signed)
 #   ANYTONE_NGINX_TLS_DAYS     self-signed validity in days (default: 3650)
 #
 set -eu
@@ -268,10 +271,10 @@ EOF
   info "Check it with:  systemctl --user status anytone-v2"
 fi
 
-# ── 8. nginx reverse proxy (HTTPS) ──────────────────────────────────────────
+# ── 8. nginx reverse proxy (optional TLS front) ─────────────────────────────
 if [ "$WANT_NGINX" != "1" ]; then
-  warn "No nginx proxy — the app listens on :$API_PORT directly (http://<this-host>:$API_PORT${BASE_PATH}/)."
-  warn "Microphone / PTT voice needs HTTPS; over plain HTTP only RX listen works. Re-run with ANYTONE_NGINX=1 to add it."
+  info "No nginx — the app serves HTTPS itself at https://<this-host>:$API_PORT${BASE_PATH}/ (self-signed; accept the browser warning once, and the mic/PTT works)."
+  info "Want a managed TLS front instead? Re-run with ANYTONE_NGINX=1."
 else
   step "Installing nginx site 'anytone'"
   SERVER_NAME="${ANYTONE_NGINX_SERVER_NAME:-_}"
