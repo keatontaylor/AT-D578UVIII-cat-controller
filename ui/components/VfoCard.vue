@@ -19,6 +19,7 @@ import { TONE_COLORS } from '../lib/settings'
 // the integration suite asserts on. Add rendering rules THERE, not as local computeds.
 import {
   contactDisplay as viewContact,
+  contactId as viewContactId,
   dmrCallerBadge,
   dmrLiveBadge,
   memoryDisplay as viewMemory,
@@ -111,6 +112,7 @@ const freqClass = computed(() => (props.label === 'B' ? 'freq-sub' : 'freq-main'
 const typeLabel = computed(() => (sweeping.value ? '--' : viewTypeLabel(props.config)))
 const vfoMemLabel = computed(() => viewVfoMem(props.mode))
 const contactDisplay = computed(() => (sweeping.value ? '' : viewContact(props.config?.contact)))
+const contactId = computed(() => viewContactId(props.config?.contact))
 // TX badge derives from the channel/dial (the radio's 5e tuple is inert on TX — see dmrLiveBadge).
 const dmrLive = computed(() => dmrLiveBadge(props.dmr, { channel: props.config ?? null, dial: props.manualDial ?? null }))
 const dmrCaller = computed(() => dmrCallerBadge(props.dmr))
@@ -305,7 +307,7 @@ function clearDial(): void {
 
     <div class="sql-row">
       <span class="sql-badge sql-badge--mode" title="Channel type">{{ typeLabel }}</span>
-      <span v-if="config?.contact && !sweeping" class="sql-badge sql-badge--contact" :title="config.contact.name ? `DMR contact: ${config.contact.name}` : 'DMR contact'">{{ contactDisplay }}</span>
+      <span v-if="config?.contact && !sweeping" class="sql-badge sql-badge--contact" :title="config.contact.name && contactId ? `DMR contact ${config.contact.name} · ${contactId}` : contactId ? `DMR contact · ${contactId}` : 'DMR contact'">{{ contactDisplay }}</span>
       <span
         v-if="dmrLive"
         class="sql-badge sql-badge--dmr-live"

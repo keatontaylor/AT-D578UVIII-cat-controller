@@ -164,13 +164,24 @@ export function memoryDisplay(mode: ChannelMode, channelName: string, scan: Scan
   return mode === 'memory' ? channelName || '--' : mode === 'vfo' ? 'VFO' : '--'
 }
 
-/** The codeplug DMR contact glance shows the TALKGROUP ID (with its call-type prefix), not the
- * contact name — the ID is the operationally useful value (TG 43114 / Priv 310997 / All). */
+/** The codeplug DMR contact glance: the programmed contact-list NAME when the channel record
+ * carries one (byte 79 — "RMHAM RM WIDE", "JoeNX", "PARROT"), else the call-type-prefixed
+ * talkgroup / private ID (TG 43114 / Priv 310997 / All). The name is the human-readable label
+ * the operator programmed; the numeric ID stays available on the chip's tooltip (contactId). */
 export function contactDisplay(contact: Contact | null | undefined): string {
   if (!contact) return ''
+  if (contact.name) return contact.name
   const prefix = contact.callType === 'private' ? 'Priv' : contact.callType === 'all' ? 'All' : 'TG'
   if (contact.talkgroup != null) return `${prefix} ${contact.talkgroup}`
-  return contact.name || (contact.callType ? contact.callType.toUpperCase() : '--')
+  return contact.callType ? contact.callType.toUpperCase() : '--'
+}
+
+/** The call-type-prefixed talkgroup / private ID (TG 700 / Priv 310997 / All) — the numeric
+ * companion to contactDisplay's name, for the chip tooltip. Empty when there's no id. */
+export function contactId(contact: Contact | null | undefined): string {
+  if (!contact || contact.talkgroup == null) return ''
+  const prefix = contact.callType === 'private' ? 'Priv' : contact.callType === 'all' ? 'All' : 'TG'
+  return `${prefix} ${contact.talkgroup}`
 }
 
 /** TX identity context — the side's programmed channel + any manual-dial override. On TX the
