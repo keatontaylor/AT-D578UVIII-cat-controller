@@ -10,6 +10,7 @@ import { writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { StateBroadcaster } from './api/broadcast'
 import { createServer } from './api/server'
+import { resolveTls } from './api/tls'
 import { BluealsaHfp } from './audio'
 import { AudioBridge, wired48kTo8k, type IceServer } from './audio/rtc'
 import { cloudflareTurn, staticIce } from './audio/ice'
@@ -31,6 +32,17 @@ const DEV = process.env['DEV'] === '1'
 // Default mount = ROOT (served straight at http://<host>:PORT/). Set ANYTONE_BASE_PATH to a
 // subpath when serving several apps behind one host; trailing slashes are stripped ('/' → '').
 const BASE_PATH = (process.env['ANYTONE_BASE_PATH'] ?? '').replace(/\/+$/, '')
+// Serve HTTPS directly (default ON) so a LAN-facing install grants the microphone (PTT voice)
+// without an nginx dependency — self-signed once into <repo>/runtime/tls unless the operator
+// supplies ANYTONE_TLS_CERT/_KEY. ANYTONE_TLS=0 for plain HTTP (localhost dev, or behind a
+// TLS-terminating proxy). null → HTTP.
+const TLS = resolveTls({
+  enabled: !['0', 'false', 'off', 'no'].includes((process.env['ANYTONE_TLS'] ?? '1').toLowerCase()),
+  certPath: process.env['ANYTONE_TLS_CERT'],
+  keyPath: process.env['ANYTONE_TLS_KEY'],
+  dir: process.env['ANYTONE_TLS_DIR'] ?? fileURLToPath(new URL('../runtime/tls', import.meta.url)),
+  log: (m) => console.log(`[tls] ${m}`),
+})
 const ADDRESS = process.env['ANYTONE_BT_ADDR']
 const CHANNEL = Number(process.env['ANYTONE_SPP_CHANNEL'] ?? 2)
 
@@ -366,12 +378,14 @@ const app = await createServer(
     wireCapture: () => currentWirePath,
   },
   DEV
-    ? { viteRoot: fileURLToPath(new URL('../ui', import.meta.url)), basePath: BASE_PATH, pttDeadmanMs: PTT_DEADMAN_MS }
-    : { staticDir: fileURLToPath(new URL('../dist', import.meta.url)), basePath: BASE_PATH, pttDeadmanMs: PTT_DEADMAN_MS },
+    ? { viteRoot: fileURLToPath(new URL('../ui', import.meta.url)), basePath: BASE_PATH, pttDeadmanMs: PTT_DEADMAN_MS, ...(TLS ? { https: TLS } : {}) }
+    : { staticDir: fileURLToPath(new URL('../dist', import.meta.url)), basePath: BASE_PATH, pttDeadmanMs: PTT_DEADMAN_MS, ...(TLS ? { https: TLS } : {}) },
 )
 
 await app.listen({ port: PORT, host: HOST })
-console.log(`[anytone-v2] ${DEV ? 'dev (Vite HMR)' : 'serving SPA'} on http://${HOST}:${PORT}${BASE_PATH}/ — passive; drive connect from the UI`)
+const scheme = TLS ? 'https' : 'http'
+console.log(`[anytone-v2] ${DEV ? 'dev (Vite HMR)' : 'serving SPA'} on ${scheme}://${HOST}:${PORT}${BASE_PATH}/ — passive; drive connect from the UI`)
+if (TLS) console.log('[anytone-v2] TLS on (self-signed unless ANYTONE_TLS_CERT/_KEY set) — browsers will warn once on the cert; accept it to allow the microphone (PTT)')
 
 async function shutdown(): Promise<void> {
   // Finalize any in-flight clip FIRST (saved/discarded pushed, sidecar written) — a restart must

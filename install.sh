@@ -81,36 +81,28 @@ BASE_PATH="$(printf '%s' "$BASE_PATH" | sed 's:/*$::')"
 BLUEALSA_SUFFIX="${ANYTONE_BLUEALSA_DBUS:-anytone}"
 BLUEALSA_SERVICE="bluealsa-${BLUEALSA_SUFFIX}.service"
 
-# ── nginx: OPT-IN (default = direct IP) ─────────────────────────────────────
-# The app serves plain HTTP on :PORT. Browsers only allow MICROPHONE capture (PTT voice) over
-# HTTPS, so without the nginx TLS proxy the mic/PTT won't work (RX listen still does). Honor an
-# explicit env choice; otherwise ASK (reading /dev/tty so it works even under `curl … | sh`);
-# no terminal → default to no proxy (direct IP).
-if [ "${ANYTONE_NO_NGINX:-0}" = "1" ]; then WANT_NGINX=0
-elif [ "${ANYTONE_NGINX:-0}" = "1" ]; then WANT_NGINX=1
-elif [ -r /dev/tty ]; then
-  printf '\n%s?? %s%s\n' "$YELLOW" "Install an nginx HTTPS reverse proxy?" "$RESET"
-  printf '    Without it the app is reachable at http://<this-host>:%s/ over plain HTTP —\n' "$API_PORT"
-  printf '    but the microphone (PTT voice) needs HTTPS, so mic/PTT will NOT work. RX audio still will.\n'
-  printf '    Install nginx + a self-signed HTTPS proxy now? [y/N] '
-  read ans </dev/tty || ans=""
-  case "$ans" in [Yy]*) WANT_NGINX=1 ;; *) WANT_NGINX=0 ;; esac
-else
-  WANT_NGINX=0
-fi
+# ── TLS / proxy ─────────────────────────────────────────────────────────────
+# The app terminates HTTPS ITSELF (self-signed cert, auto-generated on first boot), so a
+# LAN-facing install grants the microphone (PTT voice) with NO proxy dependency. nginx is a
+# pure OPT-IN (ANYTONE_NGINX=1) for anyone who wants a managed TLS front / one host for several
+# apps — it then terminates TLS and the app listens plain HTTP behind it (ANYTONE_TLS=0).
+WANT_NGINX=0
+[ "${ANYTONE_NGINX:-0}" = "1" ] && WANT_NGINX=1
+if [ "$WANT_NGINX" = "1" ]; then APP_TLS=0; else APP_TLS=1; fi
 
 # ── 1. System packages ──────────────────────────────────────────────────────
 # bluez            -> BlueZ stack + sdptool (SPP channel discovery)
 # bluez-alsa-utils -> bluealsa daemon + bluealsa-cli (HFP voice link)
 # alsa-utils       -> arecord/aplay (audio capture/playback plumbing)
 # avahi-utils      -> Bonjour advertisement for the packet TNC (optional feature)
+# openssl          -> auto self-signed TLS cert (the app serves HTTPS directly)
 # direwolf         -> packet soundcard modem (optional feature)
-# nginx + openssl  -> LAN-facing HTTPS reverse proxy (optional)
+# nginx            -> optional managed TLS front (ANYTONE_NGINX=1)
 step "Installing system packages"
 as_root apt-get update -qq
-PKGS="git curl ca-certificates dbus rfkill bluez bluez-alsa-utils alsa-utils avahi-utils"
+PKGS="git curl ca-certificates dbus rfkill bluez bluez-alsa-utils alsa-utils avahi-utils openssl"
 [ "${ANYTONE_NO_PACKET:-0}" = "1" ] || PKGS="$PKGS direwolf"
-[ "$WANT_NGINX" = "1" ] && PKGS="$PKGS nginx openssl"
+[ "$WANT_NGINX" = "1" ] && PKGS="$PKGS nginx"
 # shellcheck disable=SC2086
 as_root apt-get install -y $PKGS
 
@@ -244,6 +236,7 @@ WorkingDirectory=$REPO
 Environment=ANYTONE_API_PORT=$API_PORT
 Environment=ANYTONE_API_HOST=0.0.0.0
 Environment=ANYTONE_BASE_PATH=$BASE_PATH
+Environment=ANYTONE_TLS=$APP_TLS
 Environment=ANYTONE_BLUEALSA_DBUS=$BLUEALSA_SUFFIX
 ExecStart=$(command -v node) --import tsx src/main.ts
 Restart=on-failure
@@ -340,9 +333,10 @@ fi
 
 step "Done"
 if [ "$WANT_NGINX" = "1" ]; then
-  info "Open:  https://<this-host>${BASE_PATH}/   (HTTPS — mic/PTT voice works)"
+  info "Open:  https://<this-host>${BASE_PATH}/   (nginx TLS front)"
 else
-  info "Open:  http://<this-host>:${API_PORT}${BASE_PATH}/   (plain HTTP — RX audio only; mic/PTT needs HTTPS, re-run with ANYTONE_NGINX=1)"
+  info "Open:  https://<this-host>:${API_PORT}${BASE_PATH}/   (the app's own HTTPS)"
+  info "Self-signed cert: your browser warns once — accept it to allow the microphone (PTT voice)."
 fi
 info "Put the radio in pairing mode (Menu → Bluetooth → Pairing), then Scan → Pair → Connect."
 info "Logs:  systemctl --user status anytone-v2"

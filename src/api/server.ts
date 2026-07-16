@@ -78,10 +78,20 @@ export interface ServerOptions {
    * the SPA assets, `/ws`, `/recordings` — is served under this prefix, so the app works
    * identically when hit directly (`:8080/anytone-v2/`) or proxied. Empty → mounted at root. */
   basePath?: string
+  /** TLS: PEM key+cert to serve HTTPS directly (self-signed by default — see resolveTls in
+   * main.ts). Omit for plain HTTP (dev on localhost, or behind a TLS-terminating proxy like
+   * nginx). Browsers only grant microphone access on a secure origin, so a LAN-facing install
+   * needs this (or a proxy) for PTT voice. */
+  https?: { key: Buffer; cert: Buffer }
 }
 
 export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: false })
+  // With `https` set, Fastify infers a TLS server type; the whole app uses only the base
+  // FastifyInstance surface (register/get/listen/.server.address), so normalize the type here.
+  // Two concrete calls (not a union arg) keep each Fastify overload happy.
+  const app = (opts.https
+    ? Fastify({ logger: false, https: opts.https })
+    : Fastify({ logger: false })) as unknown as FastifyInstance
   await app.register(fastifyWebsocket)
 
   // Normalized mount prefix: no trailing slash ('' at root, '/anytone-v2' under nginx). The SPA is
