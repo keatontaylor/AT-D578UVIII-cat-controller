@@ -176,6 +176,40 @@ test('the DMR talkgroup NAME is captured and late-fills (like the id) into the c
   }
 })
 
+test('navigating channels mid-clip does NOT relabel the recording (it keeps the RX channel)', async () => {
+  // Live bug 2026-07-16: an RX clip on COLCON DENVER got saved as LOOKOUT 675 / SHL BOULDER VLY
+  // because the operator browsed channels while the clip was still open — the recorded audio is
+  // the ORIGINAL channel, so a plain same-side name change must not repaint the metadata.
+  const dir = mkdtempSync(join(tmpdir(), 'rec-'))
+  try {
+    const { source, push } = scriptedSource()
+    let open = true
+    let channel = 'COLCON DENVER'
+    // A normally-attributed analog clip: identityResolved is TRUE at open (not a scan placeholder).
+    const rec = new Recorder(
+      source as unknown as RxCapture,
+      dir,
+      () => ({ squelchOpen: open, side: 'a' as const, source: 'analog' as const, channelName: channel, freqMHz: 145.0, mode: 'FM', talkgroup: null, identityResolved: true }),
+    )
+    const events: RecorderEvent[] = []
+    rec.subscribe((e) => events.push(e))
+    await rec.setEnabled(true)
+    push(100) // recording COLCON DENVER
+    channel = 'LOOKOUT 675' // operator browses to another channel mid-clip
+    push(50)
+    channel = 'SHL BOULDER VLY' // …and another
+    push(50)
+    open = false
+    push(70) // tail closes the clip
+    await new Promise((r) => setTimeout(r, 50))
+    const saved = events.find((e) => e.type === 'saved') as { clip: { channelName: string } }
+    assert.ok(saved)
+    assert.equal(saved.clip.channelName, 'COLCON DENVER', 'the clip keeps the channel it actually recorded')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('list() defaults pre-TX-era sidecars (no direction field) to rx', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rec-'))
   try {

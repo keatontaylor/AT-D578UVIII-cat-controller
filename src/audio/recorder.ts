@@ -123,6 +123,10 @@ export class Recorder {
     /** The single `opened` announcement went out (held while identity is unresolved). */
     announced: boolean
     announceTimer?: ReturnType<typeof setTimeout> | undefined
+    /** The clip OPENED on a known-stale channel name (mid-scan, lock-follow read not landed): the
+     * channel late-fill is armed until the real name resolves. FALSE for a normally-attributed
+     * clip, so a mid-clip channel change (the operator navigating) can never relabel it. */
+    channelPending: boolean
   } | null = null
   private readonly listeners = new Set<(e: RecorderEvent) => void>()
 
@@ -265,20 +269,28 @@ export class Recorder {
       const sideChange = ctx.side !== m.side
       const ctxEvidence = ctx.source === undefined || ctx.source === 'dmr' || ctx.source === 'analog' || ctx.source === 'holder'
       const openedOnDefault = c.openSource === 'inferred' || c.openSource === 'selected'
-      if (!sideChange || (ctxEvidence && openedOnDefault)) {
+      const sideUpgrade = sideChange && ctxEvidence && openedOnDefault
+      if (!sideChange || sideUpgrade) {
         const name = ctx.channelName || null
+        // Channel identity (name + freq + mode) is relabeled ONLY when the clip was mis-attributed
+        // at open: a side-upgrade (opened on a default side, evidence now points elsewhere), or a
+        // scan-opened clip whose stale name is still resolving (channelPending — the 04 2c/2d read
+        // lands ~1s in). A plain SAME-SIDE name change is the operator NAVIGATING channels mid-clip
+        // — the recorded audio is the ORIGINAL channel, so it must NOT relabel (live bug 2026-07-16:
+        // RX on COLCON DENVER saved as LOOKOUT 675 / SHL BOULDER VLY after browsing during the clip).
+        const chanChanged = name != null && name !== m.channelName && (sideUpgrade || c.channelPending)
+        // The DMR TG + its programmed name resolve a beat after the call opens — fill-once, never
+        // overwrite (so navigating channels mid-call can't repaint them either).
         const tgChanged = m.talkgroup == null && ctx.talkgroup != null
-        const chanChanged = name != null && name !== m.channelName
-        // The 59 destName lands a beat after the call opens (like the TG id) — late-fill it too.
         const tgName = ctx.talkgroupName ?? null
         const tgNameChanged = m.talkgroupName == null && tgName != null
-        if (tgChanged || chanChanged || tgNameChanged) {
+        if (chanChanged || tgChanged || tgNameChanged) {
           c.meta = {
             ...m,
             side: ctx.side,
-            channelName: name ?? m.channelName,
-            freqMHz: ctx.freqMHz ?? m.freqMHz,
-            mode: ctx.mode ?? m.mode,
+            channelName: chanChanged ? name : m.channelName,
+            freqMHz: chanChanged ? ctx.freqMHz ?? m.freqMHz : m.freqMHz,
+            mode: chanChanged ? ctx.mode ?? m.mode : m.mode,
             talkgroup: ctx.talkgroup ?? m.talkgroup,
             talkgroupName: tgName ?? m.talkgroupName,
           }
@@ -286,6 +298,9 @@ export class Recorder {
           if (sideChange) c.openSource = ctx.source
         }
       }
+      // A scan-opened clip's identity has resolved (the lock-follow read landed / no longer
+      // sweeping) → disarm the channel late-fill so later navigation can't relabel it.
+      if (c.channelPending && ctx.identityResolved !== false) c.channelPending = false
     }
     // A held announcement goes out the moment identity resolves — the late-fill above has just
     // re-stamped the metadata from the same context, so the live block appears with the RIGHT
@@ -316,6 +331,7 @@ export class Recorder {
       },
       openSource: ctx.source,
       announced: false,
+      channelPending: ctx.identityResolved === false,
     }
     if (ctx.identityResolved === false) {
       // Identity is known-stale (scan lock read in flight): HOLD the live announcement — the

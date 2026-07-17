@@ -155,6 +155,8 @@ export class Rig {
         freqMHz: recv.freqMHz,
         mode: recv.mode,
         talkgroup: recv.talkgroup,
+        talkgroupName: recv.talkgroupName,
+        identityResolved: recv.identityResolved,
       }
     })
     await this.recorder.setEnabled(true)
