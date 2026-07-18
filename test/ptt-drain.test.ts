@@ -44,7 +44,7 @@ function rig(events: { onPttFailsafe?: (d: string) => void } = {}) {
   return { clock, tp, s, advance, baseline, packets }
 }
 
-test('release drains the MEASURED pipe latency before the 56 00 (clamp floor 300, +250 margin)', () => {
+test('release drains until the RTP counter goes QUIET (stream end), then 56 00', () => {
   mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
   try {
     const { tp, s, advance, baseline, packets } = rig()
@@ -53,16 +53,21 @@ test('release drains the MEASURED pipe latency before the 56 00 (clamp floor 300
     s.noteTxMicActive(true)
     baseline() // first poll: establishes the counter baseline, NOT audio evidence
     advance(400)
-    packets() // counter advanced at t=400 → pipe latency 400ms → drain 650ms
-    advance(600)
     packets()
-    s.unkey()
-    assert.equal(releases(tp), 0, 'release is DELAYED — the tail is still in flight')
-    assert.equal(s.state.ptt, 'keyed', 'still transmitting the drain')
     advance(600)
-    assert.equal(releases(tp), 0, 'under the 650ms drain window')
-    advance(100)
-    assert.equal(releases(tp), 1, '56 00 submitted after the drain')
+    packets() // last packet BEFORE release at t=1000
+    s.unkey() // release at t=1000 — the tail is still in flight
+    assert.equal(releases(tp), 0, 'release is DELAYED — draining')
+    assert.equal(s.state.ptt, 'keyed', 'still transmitting the drain')
+    // in-flight tail keeps ARRIVING after release (the whole point): packets at 1200, 1500
+    advance(200)
+    packets()
+    advance(300)
+    packets() // last real packet at t=1500
+    advance(300)
+    assert.equal(releases(tp), 0, 'counter quiet only 300ms — still draining')
+    advance(200)
+    assert.equal(releases(tp), 1, '56 00 at ~last-packet + 400ms quiet')
     assert.equal(s.state.ptt, 'idle')
   } finally {
     mock.timers.reset()
@@ -170,24 +175,25 @@ test('guard stays quiet while packets advance; never arms for a mic-less keyup',
   }
 })
 
-test('drain is hard-capped at 3 s even when the pipe measured slower', () => {
+test('drain is hard-capped at 3 s even if the counter never goes quiet', () => {
   mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
   try {
     const { tp, s, advance, baseline, packets } = rig()
     s.key() // t=0
-    baseline()
-    // Pathological pipe: the mic stream only attaches at t=4750 (the guard measures from
-    // ATTACH, so this stays under its window) and the first packets land at t=5000 → measured
-    // pipe latency 5 s → the drain must clamp to the 3 s cap, not wait 5.25 s.
-    advance(4750)
     s.noteTxMicActive(true)
-    advance(250)
+    baseline()
+    advance(300)
     packets()
-    s.unkey()
-    advance(2900)
-    assert.equal(releases(tp), 0, 'still draining under the cap')
-    advance(200)
-    assert.equal(releases(tp), 1, 'released at the cap')
+    s.unkey() // release at t=300
+    // Pathological: packets keep arriving forever (browser failed to stop its track) — the
+    // drain must not hold the transmitter past the cap.
+    for (let i = 0; i < 14; i += 1) {
+      advance(200)
+      packets()
+    }
+    assert.equal(releases(tp), 0, 'under the cap (t=+2800)')
+    advance(300)
+    assert.equal(releases(tp), 1, 'released at the 3 s cap despite a never-quiet counter')
   } finally {
     mock.timers.reset()
   }
@@ -202,13 +208,10 @@ test('a counter going BACKWARD (new session / renegotiation) re-baselines, not a
     s.noteTxRtpPackets(100) // baseline from a prior session's counter
     advance(300)
     s.noteTxRtpPackets(5) // renegotiated pc: counter reset — must NOT read as arrival
-    advance(300)
-    s.noteTxRtpPackets(6) // REAL first arrival at t=600 → drain = 600+250 = 850ms
+    // If the reset had counted as audio, hasDrainableAudio would be true and release would
+    // drain; with no REAL arrival ever, the release must be immediate.
     s.unkey()
-    advance(800)
-    assert.equal(releases(tp), 0, 'drain measured from the REAL arrival (t=600), not the reset')
-    advance(100)
-    assert.equal(releases(tp), 1)
+    assert.equal(releases(tp), 1, 'no real audio this keyup → immediate release, no phantom drain')
   } finally {
     mock.timers.reset()
   }

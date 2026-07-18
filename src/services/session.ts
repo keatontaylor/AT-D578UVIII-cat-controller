@@ -125,6 +125,11 @@ const KEY_MAX_ATTEMPTS = 3
 /** Release-drain hard cap: even a TURN-bloated pipe never holds the transmitter past this after
  * release (parrot-measured pipe latency: LAN 0.4–0.7 s, TURN 1.5–3 s). */
 const TX_DRAIN_CAP_MS = 3000
+/** Drain END detection: the browser stops its track AT release, so the RTP counter freezes once
+ * the last in-flight audio has arrived — frozen for this long = the tail is fully drained.
+ * (Two 200 ms poll periods; parrot-measured 2026-07-18: a key-time point measurement under-drained
+ * long overs by 360–420 ms because the pipe DRIFTS during a transmission.) */
+const TX_DRAIN_QUIET_MS = 400
 /** Keyed with a mic EXPECTED but no TX audio arriving for this long → the audio path died
  * (never a quiet operator — the browser streams comfort noise while capturing): force-release
  * rather than transmit dead air. */
@@ -382,7 +387,7 @@ export class Session {
       this.dmrLockTimer = null
     }
     if (this.txDrainTimer) {
-      clearTimeout(this.txDrainTimer)
+      clearInterval(this.txDrainTimer)
       this.txDrainTimer = null
     }
     this.disarmSilenceGuard()
@@ -435,7 +440,7 @@ export class Session {
     // still draining buffered audio — cancel the pending release and keep transmitting (the two
     // overs merge, which is what the radio would do on a fast double-tap anyway).
     if (this.txDrainTimer) {
-      clearTimeout(this.txDrainTimer)
+      clearInterval(this.txDrainTimer)
       this.txDrainTimer = null
       return
     }
@@ -459,7 +464,7 @@ export class Session {
     lastFrameAt: null,
     micAt: null,
   }
-  private txDrainTimer: ReturnType<typeof setTimeout> | null = null
+  private txDrainTimer: ReturnType<typeof setInterval> | null = null
   private txSilenceGuard: ReturnType<typeof setInterval> | null = null
 
   /** A TX mic stream attached (rtc.mic active) / detached for this keyup — arms the silence
@@ -516,12 +521,10 @@ export class Session {
     }
   }
 
-  /** The measured drain for THIS keyup: pipe latency (+250 ms margin), clamped to [300 ms, 3 s].
-   * Zero when no mic stream ever attached (nothing buffered → release must not lag). */
-  private unkeyDrainMs(): number {
-    const { keyAt, firstFrameAt, micAt } = this.txAudio
-    if (micAt === null || firstFrameAt === null) return 0
-    return Math.min(TX_DRAIN_CAP_MS, Math.max(300, firstFrameAt - keyAt + 250))
+  /** Whether release should DRAIN at all: only when a mic stream attached AND real audio
+   * actually arrived this keyup (otherwise there is nothing buffered — release must not lag). */
+  private hasDrainableAudio(): boolean {
+    return this.txAudio.micAt !== null && this.txAudio.firstFrameAt !== null
   }
 
   /** Release the transmitter (from keyed, or from fault — the manual failsafe retry). The unkey
@@ -543,19 +546,33 @@ export class Session {
     if (this.current.ptt !== 'keyed' && this.current.ptt !== 'fault') return
     if (immediate) {
       if (this.txDrainTimer) {
-        clearTimeout(this.txDrainTimer)
+        clearInterval(this.txDrainTimer)
         this.txDrainTimer = null
       }
       this.submitRelease()
       return
     }
     if (this.txDrainTimer) return // release already pending
-    const drain = this.unkeyDrainMs()
-    if (drain > 0 && this.current.ptt === 'keyed') {
-      this.txDrainTimer = setTimeout(() => {
-        this.txDrainTimer = null
-        this.submitRelease()
-      }, drain)
+    if (this.hasDrainableAudio() && this.current.ptt === 'keyed') {
+      // Drain-until-stream-end: keep feeding until the RTP counter has been FROZEN for
+      // TX_DRAIN_QUIET_MS (the browser stopped its track at release — frozen means the last
+      // in-flight audio arrived), hard-capped at TX_DRAIN_CAP_MS from the release intent.
+      const releasedAt = this.now()
+      this.txDrainTimer = setInterval(() => {
+        // Quiet is measured from the LATER of last-packet / release — a minimum 400 ms drain
+        // even when the counter looks stale at release (poll granularity), ending 400 ms after
+        // the last real packet otherwise.
+        const last = this.txAudio.lastFrameAt ?? releasedAt
+        const quiet = this.now() - Math.max(last, releasedAt) >= TX_DRAIN_QUIET_MS
+        const capped = this.now() - releasedAt >= TX_DRAIN_CAP_MS
+        if (quiet || capped) {
+          if (this.txDrainTimer) {
+            clearInterval(this.txDrainTimer)
+            this.txDrainTimer = null
+          }
+          this.submitRelease()
+        }
+      }, 100)
       this.txDrainTimer.unref?.()
       return
     }

@@ -141,9 +141,13 @@ anyway so PTT never feels dead (the track still attaches when it resolves).
 
 **TX audio drain (release) — normative.** The browser→backend audio pipe runs behind real time
 (parrot-measured 2026-07-18: 0.4–0.7 s LAN, 1.5–3 s TURN); an instant `56 00` at release
-guillotines the spoken tail still in flight. So on a *normal* release the backend delays the
-`56 00` by the keyup's **own measured pipe latency** (first-TX-frame arrival − key intent,
-+250 ms margin, clamped to [300 ms, 3 s]) while continuing to feed arriving audio. Invariants:
+guillotines the spoken tail still in flight. So on a *normal* release the backend drains
+**until the stream actually ends**: the browser stops its track at release, so the inbound RTP
+packet counter (`pc.getStats` — the ONLY honest signal; wrtc's NetEq synthesizes sink frames
+even trackless) freezes once the last in-flight audio arrived. The `56 00` submits when the
+counter has been quiet ≥400 ms (minimum 400 ms drain), hard-capped 3 s from the release intent.
+A key-time point measurement was tried first and under-drained long overs by 360–420 ms — the
+pipe latency DRIFTS during a transmission; only stream-end tracks it. Invariants:
 - The mic is **press-gated** browser-side: capture starts at press, the track stops AT release —
   everything that arrives during the drain is pre-release audio *by construction*.
 - **Every safety path bypasses the drain**: deadman, keying-socket loss, failsafe escalation,
