@@ -23,7 +23,9 @@ import { RigctlServer, type RigctlPtt } from './rigctl'
 /** The slice of the radio controller the service drives (adapter built in main.ts). */
 export interface PacketRadio {
   key(): void
-  unkey(): void
+  /** Packet releases are ALWAYS immediate (true): the TX-audio drain is a browser-mic concept —
+   * direwolf's frames are fed synchronously and a drained release would just add dead air. */
+  unkey(immediate?: boolean): void
   pttPhase(): 'idle' | 'keying' | 'keyed' | 'unkeying' | 'fault'
   /** null = clear to transmit; otherwise the human-readable refusal (not connected / DMR channel). */
   txRefusal(): string | null
@@ -239,7 +241,7 @@ export class PacketService implements RigctlPtt {
       this.sinkProc?.kill('SIGTERM')
       this.sinkProc = null
       try {
-        this.radio.unkey()
+        this.radio.unkey(true)
       } catch {
         /* disconnected — nothing keyed through us */
       }
@@ -447,7 +449,7 @@ export class PacketService implements RigctlPtt {
           // disabled while the radio was confirming — the keydown landed; release it here,
           // because disable() already ran its teardown with nothing to unkey.
           try {
-            this.radio.unkey()
+            this.radio.unkey(true)
           } catch {
             /* disconnected — nothing keyed */
           }
@@ -455,7 +457,7 @@ export class PacketService implements RigctlPtt {
         }
         const cmd = this.sink()
         if (!cmd) {
-          this.radio.unkey()
+          this.radio.unkey(true)
           throw new Error('packet PTT: no radio audio sink')
         }
         this.sinkProc = this.spawnFn(cmd.command, [...cmd.args], { stdio: ['pipe', 'ignore', 'pipe'] })
@@ -470,7 +472,7 @@ export class PacketService implements RigctlPtt {
       this.log(`packet: keydown attempt ${attempt}/${KEY_ATTEMPTS} not confirmed`)
     }
     try {
-      this.radio.unkey()
+      this.radio.unkey(true)
     } catch {
       /* best effort */
     }
@@ -489,7 +491,7 @@ export class PacketService implements RigctlPtt {
     this.sinkProc?.kill('SIGTERM')
     this.sinkProc = null
     try {
-      this.radio.unkey()
+      this.radio.unkey(true)
     } catch {
       /* disconnected mid-TX — nothing to release */
     }

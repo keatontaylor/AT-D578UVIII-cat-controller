@@ -161,7 +161,11 @@ pipe latency DRIFTS during a transmission; only stream-end tracks it. Invariants
 **Keyed-but-silent guard — normative.** While `keyed` with a mic stream attached
 (`rtc.mic active`), no TX audio arriving for **2.5 s** means the audio path died (RTP loss, tab
 frozen with the socket alive — the split-brain the `/ws` deadman cannot see): the backend
-force-releases immediately and surfaces the reason. Never armed for mic-less keyups.
+force-releases immediately and surfaces the reason. Never armed for mic-less keyups (kerchunk,
+analog, packet TNC — the mic-attached level is cleared whenever PTT returns to rest, so a stale
+browser press can never arm the guard against a later packet transmission). A guard trigger is
+an **auto-release** (normal release path + banner), NEVER the Bluetooth-severing failsafe —
+that escalation is reserved exclusively for release-ARQ exhaustion.
 
 ## 7. Reconnect & resilience
 WS gives no auto-reconnect for free (unlike SSE), so the client owns it:

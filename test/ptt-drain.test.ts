@@ -28,7 +28,7 @@ class FakeTransport implements Transport {
 const keyWrites = (tp: FakeTransport): string[] => tp.writes.filter((w) => w.startsWith('56 '))
 const releases = (tp: FakeTransport): number => tp.writes.filter((w) => w.startsWith('56 00')).length
 
-function rig(events: { onPttFailsafe?: (d: string) => void } = {}) {
+function rig(events: { onPttFailsafe?: (d: string) => void; onPttAutoRelease?: (d: string) => void } = {}) {
   const clock = { t: 0 }
   const tp = new FakeTransport()
   const s = new Session(tp, { timeoutMs: 1000, maxAttempts: 3, gapMs: 0 }, () => clock.t, events)
@@ -130,7 +130,11 @@ test('keyed-but-silent guard: mic expected, RTP counter FROZEN → force release
   mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
   try {
     const notices: string[] = []
-    const { tp, s, advance, baseline } = rig({ onPttFailsafe: (d) => notices.push(d) })
+    const failsafes: string[] = []
+    const { tp, s, advance, baseline } = rig({
+      onPttAutoRelease: (d) => notices.push(d),
+      onPttFailsafe: (d) => failsafes.push(d),
+    })
     s.key()
     s.noteTxMicActive(true)
     // the audio path dies: the poll keeps reporting the SAME packet count forever
@@ -146,6 +150,9 @@ test('keyed-but-silent guard: mic expected, RTP counter FROZEN → force release
     assert.equal(releases(tp), 1, 'guard force-released the dead-air transmitter')
     assert.equal(s.state.ptt, 'idle')
     assert.ok(notices.some((n) => n.includes('no TX audio')), `notice surfaced: ${notices}`)
+    // AUDIT 2026-07-18: a guard trigger must NEVER invoke the failsafe — that path severs the
+    // entire Bluetooth session; the guard's job is releasing ONE keyup through the normal path.
+    assert.deepEqual(failsafes, [], 'the BT-severing failsafe was NOT invoked')
   } finally {
     mock.timers.reset()
   }
@@ -248,7 +255,7 @@ test('CAPTURE-FIRST ordering: the silence guard also survives the key() reset', 
   mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
   try {
     const notices: string[] = []
-    const { tp, s, advance, baseline } = rig({ onPttFailsafe: (d) => notices.push(d) })
+    const { tp, s, advance, baseline } = rig({ onPttAutoRelease: (d) => notices.push(d) })
     s.noteTxMicActive(true) // attach before key
     advance(200)
     s.key()
@@ -259,6 +266,39 @@ test('CAPTURE-FIRST ordering: the silence guard also survives the key() reset', 
     }
     assert.equal(releases(tp), 1, 'guard force-released despite the pre-key mic attach')
     assert.ok(notices.some((n) => n.includes('no TX audio')))
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('stale mic level cleared at rest: a PACKET keyup after browser PTT is never guarded', () => {
+  // Audit 2026-07-18: txMicAttached persisted after a browser keyup (the browser never sends
+  // rtc.mic inactive at release), so a later packet-TNC keyup inherited mic-expected and the
+  // silence guard killed direwolf's transmission at 2.5s. main.ts now clears the level when ptt
+  // returns to rest — modeled here as noteTxMicActive(false) after the release completes.
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  try {
+    const { tp, s, advance, baseline, packets } = rig()
+    // Browser keyup with mic:
+    s.noteTxMicActive(true)
+    s.key()
+    baseline()
+    advance(300)
+    packets()
+    s.unkey()
+    advance(600) // drain completes (quiet)
+    assert.equal(releases(tp), 1)
+    assert.equal(s.state.ptt, 'idle')
+    s.noteTxMicActive(false) // main.ts: ptt at rest → clear the level
+
+    // Packet keyup — NO mic notify, NO RTP. Must never be guarded or drained.
+    s.key()
+    advance(10_000)
+    assert.equal(releases(tp), 1, 'no guard force-release of the packet transmission')
+    assert.equal(s.state.ptt, 'keyed')
+    s.unkey(true) // packet releases immediately
+    assert.equal(releases(tp), 2)
+    assert.equal(s.state.ptt, 'idle')
   } finally {
     mock.timers.reset()
   }

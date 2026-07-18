@@ -220,7 +220,15 @@ controller.onChange((s) => {
     clearInterval(txRtpPoll)
     txRtpPoll = null
   }
-  if (s.radio.ptt === 'idle' || s.radio.ptt === 'fault') audio.closeMicSinks()
+  if (s.radio.ptt === 'idle' || s.radio.ptt === 'fault') {
+    audio.closeMicSinks()
+    // Clear the mic-attached LEVEL at rest: the browser re-asserts it per press (rtc.mic
+    // active on every attach) but deliberately never sends inactive at release (the sink must
+    // outlive its stream for the drain). Without this reset, a PACKET keyup after any browser
+    // PTT use would inherit a stale mic-expected flag → the silence guard would kill direwolf's
+    // transmission at 2.5 s (audit 2026-07-18).
+    controller.setTxMicActive(false)
+  }
 })
 
 // Headless squelch-triggered recorder (F4.3): shares the RX capture; records the selected side's
@@ -357,7 +365,7 @@ const packet = new PacketService(
   },
   {
     key: () => controller.key(),
-    unkey: () => controller.unkey(),
+    unkey: (immediate = false) => controller.unkey(immediate),
     pttPhase: () => controller.appState.radio.ptt,
     txRefusal: () => {
       const s = controller.appState

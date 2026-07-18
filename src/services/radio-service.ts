@@ -374,6 +374,10 @@ export class RadioController {
           })
         },
         onPttFailsafe: (detail) => void this.pttFailsafe(detail),
+        // Session-side auto-release (keyed-but-silent guard): the release already went through
+        // the normal path — surface it like the deadman does, but NEVER tear the link down
+        // (that is onPttFailsafe's job, reserved for release-ARQ exhaustion).
+        onPttAutoRelease: (detail) => this.notePttDeadman(detail),
         // Radio-pushed notifications (5f family) surface on the same dismissible banner as other
         // operational errors — a remote operator must know their TX never woke the repeater.
         onRadioNotice: (text) => {

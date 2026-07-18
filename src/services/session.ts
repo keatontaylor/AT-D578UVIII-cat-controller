@@ -103,6 +103,10 @@ export interface SessionEvents {
    * radio treats remote-control deactivation as PTT release, so a dead link is the one remaining
    * way to guarantee the transmitter stops. */
   onPttFailsafe?(detail: string): void
+  /** PTT was auto-released by a session-side safeguard (e.g. the keyed-but-silent guard) — the
+   * release went through the NORMAL path and succeeded-or-is-escalating on its own. Surface it
+   * to the operator, but do NOT treat it as a failsafe (onPttFailsafe severs Bluetooth). */
+  onPttAutoRelease?(detail: string): void
   /** Resolve a DMR caller id → RadioID.net operator details (callsign/name/location), or null.
    * Injected (the CSV lives server-side) so the reducer stays pure — the session feeds the result
    * back through a `dmrCaller` domain event. */
@@ -494,7 +498,12 @@ export class Session {
 
   private armSilenceGuard(): void {
     if (this.txSilenceGuard) return
-    this.txSilenceGuard = setInterval(() => {
+    // Self-identifying (see the drain timer): a stale interval disowns itself, never releases.
+    const timer = setInterval(() => {
+      if (this.txSilenceGuard !== timer) {
+        clearInterval(timer)
+        return
+      }
       const ptt = this.current.ptt
       if (ptt !== 'keyed' && ptt !== 'keying') {
         this.disarmSilenceGuard()
@@ -505,11 +514,22 @@ export class Session {
       if (micAt === null) return // mic disarmed mid-key — no stream expected anymore
       const base = Math.max(micAt, lastFrameAt ?? micAt)
       if (this.now() - base > TX_SILENCE_GUARD_MS) {
-        this.events.onPttFailsafe?.('no TX audio while keyed — auto-released (audio path lost)')
-        this.unkey(true) // immediate: there is no audio to drain
+        // AUTO-RELEASE, not failsafe: onPttFailsafe severs Bluetooth (the release-ARQ-exhausted
+        // last resort) — a dead mic path must only release the key, never nuke the session
+        // (audit 2026-07-18: the guard originally called onPttFailsafe → every guard trigger
+        // would have torn the radio link down).
+        this.events.onPttAutoRelease?.('no TX audio while keyed — auto-released (audio path lost)')
+        try {
+          this.unkey(true) // immediate: there is no audio to drain
+        } catch (e) {
+          // An interval callback must NEVER throw (uncaught → process crash). A failed submit
+          // here means the link is dying — the BT teardown is what releases the radio then.
+          console.error(`silence-guard release failed: ${(e as Error).message}`)
+        }
       }
     }, 500)
-    this.txSilenceGuard.unref?.()
+    timer.unref?.()
+    this.txSilenceGuard = timer
   }
 
   /** Real TX audio evidence — the pipe-latency probe and the silence guard's liveness signal. */
@@ -574,7 +594,16 @@ export class Session {
       // TX_DRAIN_QUIET_MS (the browser stopped its track at release — frozen means the last
       // in-flight audio arrived), hard-capped at TX_DRAIN_CAP_MS from the release intent.
       const releasedAt = this.now()
-      this.txDrainTimer = setInterval(() => {
+      // SELF-IDENTIFYING timer (audit 2026-07-18): the callback must verify it is still THE
+      // current drain — a cleared-but-still-firing interval (timer-wheel quirks, cancel races)
+      // whose field was nulled elsewhere would otherwise skip its own cleanup and could release
+      // a LATER keyup that never asked (trace-proven: a stale drain callback released a packet
+      // transmission 10 s on). A stale callback disowns itself and touches nothing.
+      const timer = setInterval(() => {
+        if (this.txDrainTimer !== timer) {
+          clearInterval(timer)
+          return
+        }
         // Quiet is measured from the LATER of last-packet / release — a minimum 400 ms drain
         // even when the counter looks stale at release (poll granularity), ending 400 ms after
         // the last real packet otherwise.
@@ -582,14 +611,19 @@ export class Session {
         const quiet = this.now() - Math.max(last, releasedAt) >= TX_DRAIN_QUIET_MS
         const capped = this.now() - releasedAt >= TX_DRAIN_CAP_MS
         if (quiet || capped) {
-          if (this.txDrainTimer) {
-            clearInterval(this.txDrainTimer)
-            this.txDrainTimer = null
+          clearInterval(timer)
+          this.txDrainTimer = null
+          try {
+            this.submitRelease()
+          } catch (e) {
+            // Interval callbacks must never throw (uncaught → process crash); a failed submit
+            // means the link is dying and the BT teardown releases the radio.
+            console.error(`drain release failed: ${(e as Error).message}`)
           }
-          this.submitRelease()
         }
       }, 100)
-      this.txDrainTimer.unref?.()
+      timer.unref?.()
+      this.txDrainTimer = timer
       return
     }
     this.submitRelease()
