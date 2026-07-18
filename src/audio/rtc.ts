@@ -92,9 +92,25 @@ export class AudioBridge {
     return this.ice()
   }
 
+  // Live sessions, for the server-driven mic-sink close (release drain: the browser stops its
+  // stream at release, but the sink must stay open until the delayed 56 00 actually submits —
+  // main.ts calls closeMicSinks() when ptt returns to idle/fault). Closed sessions are swept
+  // lazily on access.
+  private readonly sessions = new Set<RtcAudioSession>()
+
   async createSession(onIce: IceHandler): Promise<RtcAudioSession> {
     const ice = await this.ice().catch(() => [] as const)
-    return new RtcAudioSession(this.capture, onIce, this.log, this.sink, () => this.gain, (f) => this.teeTx(f), ice, this.relayOnly)
+    const session = new RtcAudioSession(this.capture, onIce, this.log, this.sink, () => this.gain, (f) => this.teeTx(f), ice, this.relayOnly)
+    this.sessions.add(session)
+    return session
+  }
+
+  /** Close every live session's mic sink (PTT returned to idle/fault — the drain is over). */
+  closeMicSinks(): void {
+    for (const s of this.sessions) {
+      if (s.isClosed) this.sessions.delete(s)
+      else s.setMicActive(false)
+    }
   }
 }
 
@@ -228,6 +244,12 @@ export class RtcAudioSession {
   private readonly source: any
   private unsubscribe: (() => void) | null = null
   private closed = false
+  // RX liveness tick: the radio's SCO only flows per squelch opening, so a quiet channel sends
+  // ZERO RTP — indistinguishable (client-side) from a dead media path. One 10 ms silence frame
+  // every ~2 s whenever no capture audio has flowed keeps packets ticking, so the client's
+  // "no RTP for ~6 s" stall detector always means DEAD LINK, never quiet channel.
+  private lastFeedAt = 0
+  private tickTimer: ReturnType<typeof setInterval> | null = null
   // Mic TX (browser → radio HFP sink): the inbound track's audio sink, the play subprocess, and
   // the PTT gate. Audio only flows to the radio while `micActive` (keyed) — otherwise dropped.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -262,6 +284,10 @@ export class RtcAudioSession {
       this.log(`rtc peer: ${st}`)
       if (st === 'failed' || st === 'closed' || st === 'disconnected') this.close()
     }
+  }
+
+  get isClosed(): boolean {
+    return this.closed
   }
 
   /** PTT gate for mic TX: open the radio sink + start piping mic audio while keyed; stop on unkey.
@@ -307,6 +333,13 @@ export class RtcAudioSession {
     await this.pc.setRemoteDescription(sdp)
     this.unsubscribe?.() // renegotiation: release the prior subscription or the capture leaks
     this.unsubscribe = await this.capture.subscribe((frame) => this.feed(frame))
+    if (!this.tickTimer) {
+      this.tickTimer = setInterval(() => {
+        if (this.closed || Date.now() - this.lastFeedAt < 1900) return
+        this.pushFrame(new Int16Array(RX_FRAME_SAMPLES)) // liveness tick (see field comment)
+      }, 2000)
+      this.tickTimer.unref?.()
+    }
     const answer = await this.pc.createAnswer()
     await this.pc.setLocalDescription(answer)
     return this.pc.localDescription
@@ -324,6 +357,11 @@ export class RtcAudioSession {
     if (this.closed) return
     const samples = new Int16Array(RX_FRAME_SAMPLES)
     for (let i = 0; i < RX_FRAME_SAMPLES; i += 1) samples[i] = frame.readInt16LE(i * 2)
+    this.lastFeedAt = Date.now()
+    this.pushFrame(samples)
+  }
+
+  private pushFrame(samples: Int16Array): void {
     this.source.onData({
       samples,
       sampleRate: RX_SAMPLE_RATE,
@@ -336,6 +374,10 @@ export class RtcAudioSession {
   close(): void {
     if (this.closed) return
     this.closed = true
+    if (this.tickTimer) {
+      clearInterval(this.tickTimer)
+      this.tickTimer = null
+    }
     this.unsubscribe?.()
     this.unsubscribe = null
     this.micProc?.kill('SIGTERM')

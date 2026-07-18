@@ -97,3 +97,39 @@ test('FrameQueue.clear resets depth and prime', () => {
   assert.equal(q.depth, 0)
   assert.equal(q.drain(), null)
 })
+
+// ── unexpected-death recovery: liveness callback + auto-restart (live "RX died" bug) ──
+
+test('subprocess death with subscribers → onAliveChange(false) then auto-restart → true', async () => {
+  // A command that exits after ~80ms of output; each (re)start spawns a fresh one.
+  const capture = new RxCapture(() => ({ command: 'sh', args: ['-c', 'head -c 320 /dev/zero; sleep 0.08'] }))
+  const alive: boolean[] = []
+  capture.onAliveChange = (a) => alive.push(a)
+  const unsub = await capture.subscribe(() => {})
+  // AFTER the initial start (which resets the backoff): shrink the restart delay for the test.
+  ;(capture as unknown as { restartDelayMs: number }).restartDelayMs = 60
+  try {
+    assert.deepEqual(alive, [true], 'initial start reports alive')
+    // wait for the death + at least one restart
+    for (let i = 0; i < 100 && !(alive.includes(false) && alive.lastIndexOf(true) > alive.indexOf(false)); i += 1) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    assert.ok(alive.includes(false), 'death reported')
+    assert.ok(alive.lastIndexOf(true) > alive.indexOf(false), 'restart reported alive again')
+  } finally {
+    unsub()
+    capture.onAliveChange = null
+  }
+})
+
+test('deliberate stop (last subscriber leaves) is NOT a death — no false report', async () => {
+  const capture = new RxCapture(() => ({ command: 'sh', args: ['-c', 'while :; do head -c 320 /dev/zero; sleep 0.05; done'] }))
+  const alive: boolean[] = []
+  capture.onAliveChange = (a) => alive.push(a)
+  const unsub = await capture.subscribe(() => {})
+  await new Promise((r) => setTimeout(r, 50))
+  unsub() // deliberate stop
+  await new Promise((r) => setTimeout(r, 150))
+  assert.ok(!alive.includes(false), `no death report on deliberate stop (got ${alive})`)
+  assert.equal(capture.active, false)
+})

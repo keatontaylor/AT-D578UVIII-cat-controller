@@ -20,6 +20,7 @@ const app = (over: Partial<AppState>): AppState => ({
   phase: null,
   radio: initialState(),
   metrics: { retransmits: 0, failed: 0, framingIncidents: 0 },
+  rxAudioAlive: true,
   ...over,
 })
 

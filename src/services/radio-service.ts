@@ -24,7 +24,9 @@ export interface SessionLike {
   connect(opts?: ConnectOptions): Promise<void>
   close(): void
   key(): void
-  unkey(): void
+  unkey(immediate?: boolean): void
+  noteTxMicActive?(active: boolean): void
+  noteTxAudioFrame?(): void
   setSetting(name: string, value: string | number): void
   chooseSide(side: SideKey): void
   setVfoMode(side: SideKey, vfo: boolean): void
@@ -128,6 +130,9 @@ export interface AppState {
   readonly phase: ConnectPhase | null
   readonly radio: RadioState
   readonly metrics: LinkMetrics
+  /** FALSE while the RX audio capture (bluealsa/SCO path) has died unexpectedly and is being
+   * auto-restarted — the UI banners it so dead capture is distinguishable from a quiet channel. */
+  readonly rxAudioAlive: boolean
 }
 
 /** What the controller needs from the Bluetooth manager (BtManager satisfies this). */
@@ -224,7 +229,16 @@ export class RadioController {
       phase: this.phase,
       radio: this.radio,
       metrics: { retransmits: this.session?.metrics.retransmits ?? 0, failed: this.failed, framingIncidents: this.framingIncidents },
+      rxAudioAlive: this.rxAudioAlive,
     }
+  }
+
+  private rxAudioAlive = true
+  /** RX capture liveness (wired from RxCapture.onAliveChange in main.ts) → AppState → UI banner. */
+  setRxAudioAlive(alive: boolean): void {
+    if (alive === this.rxAudioAlive) return
+    this.rxAudioAlive = alive
+    this.emit()
   }
 
   private recordLinkEvent(event: LinkEvent): void {
@@ -481,8 +495,17 @@ export class RadioController {
   key(): void {
     this.requireSession().key()
   }
-  unkey(): void {
-    this.requireSession().unkey()
+  /** `immediate` (deadman / socket loss) bypasses the TX audio drain — see Session.unkey. */
+  unkey(immediate = false): void {
+    this.requireSession().unkey(immediate)
+  }
+  /** TX mic stream attached/detached (rtc.mic) — arms the session's keyed-but-silent guard. */
+  setTxMicActive(active: boolean): void {
+    this.session?.noteTxMicActive?.(active)
+  }
+  /** Every downsampled TX mic frame (audio-bridge tee) — pipe-latency probe + guard liveness. */
+  noteTxAudioFrame(): void {
+    this.session?.noteTxAudioFrame?.()
   }
   setSetting(name: string, value: string | number): void {
     this.requireSession().setSetting(name, value)

@@ -198,6 +198,15 @@ const audio = new AudioBridge(
   process.env['ANYTONE_RTC_FORCE_RELAY'] === '1',
   RX_ALSA ? wired48kTo8k() : undefined,
 )
+// RX capture liveness → AppState.rxAudioAlive → UI banner ("capture down" vs quiet channel).
+audio.capture.onAliveChange = (alive) => controller.setRxAudioAlive(alive)
+// TX audio frames → the session's pipe-latency probe (release drain) + keyed-silence guard.
+void audio.txSource.subscribe(() => controller.noteTxAudioFrame())
+// Server-driven mic-sink close: the browser stops its stream AT release, but the sink stays open
+// through the release drain (buffered tail → radio); close when ptt actually returns to rest.
+controller.onChange((s) => {
+  if (s.radio.ptt === 'idle' || s.radio.ptt === 'fault') audio.closeMicSinks()
+})
 
 // Headless squelch-triggered recorder (F4.3): shares the RX capture; records the selected side's
 // clips to disk with metadata. Off until enabled from the UI.

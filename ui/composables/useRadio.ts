@@ -231,14 +231,71 @@ function notify(method: string, params: unknown): void {
 }
 
 // ── WebRTC audio: browser offers a SENDRECV peer — RX is the server's radio track, and the send
-// side is reserved for the mic so it can be enabled LATER via replaceTrack (no renegotiation). The
-// mic is armed independently (enableMic); audio only reaches the radio while keyed (server gates on
-// rtc.mic, paired with ptt.key/unkey). ──
+// side is reserved for the mic so it can be attached PER PRESS via replaceTrack (no renegotiation).
+// The mic is press-gated: enableMic only primes permission; the device is captured on PTT press
+// and fully released on unkey (see the press-gated block below). ──
 let audioPc: RTCPeerConnection | null = null
 let micTrack: MediaStreamTrack | null = null
 let micSender: RTCRtpSender | null = null
+// Session-lifetime health watchers (installed AFTER setup succeeds): connection-state + RTP-stall.
+// Torn down by stopAudio or on the first death report.
+let audioWatchStop: (() => void) | null = null
 
-async function startAudio(el: HTMLAudioElement): Promise<void> {
+/** Post-setup link watch: connectionstatechange (failed/closed → immediate; disconnected
+ * persisting >3 s → dead) plus an RTP stall poll — the backend sends a liveness tick every ~2 s
+ * even on a quiet channel, so "no packets for ~6.5 s" always means DEAD LINK, never silence.
+ * Reports at most ONCE per session via onDead, after tearing its own watchers down. */
+function watchAudioHealth(pc: RTCPeerConnection, onDead: (reason: string) => void): void {
+  let dead = false
+  let discTimer: number | null = null
+  let lastPackets = -1
+  let lastAdvance = Date.now()
+  const stop = (): void => {
+    if (discTimer != null) window.clearTimeout(discTimer)
+    discTimer = null
+    window.clearInterval(poll)
+    pc.onconnectionstatechange = null
+  }
+  const die = (reason: string): void => {
+    if (dead) return
+    dead = true
+    stop()
+    if (audioWatchStop === stop) audioWatchStop = null
+    onDead(reason)
+  }
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState
+    if (st === 'failed' || st === 'closed') die(`audio peer ${st}`)
+    else if (st === 'disconnected') {
+      discTimer ??= window.setTimeout(() => die('audio peer disconnected'), 3000)
+    } else if (discTimer != null) {
+      window.clearTimeout(discTimer)
+      discTimer = null
+    }
+  }
+  const poll = window.setInterval(() => {
+    void pc
+      .getStats()
+      .then((stats) => {
+        if (dead) return
+        let pkts = -1
+        stats.forEach((r) => {
+          const rec = r as unknown as { type?: string; kind?: string; packetsReceived?: number }
+          if (rec.type === 'inbound-rtp' && rec.kind === 'audio') pkts = rec.packetsReceived ?? -1
+        })
+        if (pkts !== lastPackets) {
+          lastPackets = pkts
+          lastAdvance = Date.now()
+        } else if (Date.now() - lastAdvance > 6500) {
+          die('audio stream stalled')
+        }
+      })
+      .catch(() => {})
+  }, 2500)
+  audioWatchStop = stop
+}
+
+async function startAudio(el: HTMLAudioElement, onDead?: (reason: string) => void): Promise<void> {
   await stopAudio()
   // The server owns the ICE config (ANYTONE_ICE_SERVERS) — STUN/TURN is what lets a remote
   // (cellular/NATed) client connect; on failure fall back to LAN-only host candidates.
@@ -285,6 +342,8 @@ async function startAudio(el: HTMLAudioElement): Promise<void> {
     const answer = await rpc<RTCSessionDescriptionInit>('rtc.offer', { type: offer.type, sdp: offer.sdp })
     if (audioPc === pc) await pc.setRemoteDescription(answer)
     await playable
+    // Setup succeeded — swap the setup-failure handler for the session-lifetime health watch.
+    if (audioPc === pc && onDead) watchAudioHealth(pc, onDead)
   } catch (e) {
     if (audioPc === pc) {
       audioPc = null
@@ -300,6 +359,8 @@ async function stopAudio(): Promise<void> {
   const pc = audioPc
   if (!pc) return
   audioPc = null
+  audioWatchStop?.()
+  audioWatchStop = null
   micTrack?.stop()
   micTrack = null
   micSender = null
@@ -307,63 +368,102 @@ async function stopAudio(): Promise<void> {
   await rpc('rtc.stop').catch(() => {})
 }
 
-/** Arm the mic independently of listening: prompt for the browser mic and attach it to the existing
- * sendrecv sender (no renegotiation). Explicit constraints (mono + browser AGC/NS/EC, like the PoC);
- * server-side ANYTONE_AUDIO_TX_GAIN then attenuates for the radio's narrowband input. Throws with a
+// ── PRESS-GATED mic capture ──────────────────────────────────────────────────
+// The mic device is held ONLY while keyed: press opens it (getUserMedia + replaceTrack), release
+// stops it (replaceTrack(null) + track.stop()). Nothing leaves the browser unkeyed, and the OS
+// mic indicator is honest — lit exactly while transmitting. "Enable Mic" is a one-time
+// permission PRIMER + arm toggle: it validates getUserMedia, then immediately releases the
+// device, so per-press capture never prompts (a prompt can't be granted mid-press).
+let micArmed = false
+/** True while the operator is physically holding PTT — a getUserMedia resolving AFTER release
+ * (quick tap) must never attach a live mic. */
+let pttPressed = false
+
+const MIC_CONSTRAINTS: MediaStreamConstraints = {
+  audio: { channelCount: { ideal: 1, max: 1 }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+}
+
+/** Arm the mic: prompt once, verify capture works, release the device immediately. Throws with a
  * clear reason (insecure origin / denied) so the UI can explain. */
 async function enableMic(): Promise<void> {
   if (!audioPc || !micSender) throw new Error('enable audio first')
-  if (micTrack) return
+  if (micArmed) return
   if (typeof window !== 'undefined' && !window.isSecureContext) {
     throw new Error('Microphone needs a secure origin — open the app on the device itself or over HTTPS')
   }
   if (!navigator.mediaDevices?.getUserMedia) throw new Error('This browser cannot capture the microphone')
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: { ideal: 1, max: 1 }, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  })
-  micTrack = stream.getAudioTracks()[0] ?? null
-  if (!micTrack) throw new Error('No microphone track was provided')
-  micTrack.enabled = false // silent until keyed
-  await micSender.replaceTrack(micTrack)
+  const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
+  const ok = stream.getAudioTracks().length > 0
+  for (const t of stream.getTracks()) t.stop() // primer only — release the device (mic dot off)
+  if (!ok) throw new Error('No microphone track was provided')
+  micArmed = true
 }
 
-/** Release the mic (detach + stop) while keeping RX audio. */
+/** Disarm the mic (and stop any live per-press capture). */
 async function disableMic(): Promise<void> {
-  if (!micTrack) return
-  micTrack.enabled = false
-  notify('rtc.mic', { active: false })
-  await micSender?.replaceTrack(null).catch(() => {})
-  micTrack.stop()
+  micArmed = false
+  const track = micTrack
   micTrack = null
+  if (track) {
+    notify('rtc.mic', { active: false })
+    await micSender?.replaceTrack(null).catch(() => {})
+    track.stop()
+  }
 }
 
 /** True when the mic is armed (TX available). */
 function hasMic(): boolean {
-  return micTrack != null
+  return micArmed
 }
 
-/** Key the radio AND open the mic → radio path (enable the mic track + tell the server to pipe it).
- * Paired: unkeyMic reverses both. Safe to call without a mic (falls back to plain key). */
+/** Key the radio AND open the per-press mic capture. The key RPC and getUserMedia run in
+ * PARALLEL — the radio keys immediately; audio starts as soon as the device+network deliver it
+ * (everything captured from the press is transmitted; the gap is dead air, not lost words).
+ * Safe to call without an armed mic (plain key / kerchunk). */
 async function keyMic(): Promise<void> {
-  if (micTrack) {
-    micTrack.enabled = true
-    notify('rtc.mic', { active: true })
-  }
+  pttPressed = true
   startHoldBeacon() // before the key round-trips, so beacons flow even on a slow link
+  const key = rpc('ptt.key')
+  if (micArmed && micSender && !micTrack) {
+    void navigator.mediaDevices
+      .getUserMedia(MIC_CONSTRAINTS)
+      .then(async (stream) => {
+        const track = stream.getAudioTracks()[0] ?? null
+        if (!track) return
+        if (!pttPressed || !micSender) {
+          track.stop() // released during acquisition (quick tap) — never attach
+          return
+        }
+        micTrack = track
+        notify('rtc.mic', { active: true })
+        await micSender.replaceTrack(track)
+      })
+      .catch((e: unknown) => {
+        // Keyed with no mic = a kerchunk; surface in console, the PTT stays honest.
+        console.warn('mic capture failed:', (e as { message?: string })?.message ?? e)
+      })
+  }
   try {
-    await rpc('ptt.key')
+    await key
   } catch (e) {
     stopHoldBeacon()
     throw e
   }
 }
 async function unkeyMic(): Promise<void> {
+  pttPressed = false
   stopHoldBeacon()
-  await rpc('ptt.unkey')
-  if (micTrack) {
-    micTrack.enabled = false
-    notify('rtc.mic', { active: false })
+  const unkey = rpc('ptt.unkey') // release intent goes out immediately (safety path)
+  const track = micTrack
+  micTrack = null
+  if (track) {
+    // NO rtc.mic {active:false} here: the server keeps the sink open through the release DRAIN
+    // (the in-flight tail must still reach the radio) and closes it itself when ptt returns to
+    // idle. Stopping the track ends the stream — everything in flight is pre-release audio.
+    await micSender?.replaceTrack(null).catch(() => {})
+    track.stop()
   }
+  await unkey
 }
 
 /** A sane WebRTC stats snapshot for the diagnostics popup — the connection/ICE state plus the

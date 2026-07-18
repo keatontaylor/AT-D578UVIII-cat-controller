@@ -122,6 +122,13 @@ const PTT_OP = 0x56
 /** Key-down attempt cap: initial send + 2 retransmits (~2 s at the production 1 s timeout) —
  * enough to punch through the radio's mid-RX busy-gate, far short of a read's 10 attempts. */
 const KEY_MAX_ATTEMPTS = 3
+/** Release-drain hard cap: even a TURN-bloated pipe never holds the transmitter past this after
+ * release (parrot-measured pipe latency: LAN 0.4–0.7 s, TURN 1.5–3 s). */
+const TX_DRAIN_CAP_MS = 3000
+/** Keyed with a mic EXPECTED but no TX audio arriving for this long → the audio path died
+ * (never a quiet operator — the browser streams comfort noise while capturing): force-release
+ * rather than transmit dead air. */
+const TX_SILENCE_GUARD_MS = 2500
 /** Settings-write head. */
 const SETTING_OP = 0x08
 /** Per-channel setting-write head (2f family). */
@@ -374,6 +381,11 @@ export class Session {
       clearTimeout(this.dmrLockTimer)
       this.dmrLockTimer = null
     }
+    if (this.txDrainTimer) {
+      clearTimeout(this.txDrainTimer)
+      this.txDrainTimer = null
+    }
+    this.disarmSilenceGuard()
     const err = new Error('session closed')
     for (const w of this.waiters.values()) w.reject(err)
     this.waiters.clear()
@@ -419,17 +431,97 @@ export class Session {
    * (releaseAfterKey) and honored the moment the outcome lands. Exhaustion still triggers the
    * failsafe release in onPttOutcome (TX state unknown ⇒ force a release). */
   key(): void {
+    // Re-key DURING the drain window: the finger is back down while the previous release is
+    // still draining buffered audio — cancel the pending release and keep transmitting (the two
+    // overs merge, which is what the radio would do on a fast double-tap anyway).
+    if (this.txDrainTimer) {
+      clearTimeout(this.txDrainTimer)
+      this.txDrainTimer = null
+      return
+    }
     if (this.current.ptt !== 'idle' && this.current.ptt !== 'fault') return
     this.releaseAfterKey = false
+    this.txAudio = { keyAt: this.now(), firstFrameAt: null, lastFrameAt: null, micAt: null }
     this.dispatch({ kind: 'ptt', phase: 'keying' })
     this.link.submit(this.pttFrameFor(true), { retransmitSafe: true, maxAttempts: KEY_MAX_ATTEMPTS })
+  }
+
+  // ── TX audio drain (release) + keyed-but-silent guard ────────────────────────
+  // Parrot-measured 2026-07-18: the browser→backend audio pipe runs 0.4–0.7 s behind on LAN and
+  // 1.5–3 s over TURN — releasing at "I finished speaking" guillotines everything still in
+  // flight. With PRESS-GATED capture the pipe latency is measurable per keyup (first TX frame
+  // arrival − key intent), so the release is delayed by exactly that (+margin, hard-capped) while
+  // the in-flight tail drains to the radio. Safety paths (deadman, socket loss, failsafe) call
+  // unkey(true) and bypass the drain entirely.
+  private txAudio: { keyAt: number; firstFrameAt: number | null; lastFrameAt: number | null; micAt: number | null } = {
+    keyAt: 0,
+    firstFrameAt: null,
+    lastFrameAt: null,
+    micAt: null,
+  }
+  private txDrainTimer: ReturnType<typeof setTimeout> | null = null
+  private txSilenceGuard: ReturnType<typeof setInterval> | null = null
+
+  /** A TX mic stream attached (rtc.mic active) / detached for this keyup — arms the silence
+   * guard: keyed while a mic is EXPECTED but no audio arrives for TX_SILENCE_GUARD_MS means the
+   * audio path died (RTP loss, tab frozen with the socket alive) → force-release rather than
+   * transmit dead air. A keyup with no mic (kerchunk / analog, mic never armed) is never guarded. */
+  noteTxMicActive(active: boolean): void {
+    if (!active) {
+      this.txAudio.micAt = null
+      return
+    }
+    this.txAudio.micAt = this.now()
+    if (this.txSilenceGuard) return
+    this.txSilenceGuard = setInterval(() => {
+      const ptt = this.current.ptt
+      if (ptt !== 'keyed' && ptt !== 'keying') {
+        this.disarmSilenceGuard()
+        return
+      }
+      if (this.txDrainTimer) return // already releasing
+      const { micAt, lastFrameAt } = this.txAudio
+      if (micAt === null) return // mic disarmed mid-key — no stream expected anymore
+      const base = Math.max(micAt, lastFrameAt ?? micAt)
+      if (this.now() - base > TX_SILENCE_GUARD_MS) {
+        this.events.onPttFailsafe?.('no TX audio while keyed — auto-released (audio path lost)')
+        this.unkey(true) // immediate: there is no audio to drain
+      }
+    }, 500)
+    this.txSilenceGuard.unref?.()
+  }
+
+  /** Every downsampled TX mic frame (from the audio bridge tee) — the pipe-latency probe and the
+   * silence guard's liveness signal. */
+  noteTxAudioFrame(): void {
+    const now = this.now()
+    this.txAudio.firstFrameAt ??= now
+    this.txAudio.lastFrameAt = now
+  }
+
+  private disarmSilenceGuard(): void {
+    if (this.txSilenceGuard) {
+      clearInterval(this.txSilenceGuard)
+      this.txSilenceGuard = null
+    }
+  }
+
+  /** The measured drain for THIS keyup: pipe latency (+250 ms margin), clamped to [300 ms, 3 s].
+   * Zero when no mic stream ever attached (nothing buffered → release must not lag). */
+  private unkeyDrainMs(): number {
+    const { keyAt, firstFrameAt, micAt } = this.txAudio
+    if (micAt === null || firstFrameAt === null) return 0
+    return Math.min(TX_DRAIN_CAP_MS, Math.max(300, firstFrameAt - keyAt + 250))
   }
 
   /** Release the transmitter (from keyed, or from fault — the manual failsafe retry). The unkey
    * IS retransmit-safe: releasing twice is harmless, staying keyed is not, so the ARQ retries it
    * for ~timeoutMs×maxAttempts (≈10 s in production) before onPttOutcome escalates to the
-   * Bluetooth-teardown failsafe. */
-  unkey(): void {
+   * Bluetooth-teardown failsafe.
+   *
+   * `immediate` (deadman / socket loss / failsafe / silence guard) bypasses the audio drain —
+   * the drain is a courtesy on the happy path ONLY; safety always releases now. */
+  unkey(immediate = false): void {
     if (this.current.ptt === 'keying') {
       // Released while the key-down is still unacked (possibly mid-retransmit). We can't unsend
       // it — record the intent; onPttOutcome releases immediately on ack (and a failure's
@@ -439,6 +531,30 @@ export class Session {
       return
     }
     if (this.current.ptt !== 'keyed' && this.current.ptt !== 'fault') return
+    if (immediate) {
+      if (this.txDrainTimer) {
+        clearTimeout(this.txDrainTimer)
+        this.txDrainTimer = null
+      }
+      this.submitRelease()
+      return
+    }
+    if (this.txDrainTimer) return // release already pending
+    const drain = this.unkeyDrainMs()
+    if (drain > 0 && this.current.ptt === 'keyed') {
+      this.txDrainTimer = setTimeout(() => {
+        this.txDrainTimer = null
+        this.submitRelease()
+      }, drain)
+      this.txDrainTimer.unref?.()
+      return
+    }
+    this.submitRelease()
+  }
+
+  private submitRelease(): void {
+    if (this.current.ptt !== 'keyed' && this.current.ptt !== 'fault') return
+    this.disarmSilenceGuard()
     this.dispatch({ kind: 'ptt', phase: 'unkeying' })
     this.link.submit(this.pttFrameFor(false), { retransmitSafe: true })
   }

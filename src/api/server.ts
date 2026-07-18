@@ -114,7 +114,7 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
     const phase = deps.controller.appState.radio.ptt
     if (phase !== 'keying' && phase !== 'keyed') return // nothing keyed — nothing to force
     try {
-      deps.controller.unkey()
+      deps.controller.unkey(true) // immediate: safety release NEVER waits for the audio drain
       deps.controller.notePttDeadman(why)
     } catch {
       /* not connected — nothing transmitting through us */
@@ -192,13 +192,17 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
         void rtc.then((s) => s.addIce(params.data)).catch(() => {})
         if (id !== null) send(ok(id, {}))
       } else if (req.method === 'rtc.mic') {
-        // Mic-TX PTT gate: open/close the radio sink pipe. Paired with ptt.key/unkey by the client.
+        // Mic-TX gate OPEN: the browser attached its per-press mic stream. The CLOSE side is
+        // server-driven (main.ts closes sinks when ptt returns to idle/fault) so the release
+        // drain can keep feeding in-flight audio after the browser stopped its stream; an
+        // explicit {active:false} (mic disarm) still closes immediately.
         const params = z.object({ active: z.boolean() }).safeParse(req.params)
         if (!params.success) {
           if (id !== null) send(fail(id, RpcErrorCode.InvalidParams, 'invalid params'))
           return
         }
         void rtc?.then((s) => s.setMicActive(params.data.active)).catch(() => {})
+        deps.controller.setTxMicActive?.(params.data.active)
         if (id !== null) send(ok(id, {}))
       } else if (req.method === 'rtc.config') {
         // The ICE servers the browser must use — the server is the single source of truth

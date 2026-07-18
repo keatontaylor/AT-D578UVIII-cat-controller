@@ -90,6 +90,14 @@ export class RxCapture {
   private readonly subscribers = new Set<FrameHandler>()
   private readonly queue = new FrameQueue()
   private pacer: ReturnType<typeof setInterval> | null = null
+  // Unexpected-death recovery: the capture subprocess dying while subscribers exist used to be
+  // SILENT — frames just stopped, indistinguishable from a quiet channel (live-observed as
+  // "RX died"). Now it notifies (→ AppState.rxAudioAlive → UI banner) and auto-restarts with
+  // capped backoff. Deliberate stop() (last subscriber left) is not a death.
+  private restartTimer: ReturnType<typeof setTimeout> | null = null
+  private restartDelayMs = 2000
+  /** Liveness callback: false on unexpected subprocess death, true once (re)started or idle. */
+  onAliveChange: ((alive: boolean) => void) | null = null
 
   constructor(
     private readonly command: CommandFactory,
@@ -149,11 +157,37 @@ export class RxCapture {
     proc.stderr?.on('data', (chunk: Buffer) => this.log(`rx-capture stderr: ${chunk.toString().trim()}`))
     proc.on('close', (code) => {
       this.log(`rx-capture ended (${code})`)
-      if (this.proc === proc) this.proc = null
+      if (this.proc !== proc) return
+      this.proc = null
+      // Subscribers still want frames → this is an UNEXPECTED death (bluealsa/SCO path wedge):
+      // report it and try to come back. (stop() nulls proc BEFORE kill, so a deliberate stop
+      // never lands here.)
+      if (this.subscribers.size > 0) {
+        this.onAliveChange?.(false)
+        this.scheduleRestart()
+      }
     })
     proc.on('error', (err) => this.log(`rx-capture spawn error: ${err.message}`))
     this.startPacer()
     await this.starting
+    this.restartDelayMs = 2000
+    this.onAliveChange?.(true)
+  }
+
+  private scheduleRestart(): void {
+    if (this.restartTimer) return
+    const delay = this.restartDelayMs
+    this.restartDelayMs = Math.min(this.restartDelayMs * 2, 10_000)
+    this.log(`rx-capture: restarting in ${delay} ms`)
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null
+      if (this.subscribers.size === 0 || this.proc || this.starting) return
+      this.start().catch((e) => {
+        this.log(`rx-capture restart failed: ${(e as Error).message}`)
+        this.scheduleRestart()
+      })
+    }, delay)
+    this.restartTimer.unref?.()
   }
 
   /** Pipe read: reframe and ENQUEUE only — never fan out here. The paced timer releases frames so
@@ -185,9 +219,16 @@ export class RxCapture {
       clearInterval(this.pacer)
       this.pacer = null
     }
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
+    this.restartDelayMs = 2000
     this.queue.clear()
-    this.proc?.kill('SIGTERM')
-    this.proc = null
+    const proc = this.proc
+    this.proc = null // null BEFORE kill so the close handler sees a deliberate stop, not a death
+    proc?.kill('SIGTERM')
     this.pending = Buffer.alloc(0)
+    this.onAliveChange?.(true) // idle-by-design is not "down" — clear any banner
   }
 }

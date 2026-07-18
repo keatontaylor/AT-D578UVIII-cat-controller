@@ -50,7 +50,7 @@ async function toggleAudio(): Promise<void> {
       micEnabled.value = false
     } else if (audioPlayerRef.value) {
       setAudioSessionType('playback') // BEFORE play: listening must not route as a "call" on iOS
-      await radio.startAudio(audioPlayerRef.value)
+      await radio.startAudio(audioPlayerRef.value, onAudioDead)
       listening.value = true
     }
   } catch (e) {
@@ -60,6 +60,43 @@ async function toggleAudio(): Promise<void> {
     busy.value = false
   }
 }
+
+// ── mid-session audio-link death → auto-reconnect ────────────────────────────
+// startAudio's health watch (connection state + RTP stall — valid on quiet channels thanks to
+// the backend's liveness tick) reports here at most once per session. Tear down, then retry with
+// backoff; give up after 3 attempts with a manual-retry error. The mic never survives a link
+// death — the operator re-arms deliberately.
+let reconnecting = false
+function onAudioDead(reason: string): void {
+  if (!listening.value || reconnecting) return
+  reconnecting = true
+  error.value = `Audio link lost (${reason}) — reconnecting…`
+  void (async () => {
+    keyed.value = false
+    micEnabled.value = false
+    await radio.stopAudio().catch(() => {})
+    for (let attempt = 1; attempt <= 3 && listening.value; attempt += 1) {
+      await new Promise((r) => setTimeout(r, 1000 * attempt))
+      if (!listening.value || !audioPlayerRef.value) break
+      try {
+        await radio.startAudio(audioPlayerRef.value, onAudioDead)
+        error.value = null
+        reconnecting = false
+        return
+      } catch {
+        /* next attempt */
+      }
+    }
+    reconnecting = false
+    if (listening.value) error.value = 'Audio link lost — reconnect failed; press Enable Audio to retry'
+    listening.value = false
+    setAudioSessionType('auto')
+  })()
+}
+
+// Backend RX capture (bluealsa/SCO) died and is auto-restarting — distinguishable from a quiet
+// channel only because the backend self-reports it (no client-side signal can see this layer).
+const rxCaptureDown = computed(() => radio.state.value?.rxAudioAlive === false)
 
 async function toggleMic(): Promise<void> {
   if (micBusy.value || !listening.value) return
@@ -149,6 +186,7 @@ onBeforeUnmount(() => {
     >{{ micLabel }}</button>
     <button class="btn btn-ghost audio-settings-btn" title="Radio settings — organized like the radio's own menu" @click="settingsOpen = true">Radio Settings</button>
     <span v-if="error" class="audio-listener-error">{{ error }}</span>
+    <span v-else-if="rxCaptureDown" class="audio-listener-error">Radio audio capture down — recovering…</span>
 
     <!-- Live-audio playback sink: where WebRTC audio actually plays, kept in the DOM but hidden. -->
     <audio

@@ -131,6 +131,26 @@ ACK timing (LINK_PROTOCOL §6), and the UI colors strictly off it:
 - A failed unkey goes to **`fault`** (flashing red), **not** green — the watchdog
   (LINK_PROTOCOL §6) drives recovery, and the UI must show "possibly still transmitting."
 
+**TX audio drain (release) — normative.** The browser→backend audio pipe runs behind real time
+(parrot-measured 2026-07-18: 0.4–0.7 s LAN, 1.5–3 s TURN); an instant `56 00` at release
+guillotines the spoken tail still in flight. So on a *normal* release the backend delays the
+`56 00` by the keyup's **own measured pipe latency** (first-TX-frame arrival − key intent,
++250 ms margin, clamped to [300 ms, 3 s]) while continuing to feed arriving audio. Invariants:
+- The mic is **press-gated** browser-side: capture starts at press, the track stops AT release —
+  everything that arrives during the drain is pre-release audio *by construction*.
+- **Every safety path bypasses the drain**: deadman, keying-socket loss, failsafe escalation,
+  and the silence guard all release immediately. The drain is a courtesy on the happy path only.
+- A keyup with **no mic stream** (kerchunk / analog / mic never attached) never drains — the
+  release is immediate, exactly as before.
+- A **re-key during the drain** cancels the pending release and the overs merge.
+- `pttState` stays `keyed` through the drain (the radio *is* transmitting); `unkeying` begins
+  when the delayed `56 00` actually submits.
+
+**Keyed-but-silent guard — normative.** While `keyed` with a mic stream attached
+(`rtc.mic active`), no TX audio arriving for **2.5 s** means the audio path died (RTP loss, tab
+frozen with the socket alive — the split-brain the `/ws` deadman cannot see): the backend
+force-releases immediately and surfaces the reason. Never armed for mic-less keyups.
+
 ## 7. Reconnect & resilience
 WS gives no auto-reconnect for free (unlike SSE), so the client owns it:
 - Reconnect with backoff; on (re)connect the server emits a `state.snapshot` notification and the
