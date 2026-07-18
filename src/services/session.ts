@@ -446,7 +446,11 @@ export class Session {
     }
     if (this.current.ptt !== 'idle' && this.current.ptt !== 'fault') return
     this.releaseAfterKey = false
-    this.txAudio = { keyAt: this.now(), firstFrameAt: null, lastFrameAt: null, micAt: null }
+    // Per-keyup reset — but micAt SURVIVES an already-attached mic (capture-first ordering:
+    // the rtc.mic notify precedes ptt.key), and the guard re-arms (its interval self-disarms
+    // on any pre-key idle tick).
+    this.txAudio = { keyAt: this.now(), firstFrameAt: null, lastFrameAt: null, micAt: this.txMicAttached ? this.now() : null }
+    if (this.txMicAttached) this.armSilenceGuard()
     this.dispatch({ kind: 'ptt', phase: 'keying' })
     this.link.submit(this.pttFrameFor(true), { retransmitSafe: true, maxAttempts: KEY_MAX_ATTEMPTS })
   }
@@ -471,12 +475,24 @@ export class Session {
    * guard: keyed while a mic is EXPECTED but no audio arrives for TX_SILENCE_GUARD_MS means the
    * audio path died (RTP loss, tab frozen with the socket alive) → force-release rather than
    * transmit dead air. A keyup with no mic (kerchunk / analog, mic never armed) is never guarded. */
+  /** LEVEL state: a mic stream is currently attached (rtc.mic active). Survives key()'s
+   * per-keyup txAudio reset — CRITICAL under capture-first ordering, where the rtc.mic notify
+   * arrives BEFORE ptt.key (live bug 2026-07-18: key() wiped micAt → hasDrainableAudio false →
+   * the drain never armed and releases were immediate; run data showed 56 00 landing before the
+   * last audio had even arrived). */
+  private txMicAttached = false
+
   noteTxMicActive(active: boolean): void {
+    this.txMicAttached = active
     if (!active) {
       this.txAudio.micAt = null
       return
     }
     this.txAudio.micAt = this.now()
+    this.armSilenceGuard()
+  }
+
+  private armSilenceGuard(): void {
     if (this.txSilenceGuard) return
     this.txSilenceGuard = setInterval(() => {
       const ptt = this.current.ptt

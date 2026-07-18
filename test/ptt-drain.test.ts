@@ -216,3 +216,50 @@ test('a counter going BACKWARD (new session / renegotiation) re-baselines, not a
     mock.timers.reset()
   }
 })
+
+test('CAPTURE-FIRST ordering: rtc.mic active BEFORE key() still arms the drain + guard', () => {
+  // Live bug 2026-07-18: the browser attaches the mic (rtc.mic active) before ptt.key under
+  // capture-first keying, and key()'s per-keyup reset wiped micAt → the drain never armed and
+  // every release was immediate (56 00 measured landing BEFORE the last audio arrived).
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  try {
+    const { tp, s, advance, baseline, packets } = rig()
+    s.noteTxMicActive(true) // mic attaches FIRST (capture-first)
+    advance(200)
+    s.key() // then the radio keys
+    baseline()
+    advance(300)
+    packets()
+    advance(500)
+    packets() // audio flowing
+    s.unkey() // release — the drain MUST arm (mic was attached, audio arrived)
+    assert.equal(releases(tp), 0, 'release is draining, not immediate')
+    advance(300)
+    packets() // in-flight tail still arriving
+    advance(500)
+    assert.equal(releases(tp), 1, 'released after the counter went quiet')
+    assert.equal(s.state.ptt, 'idle')
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('CAPTURE-FIRST ordering: the silence guard also survives the key() reset', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  try {
+    const notices: string[] = []
+    const { tp, s, advance, baseline } = rig({ onPttFailsafe: (d) => notices.push(d) })
+    s.noteTxMicActive(true) // attach before key
+    advance(200)
+    s.key()
+    // audio path dead: counter frozen forever
+    for (let i = 0; i < 8; i += 1) {
+      baseline()
+      advance(500)
+    }
+    assert.equal(releases(tp), 1, 'guard force-released despite the pre-key mic attach')
+    assert.ok(notices.some((n) => n.includes('no TX audio')))
+  } finally {
+    mock.timers.reset()
+  }
+})
