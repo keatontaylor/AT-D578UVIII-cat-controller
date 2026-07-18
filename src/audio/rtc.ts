@@ -112,6 +112,21 @@ export class AudioBridge {
       else s.setMicActive(false)
     }
   }
+
+  /** Total inbound TX-mic RTP packets across live sessions (null when none report) — polled by
+   * main.ts while PTT is active and fed to the session's drain probe / silence guard. */
+  async txPacketsReceived(): Promise<number | null> {
+    let total: number | null = null
+    for (const s of this.sessions) {
+      if (s.isClosed) {
+        this.sessions.delete(s)
+        continue
+      }
+      const n = await s.txPackets()
+      if (n != null) total = (total ?? 0) + n
+    }
+    return total
+  }
 }
 
 /** Downsample a mono S16 frame from `inRate` to 8 kHz by integer decimation, applying `gain`
@@ -288,6 +303,27 @@ export class RtcAudioSession {
 
   get isClosed(): boolean {
     return this.closed
+  }
+
+  /** Inbound (browser-mic) RTP packets received — REAL-STREAM truth for the PTT drain probe and
+   * the keyed-silent guard. The RTCAudioSink is useless for this: NetEq synthesizes decode-cadence
+   * frames continuously even with NO sender track (live-diagnosed 2026-07-18 — the frame tee sees
+   * a permanent 50 Hz stream), but packetsReceived only advances while the browser's track is
+   * actually attached and sending. Null when stats are unavailable. */
+  async txPackets(): Promise<number | null> {
+    if (this.closed) return null
+    try {
+      const stats = await this.pc.getStats()
+      let packets: number | null = null
+      stats.forEach((r: { type?: string; kind?: string; mediaType?: string; packetsReceived?: number }) => {
+        if (r.type === 'inbound-rtp' && (r.kind === 'audio' || r.mediaType === 'audio')) {
+          packets = r.packetsReceived ?? packets
+        }
+      })
+      return packets
+    } catch {
+      return null
+    }
   }
 
   /** PTT gate for mic TX: open the radio sink + start piping mic audio while keyed; stop on unkey.

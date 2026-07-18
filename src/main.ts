@@ -200,11 +200,26 @@ const audio = new AudioBridge(
 )
 // RX capture liveness → AppState.rxAudioAlive → UI banner ("capture down" vs quiet channel).
 audio.capture.onAliveChange = (alive) => controller.setRxAudioAlive(alive)
-// TX audio frames → the session's pipe-latency probe (release drain) + keyed-silence guard.
-void audio.txSource.subscribe(() => controller.noteTxAudioFrame())
+// TX real-stream evidence → the session's pipe-latency probe (release drain) + keyed-silence
+// guard. RTP packet counts, NOT the frame tee: wrtc's NetEq synthesizes decode-cadence frames
+// continuously even with no sender track (live-diagnosed 2026-07-18 — the tee flattened the
+// drain to its 300 ms floor and made the guard unfireable). Polled only while PTT is active.
+let txRtpPoll: ReturnType<typeof setInterval> | null = null
 // Server-driven mic-sink close: the browser stops its stream AT release, but the sink stays open
 // through the release drain (buffered tail → radio); close when ptt actually returns to rest.
 controller.onChange((s) => {
+  const pttActive = s.radio.ptt === 'keying' || s.radio.ptt === 'keyed' || s.radio.ptt === 'unkeying'
+  if (pttActive && !txRtpPoll) {
+    txRtpPoll = setInterval(() => {
+      void audio.txPacketsReceived().then((n) => {
+        if (n != null) controller.noteTxRtpPackets(n)
+      })
+    }, 200)
+    txRtpPoll.unref?.()
+  } else if (!pttActive && txRtpPoll) {
+    clearInterval(txRtpPoll)
+    txRtpPoll = null
+  }
   if (s.radio.ptt === 'idle' || s.radio.ptt === 'fault') audio.closeMicSinks()
 })
 

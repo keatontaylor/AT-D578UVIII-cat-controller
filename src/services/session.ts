@@ -491,12 +491,22 @@ export class Session {
     this.txSilenceGuard.unref?.()
   }
 
-  /** Every downsampled TX mic frame (from the audio bridge tee) — the pipe-latency probe and the
-   * silence guard's liveness signal. */
+  /** Real TX audio evidence — the pipe-latency probe and the silence guard's liveness signal. */
   noteTxAudioFrame(): void {
     const now = this.now()
     this.txAudio.firstFrameAt ??= now
     this.txAudio.lastFrameAt = now
+  }
+
+  /** RTP-truth feed (main.ts polls AudioBridge.txPacketsReceived while PTT is active): the
+   * packet counter ADVANCING is real browser-stream arrival. The frame tee cannot be used for
+   * this — wrtc's NetEq synthesizes decode-cadence frames continuously even with no sender
+   * track, which flattened the drain to its floor and made the silence guard unfireable. A
+   * counter going BACKWARD (new session / renegotiation) just re-baselines. */
+  private txRtpPrev: number | null = null
+  noteTxRtpPackets(packets: number): void {
+    if (this.txRtpPrev !== null && packets > this.txRtpPrev) this.noteTxAudioFrame()
+    this.txRtpPrev = packets
   }
 
   private disarmSilenceGuard(): void {

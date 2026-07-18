@@ -27,6 +27,7 @@ export interface SessionLike {
   unkey(immediate?: boolean): void
   noteTxMicActive?(active: boolean): void
   noteTxAudioFrame?(): void
+  noteTxRtpPackets?(packets: number): void
   setSetting(name: string, value: string | number): void
   chooseSide(side: SideKey): void
   setVfoMode(side: SideKey, vfo: boolean): void
@@ -506,6 +507,10 @@ export class RadioController {
   /** Every downsampled TX mic frame (audio-bridge tee) — pipe-latency probe + guard liveness. */
   noteTxAudioFrame(): void {
     this.session?.noteTxAudioFrame?.()
+  }
+  /** Inbound TX-mic RTP packet count (polled while PTT active) — real-stream evidence. */
+  noteTxRtpPackets(packets: number): void {
+    this.session?.noteTxRtpPackets?.(packets)
   }
   setSetting(name: string, value: string | number): void {
     this.requireSession().setSetting(name, value)
