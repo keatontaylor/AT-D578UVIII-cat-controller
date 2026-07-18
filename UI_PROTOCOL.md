@@ -131,6 +131,14 @@ ACK timing (LINK_PROTOCOL §6), and the UI colors strictly off it:
 - A failed unkey goes to **`fault`** (flashing red), **not** green — the watchdog
   (LINK_PROTOCOL §6) drives recovery, and the UI must show "possibly still transmitting."
 
+**Capture-first keying — normative.** With a mic armed, the press sequence is: acquire the mic
+(getUserMedia, cold ≈1 s / warm ≈100 ms) → capture live → `ptt.key`. The radio never transmits
+dead air waiting for a cold mic, and the SPEAK label (which appears only on backend `keyed`) can
+only show with capture already flowing — the button reads **WAIT (MIC…)** until then, which is
+the operator's "don't talk yet" cue (words spoken before capture-live are never digitized). A
+release during acquisition keys nothing (a no-op press); an acquisition slower than ~2.5 s keys
+anyway so PTT never feels dead (the track still attaches when it resolves).
+
 **TX audio drain (release) — normative.** The browser→backend audio pipe runs behind real time
 (parrot-measured 2026-07-18: 0.4–0.7 s LAN, 1.5–3 s TURN); an instant `56 00` at release
 guillotines the spoken tail still in flight. So on a *normal* release the backend delays the

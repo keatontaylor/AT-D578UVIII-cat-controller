@@ -416,16 +416,25 @@ function hasMic(): boolean {
   return micArmed
 }
 
-/** Key the radio AND open the per-press mic capture. The key RPC and getUserMedia run in
- * PARALLEL — the radio keys immediately; audio starts as soon as the device+network deliver it
- * (everything captured from the press is transmitted; the gap is dead air, not lost words).
- * Safe to call without an armed mic (plain key / kerchunk). */
+/** Mic phase for the PTT button's honest "when can I actually talk" cue:
+ *  'idle' (no press) → 'acquiring' (device spinning up — DON'T speak yet, words are not being
+ *  captured) → 'live' (capture flowing — the radio is keying/keyed right behind it). */
+const txMicPhase = ref<'idle' | 'acquiring' | 'live'>('idle')
+/** Cold-mic cap: if the device takes longer than this, key anyway (PTT must never feel dead);
+ * the track still attaches when it finally resolves. Cold macOS spin-up measured ~1.2 s. */
+const MIC_ACQUIRE_CAP_MS = 2500
+
+/** Key the radio with CAPTURE-FIRST sequencing: press → acquire the mic → audio path live →
+ * THEN key the radio. The radio never transmits dead air waiting for a cold mic, and the UI's
+ * SPEAK cue (driven by the backend `keyed` phase) can only appear with capture already flowing.
+ * Words spoken before SPEAK are not captured — that's what the WAIT cue is for.
+ * Safe to call without an armed mic (plain key / kerchunk — keys immediately). */
 async function keyMic(): Promise<void> {
   pttPressed = true
   startHoldBeacon() // before the key round-trips, so beacons flow even on a slow link
-  const key = rpc('ptt.key')
   if (micArmed && micSender && !micTrack) {
-    void navigator.mediaDevices
+    txMicPhase.value = 'acquiring'
+    const acquire = navigator.mediaDevices
       .getUserMedia(MIC_CONSTRAINTS)
       .then(async (stream) => {
         const track = stream.getAudioTracks()[0] ?? null
@@ -437,21 +446,32 @@ async function keyMic(): Promise<void> {
         micTrack = track
         notify('rtc.mic', { active: true })
         await micSender.replaceTrack(track)
+        if (pttPressed) txMicPhase.value = 'live'
       })
       .catch((e: unknown) => {
-        // Keyed with no mic = a kerchunk; surface in console, the PTT stays honest.
+        // Mic failed — the key below still proceeds (kerchunk), the console says why.
         console.warn('mic capture failed:', (e as { message?: string })?.message ?? e)
       })
+    // Key only once the capture is live (or the cap expires — PTT must never feel dead).
+    await Promise.race([acquire, new Promise((r) => setTimeout(r, MIC_ACQUIRE_CAP_MS))])
+    if (!pttPressed) {
+      // Released before the mic was ready: nothing was captured, nothing keys — a no-op press.
+      txMicPhase.value = 'idle'
+      stopHoldBeacon()
+      return
+    }
   }
   try {
-    await key
+    await rpc('ptt.key')
   } catch (e) {
     stopHoldBeacon()
+    txMicPhase.value = 'idle'
     throw e
   }
 }
 async function unkeyMic(): Promise<void> {
   pttPressed = false
+  txMicPhase.value = 'idle'
   stopHoldBeacon()
   const unkey = rpc('ptt.unkey') // release intent goes out immediately (safety path)
   const track = micTrack
@@ -676,6 +696,7 @@ export function useRadio() {
     hasMic,
     enableMic,
     disableMic,
+    txMicPhase,
     getRtcStats,
     // Mic→radio gain: runtime-adjustable (applies to the next mic frame) + server-persisted.
     getTxGain: () => rpc<{ gain: number }>('rtc.gain'),

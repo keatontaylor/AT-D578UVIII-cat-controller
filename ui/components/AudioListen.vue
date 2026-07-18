@@ -125,15 +125,32 @@ async function toggleMic(): Promise<void> {
 // UI_PROTOCOL §6 color contract: the button colors off the BACKEND's ptt phase — never red
 // until the radio acks the key, back to green only when the release confirms, flashing on
 // fault. The local `keyed` ref is only the finger (it drives key/release + the label).
+//
+// CAPTURE-FIRST cue: the press sequence is mic-acquire → key, so the label is the "when can I
+// talk" signal: WAIT (mic spinning up / radio keying — words are NOT being captured yet) →
+// SPEAK (capture live + radio-confirmed TX). Cold mics take ~1s; warm re-presses are instant.
 const pttPhase = computed(() => radio.state.value?.radio?.ptt ?? 'idle')
+const micPhase = radio.txMicPhase
 const pttClass = computed(() => ({
   'floating-ptt--fault': pttPhase.value === 'fault',
   'floating-ptt--active': pttPhase.value === 'keyed',
-  'floating-ptt--busy': pttPhase.value === 'keying' || pttPhase.value === 'unkeying' || (keyed.value && pttPhase.value === 'idle'),
+  'floating-ptt--busy':
+    pttPhase.value === 'keying' || pttPhase.value === 'unkeying' || (keyed.value && pttPhase.value === 'idle'),
   'floating-ptt--ready': !keyed.value && pttPhase.value === 'idle',
 }))
+const pttMain = computed(() => (pttPhase.value === 'keyed' ? 'SPEAK' : keyed.value ? 'WAIT' : 'PTT'))
 const pttSub = computed(() =>
-  pttPhase.value === 'fault' ? 'FAULT' : pttPhase.value === 'keyed' ? 'TX ON' : pttPhase.value === 'keying' ? 'KEYING…' : pttPhase.value === 'unkeying' ? 'RELEASING…' : 'Hold',
+  pttPhase.value === 'fault'
+    ? 'FAULT'
+    : pttPhase.value === 'keyed'
+      ? 'TX ON'
+      : pttPhase.value === 'keying'
+        ? 'KEYING…'
+        : pttPhase.value === 'unkeying'
+          ? 'RELEASING…'
+          : keyed.value && micPhase.value === 'acquiring'
+            ? 'MIC…'
+            : 'Hold',
 )
 const pttTitle = computed(() =>
   pttPhase.value === 'fault'
@@ -144,7 +161,9 @@ const pttTitle = computed(() =>
         ? 'Release sent — awaiting the radio'
         : pttPhase.value === 'keying'
           ? 'Key sent — awaiting the radio'
-          : 'Hold to transmit (browser mic → radio)',
+          : keyed.value && micPhase.value === 'acquiring'
+            ? 'Preparing the microphone — speak when the button says SPEAK'
+            : 'Hold to transmit (browser mic → radio)',
 )
 
 async function pressMic(): Promise<void> {
@@ -215,7 +234,7 @@ onBeforeUnmount(() => {
         @pointercancel.prevent="releaseMic"
         @contextmenu.prevent
       >
-        <span class="floating-ptt-main">{{ keyed ? 'SPEAK' : 'PTT' }}</span>
+        <span class="floating-ptt-main">{{ pttMain }}</span>
         <span class="floating-ptt-sub">{{ pttSub }}</span>
       </button>
     </Teleport>
