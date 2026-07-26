@@ -44,6 +44,8 @@ export interface TranscriptSidecar {
   /** Importance (stage 2) — added after scoring; absent = not yet scored, 0 = routine. */
   importance?: ImportanceTier
   importanceReason?: string
+  /** Neutral one-line "what happened" description (every scored clip). */
+  summary?: string
   /** LLM-cleaned transcript (formatting, phonetics→callsigns, lingo) — `text` above stays the
    * verbatim Whisper output; the UI prefers cleanText when present. */
   cleanText?: string
@@ -329,7 +331,7 @@ export class Transcriber {
     if (inputs.length === 0) return
     // Token-budget degradation: cleanup output ≈ the transcript itself; when today's estimated
     // chat-token spend is over the cap, strip cleanup — scoring output is tiny and always fits.
-    const estTokens = Math.ceil((this.guidanceFn().length + inputs.reduce((a, i) => a + i.text.length * (i.clean ? 2 : 1), 0)) / 4) + 500
+    const estTokens = Math.ceil((this.guidanceFn().length + inputs.reduce((a, i) => a + i.text.length * (i.clean ? 2 : 1), 0)) / 4) + 500 + inputs.length * 25 /* summaries */
     this.rollChat()
     if ((this.state.chatTokens ?? 0) + estTokens > IMPORTANCE.dailyTokenCap && inputs.some((i) => i.clean)) {
       inputs = inputs.map((i) => ({ ...i, clean: false }))
@@ -362,6 +364,7 @@ export class Transcriber {
       if (!side) continue
       side.importance = s.tier
       side.importanceReason = s.reason
+      if (s.summary) side.summary = s.summary
       if (s.cleanText) side.cleanText = s.cleanText
       this.writeSidecar(input.id, side)
       this.emit({ id: input.id, status: side.status, importance: s.tier })

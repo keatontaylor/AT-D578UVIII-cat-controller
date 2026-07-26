@@ -647,12 +647,14 @@ onBeforeUnmount(() => {
       <!-- ═══ TRANSCRIPT — under the loaded clip's player/metadata/scrubber. Text arrives lazily
            (recordings.transcript on selection); the list only ever carries the status. ═══ -->
       <div v-if="selected && !isTx(selected)" class="rec-transcript">
-        <!-- Importance reason — the "why" surface: tier badge + one-line model reason (tier ≥2
-             only; tier 1 is a model-internal buffer, never shown). -->
-        <div v-if="importTier(selected) >= 2" class="rec-importance" :class="{ 'rec-importance--urgent': importTier(selected) >= 3 }">
+        <!-- Clip summary + importance — one line: neutral "what happened" for every scored clip;
+             tier ≥2 adds the badge (with the model's importance reason on hover). Tier 1 is a
+             model-internal buffer, shown as a plain summary like tier 0. -->
+        <div v-if="importTier(selected) >= 2" class="rec-importance" :class="{ 'rec-importance--urgent': importTier(selected) >= 3 }" :title="transcript?.importanceReason">
           <span class="rec-importance-badge">{{ importTier(selected) >= 3 ? 'URGENT' : 'IMPORTANT' }}</span>
-          <span v-if="transcript?.importanceReason" class="rec-importance-reason">{{ transcript.importanceReason }}</span>
+          <span class="rec-importance-reason">{{ transcript?.summary || transcript?.importanceReason }}</span>
         </div>
+        <div v-else-if="transcript?.summary" class="rec-summary">{{ transcript.summary }}</div>
         <template v-if="transcript?.status === 'done' && transcript.text">
           <p class="rec-transcript-text">{{ showRaw ? transcript.text : (transcript.cleanText || transcript.text) }}</p>
           <div class="rec-transcript-foot">
@@ -814,6 +816,7 @@ onBeforeUnmount(() => {
 }
 .rec-importance--urgent .rec-importance-badge { background: rgba(248, 81, 73, 0.2); color: var(--danger, #f85149); }
 .rec-importance-reason { font-size: 0.82rem; color: var(--text, #e6edf3); }
+.rec-summary { font-size: 0.8rem; color: var(--text-dim, #8b949e); font-style: italic; padding-bottom: 2px; }
 
 /* timeline marks + rings — marked blocks get a floor width so the ring reads even when the raw
    clip would render at ~1px (long windows); the mark sits inside the top edge (track clips

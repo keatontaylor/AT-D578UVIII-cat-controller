@@ -37,10 +37,11 @@ test('recurrence: near-identical scripts match, distinct traffic does not', () =
 
 test('parseScores: tolerates fences/prose, drops unknown ids and bad tiers, keeps cleanText', () => {
   const ids = ['a', 'b', 'c']
-  const raw = 'Here you go:\n```json\n{"scores":[{"id":"a","tier":3,"reason":"mayday in progress","cleanText":"Mayday, mayday, firefighter down."},{"id":"b","tier":9,"reason":"bad"},{"id":"zzz","tier":2,"reason":"unknown"},{"id":"c","tier":0,"reason":"routine"}]}\n```'
+  const raw = 'Here you go:\n```json\n{"scores":[{"id":"a","tier":3,"reason":"mayday in progress","summary":"Firefighter mayday during structure fire","cleanText":"Mayday, mayday, firefighter down."},{"id":"b","tier":9,"reason":"bad"},{"id":"zzz","tier":2,"reason":"unknown"},{"id":"c","tier":0,"reason":"routine"}]}\n```'
   const m = parseScores(raw, ids)
   assert.equal(m.get('a')!.tier, 3)
   assert.equal(m.get('a')!.reason, 'mayday in progress')
+  assert.equal(m.get('a')!.summary, 'Firefighter mayday during structure fire')
   assert.equal(m.get('a')!.cleanText, 'Mayday, mayday, firefighter down.')
   assert.equal(m.get('c')!.cleanText, undefined, 'no cleanText when model omits it')
   assert.equal(m.has('b'), false, 'tier 9 rejected')
@@ -143,7 +144,7 @@ test('transcriber: cleanup requested for long clips, cleanText persisted + verba
     complete: async (_s, user) => {
       const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string; clean: boolean }[]
       sawClean = items.some((i) => i.clean)
-      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'ragchew', cleanText: 'This is K0BUL with a funnel cloud report near Longmont.' })) })
+      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'ragchew', summary: 'Weather report ragchew', cleanText: 'This is K0BUL with a funnel cloud report near Longmont.' })) })
     },
   })
   saveClip(svc, dir, 'short1', 4) // under the 8s clean floor
@@ -160,6 +161,7 @@ test('transcriber: cleanup requested for long clips, cleanText persisted + verba
   const side = svc.transcript('long1') as TranscriptSidecar
   assert.ok(side.text && side.text.includes('funnel'), 'verbatim Whisper text preserved')
   assert.equal(side.cleanText, 'This is K0BUL with a funnel cloud report near Longmont.', 'cleanText persisted alongside verbatim')
+  assert.equal(side.summary, 'Weather report ragchew', 'summary persisted for a tier-0 clip')
 })
 
 test('transcriber: recurring preamble carries a high recurrence flag to the model', async () => {

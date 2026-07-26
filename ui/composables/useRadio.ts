@@ -57,6 +57,8 @@ export interface ClipTranscript {
   flags?: string[]
   importance?: number
   importanceReason?: string
+  /** Neutral one-line "what happened" description (every scored clip). */
+  summary?: string
 }
 /** A recording IN PROGRESS (recordings.opened) — drawn growing toward "now" until it resolves
  * into saved (→ recordings list) or discarded (a blip). */
