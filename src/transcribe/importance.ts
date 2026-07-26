@@ -17,12 +17,19 @@ export interface ScoreInput {
   /** 0-1: max n-gram similarity to recent transcripts on the SAME channel (recurrence = preamble).
    * Computed locally, passed to the model as context so it can discount scheduled announcements. */
   readonly recurrence: number
+  /** Request a cleaned-up version of the text in the same call (selective — cleanup roughly
+   * doubles output tokens, so short/low-value clips skip it to stay inside free-tier TPD). */
+  readonly clean?: boolean
+  /** Known metadata to cross-check cleanup against (e.g. the DMR talkgroup name). */
+  readonly hints?: string
 }
 
 export interface ScoreOutput {
   readonly id: string
   readonly tier: ImportanceTier
   readonly reason: string
+  /** Present when cleanup was requested and the model returned one. */
+  readonly cleanText?: string
 }
 
 export interface ChatClient {
@@ -69,7 +76,13 @@ export const SYSTEM_PROMPT =
   'When uncertain between two tiers, choose the LOWER. A high "recurrence" value means the text ' +
   'closely matches earlier clips on that channel — almost always a scheduled/scripted announcement ' +
   '(e.g. a nightly net preamble) and should be tier 0 even if it mentions emergencies. ' +
-  'Respond ONLY with a JSON object {"scores":[{"id","tier","reason"}...]} covering every clip id.'
+  'For clips marked "clean":true, ALSO return a cleaned transcript as "cleanText": fix punctuation, ' +
+  'capitalization and paragraphing; resolve spoken ITU phonetics into callsigns (e.g. "kilo foxtrot ' +
+  'zero whiskey whiskey sierra" -> "KF0WWS"); write ham lingo conventionally ("seventy-three" -> ' +
+  '"73", "five nine" -> "5-9", QSL/QSO/QTH uppercase). Be CONSERVATIVE: never invent or reword ' +
+  'content, never turn garbled fragments into fluent sentences — leave unclear stretches as-is or ' +
+  'mark them [unclear]. Preserve every factual detail verbatim. ' +
+  'Respond ONLY with a JSON object {"scores":[{"id","tier","reason","cleanText"?}...]} covering every clip id.'
 
 export function buildUserPrompt(guidance: string, clips: ScoreInput[]): string {
   const items = clips.map((c) => ({
@@ -78,6 +91,8 @@ export function buildUserPrompt(guidance: string, clips: ScoreInput[]): string {
     time: new Date(c.startedAt).toISOString().slice(11, 16),
     durationS: Math.round(c.durationMs / 1000),
     recurrence: Number(c.recurrence.toFixed(2)),
+    clean: c.clean === true,
+    ...(c.hints ? { hints: c.hints } : {}),
     text: c.text.slice(0, 1500),
   }))
   return `USER GUIDANCE:\n${guidance}\n\nCLIPS TO SCORE (JSON):\n${JSON.stringify(items)}`
@@ -105,11 +120,16 @@ export function parseScores(raw: string, ids: string[]): Map<string, ScoreOutput
   const scores = (parsed as { scores?: unknown }).scores
   if (!Array.isArray(scores)) return out
   for (const s of scores) {
-    const o = s as { id?: unknown; tier?: unknown; reason?: unknown }
+    const o = s as { id?: unknown; tier?: unknown; reason?: unknown; cleanText?: unknown }
     if (typeof o.id !== 'string' || !idSet.has(o.id)) continue
     const tier = Number(o.tier)
     if (!TIERS.has(tier)) continue
-    out.set(o.id, { id: o.id, tier: tier as ImportanceTier, reason: typeof o.reason === 'string' ? o.reason.slice(0, 120) : '' })
+    out.set(o.id, {
+      id: o.id,
+      tier: tier as ImportanceTier,
+      reason: typeof o.reason === 'string' ? o.reason.slice(0, 120) : '',
+      ...(typeof o.cleanText === 'string' && o.cleanText.trim() ? { cleanText: o.cleanText.slice(0, 8000) } : {}),
+    })
   }
   return out
 }

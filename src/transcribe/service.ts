@@ -44,6 +44,9 @@ export interface TranscriptSidecar {
   /** Importance (stage 2) — added after scoring; absent = not yet scored, 0 = routine. */
   importance?: ImportanceTier
   importanceReason?: string
+  /** LLM-cleaned transcript (formatting, phonetics→callsigns, lingo) — `text` above stays the
+   * verbatim Whisper output; the UI prefers cleanText when present. */
+  cleanText?: string
 }
 
 export interface TranscriberEvent {
@@ -67,6 +70,9 @@ interface PersistedState {
   dayReq?: number
   hour?: string
   hourSec?: number
+  /** Estimated chat tokens spent today (importance/cleanup batches; chars/4 heuristic). */
+  chatDay?: string
+  chatTokens?: number
 }
 
 const MIN_CLIP_MS = 3000 // kerchunk floor — bake-off-proven hallucination fodder, ~1% of audio
@@ -79,14 +85,22 @@ const DEFAULTS = {
   dailyReqCap: Number(process.env['ANYTONE_TRANSCRIBE_DAILY_REQ'] ?? 1_800),
   tickMs: 4_000,
 }
-// Importance scoring (stage 2): batched over the Groq CHAT endpoint (separate quota from Whisper).
-// Model ladder is env-overridable; gpt-oss-120b = current free-tier best, llama fallbacks behind.
+// Importance scoring + text cleanup (stage 2): ONE batched call over the Groq CHAT endpoint
+// (separate quota from Whisper) returns tier/reason AND a cleaned transcript for selected clips.
+// Cleanup roughly doubles output tokens, so it is SELECTIVE (length/duration floor) and the
+// binding free-tier constraint becomes tokens-per-day — tracked with an estimated budget; under
+// pressure cleanup is stripped BEFORE scoring is sacrificed (triage is the mission, pretty text
+// is the enhancement). Model env-overridable; on non-quota failure one retry on the fallback.
 const IMPORTANCE = {
   model: process.env['ANYTONE_IMPORTANCE_MODEL'] ?? 'openai/gpt-oss-120b',
+  fallbackModel: process.env['ANYTONE_IMPORTANCE_FALLBACK'] ?? 'llama-3.1-8b-instant',
   batchSize: 15,
   batchWindowMs: 5 * 60_000, // score after 15 clips OR 5 minutes, whichever first
   recurrenceLookback: 40, // prior same-channel transcripts compared for the scheduled-preamble flag
   enabled: process.env['ANYTONE_IMPORTANCE'] !== '0',
+  cleanMinChars: 80, // selective cleanup floor: short blurts don't need pretty formatting
+  cleanMinDurationMs: 8_000,
+  dailyTokenCap: Number(process.env['ANYTONE_IMPORTANCE_DAILY_TOKENS'] ?? 150_000), // est., margin under free TPD
 }
 
 export interface TranscriberDeps {
@@ -153,7 +167,7 @@ export class Transcriber {
   /** Rolling buffer of recently-transcribed clips (newest first, capped) — supplies the score
    * inputs' channel/time and the per-channel recurrence history. In-memory: recurrence detection
    * spans the current session (sessions run for days), not restarts. */
-  private readonly recentDone: { id: string; channel: string; startedAt: number; text: string }[] = []
+  private readonly recentDone: { id: string; channel: string; startedAt: number; text: string; talkgroupName?: string }[] = []
 
   constructor(private readonly deps: TranscriberDeps) {
     this.now = deps.now ?? Date.now
@@ -171,12 +185,12 @@ export class Transcriber {
     }
   }
 
-  private makeGroqChat(): ChatClient {
+  private makeGroqChat(model = IMPORTANCE.model): ChatClient {
     return {
       complete: (system, user) => {
         const key = this.keyFn()
         if (!key) throw new Error('no key')
-        return chatComplete(system, user, { key, model: IMPORTANCE.model })
+        return chatComplete(system, user, { key, model })
       },
     }
   }
@@ -292,24 +306,35 @@ export class Transcriber {
     }
   }
 
-  /** Score a batch of already-transcribed clips and patch their sidecars in place. */
+  /** Score (and selectively clean) a batch of transcribed clips; patch sidecars in place. */
   private async scoreBatchNow(ids: string[]): Promise<void> {
-    const inputs: ScoreInput[] = []
+    let inputs: ScoreInput[] = []
     for (const id of ids) {
       const rec = this.recentDone.find((r) => r.id === id)
       const side = this.sidecar(id)
       if (!rec || !side || side.status !== 'done' || !side.text) continue
       const priors = this.recentDone.filter((r) => r.channel === rec.channel && r.id !== id).slice(0, IMPORTANCE.recurrenceLookback).map((r) => r.text)
+      const durationMs = (side.trim?.endMs ?? 0) - (side.trim?.startMs ?? 0)
       inputs.push({
         id,
         channel: rec.channel,
         startedAt: rec.startedAt,
-        durationMs: (side.trim?.endMs ?? 0) - (side.trim?.startMs ?? 0),
+        durationMs,
         text: side.text,
         recurrence: recurrenceScore(side.text, priors),
+        clean: side.text.length >= IMPORTANCE.cleanMinChars && durationMs >= IMPORTANCE.cleanMinDurationMs,
+        ...(rec.talkgroupName ? { hints: `talkgroup: ${rec.talkgroupName}` } : {}),
       })
     }
     if (inputs.length === 0) return
+    // Token-budget degradation: cleanup output ≈ the transcript itself; when today's estimated
+    // chat-token spend is over the cap, strip cleanup — scoring output is tiny and always fits.
+    const estTokens = Math.ceil((this.guidanceFn().length + inputs.reduce((a, i) => a + i.text.length * (i.clean ? 2 : 1), 0)) / 4) + 500
+    this.rollChat()
+    if ((this.state.chatTokens ?? 0) + estTokens > IMPORTANCE.dailyTokenCap && inputs.some((i) => i.clean)) {
+      inputs = inputs.map((i) => ({ ...i, clean: false }))
+      this.log('transcriber: chat token budget low — scoring without cleanup this batch')
+    }
     let scores
     try {
       scores = await scoreBatch(this.chat!, this.guidanceFn(), inputs)
@@ -320,20 +345,42 @@ export class Transcriber {
         this.log(`transcriber: importance 429 — deferring batch (${new Date(this.scoreDeferUntil).toISOString()})`)
         return
       }
-      this.log(`transcriber: importance scoring failed: ${(e as Error).message}`)
-      return // unscored clips stay tier-absent (routine); no retry storm
+      // Primary model hiccup (bad output, 5xx, retired model): one retry on the fallback,
+      // scoring-only — triage survives even when the good model is unavailable.
+      this.log(`transcriber: importance scoring failed on ${IMPORTANCE.model}: ${(e as Error).message} — retrying on ${IMPORTANCE.fallbackModel}`)
+      try {
+        scores = await scoreBatch(this.deps.chatClient ?? this.makeGroqChat(IMPORTANCE.fallbackModel), this.guidanceFn(), inputs.map((i) => ({ ...i, clean: false })))
+      } catch (e2) {
+        this.log(`transcriber: importance fallback failed: ${(e2 as Error).message}`)
+        return // unscored clips stay tier-absent (routine); no retry storm
+      }
     }
+    this.spendChat(estTokens)
     for (const input of inputs) {
       const s = scores.get(input.id) ?? { id: input.id, tier: 0 as ImportanceTier, reason: '' }
       const side = this.sidecar(input.id)
       if (!side) continue
       side.importance = s.tier
       side.importanceReason = s.reason
+      if (s.cleanText) side.cleanText = s.cleanText
       this.writeSidecar(input.id, side)
       this.emit({ id: input.id, status: side.status, importance: s.tier })
     }
     const notable = inputs.filter((i) => (scores.get(i.id)?.tier ?? 0) >= 2).length
-    this.log(`transcriber: scored ${inputs.length} clip(s)${notable ? `, ${notable} important+` : ''}`)
+    const cleaned = inputs.filter((i) => scores.get(i.id)?.cleanText).length
+    this.log(`transcriber: scored ${inputs.length} clip(s)${cleaned ? `, cleaned ${cleaned}` : ''}${notable ? `, ${notable} important+` : ''}`)
+  }
+
+  private rollChat(): void {
+    if (this.state.chatDay !== this.dayKey()) {
+      this.state.chatDay = this.dayKey()
+      this.state.chatTokens = 0
+    }
+  }
+  private spendChat(tokens: number): void {
+    this.rollChat()
+    this.state.chatTokens = (this.state.chatTokens ?? 0) + tokens
+    this.persistState()
   }
 
   private pick(): QueueItem | null {
@@ -426,7 +473,7 @@ export class Transcriber {
       return
     }
     // Record for scoring context BEFORE finishing (recurrence history + score inputs).
-    this.recentDone.unshift({ id: clip.id, channel: clip.channelName ?? '', startedAt: clip.startedAt, text: result.text })
+    this.recentDone.unshift({ id: clip.id, channel: clip.channelName ?? '', startedAt: clip.startedAt, text: result.text, ...(clip.talkgroupName ? { talkgroupName: clip.talkgroupName } : {}) })
     if (this.recentDone.length > 500) this.recentDone.length = 500
     this.finish(clip.id, {
       v: 1,

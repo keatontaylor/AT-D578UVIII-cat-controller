@@ -35,12 +35,14 @@ test('recurrence: near-identical scripts match, distinct traffic does not', () =
   assert.equal(recurrenceScore(ragchew, [preamble, preamble2]), 0)
 })
 
-test('parseScores: tolerates fences/prose, drops unknown ids and bad tiers', () => {
+test('parseScores: tolerates fences/prose, drops unknown ids and bad tiers, keeps cleanText', () => {
   const ids = ['a', 'b', 'c']
-  const raw = 'Here you go:\n```json\n{"scores":[{"id":"a","tier":3,"reason":"mayday in progress"},{"id":"b","tier":9,"reason":"bad"},{"id":"zzz","tier":2,"reason":"unknown"},{"id":"c","tier":0,"reason":"routine"}]}\n```'
+  const raw = 'Here you go:\n```json\n{"scores":[{"id":"a","tier":3,"reason":"mayday in progress","cleanText":"Mayday, mayday, firefighter down."},{"id":"b","tier":9,"reason":"bad"},{"id":"zzz","tier":2,"reason":"unknown"},{"id":"c","tier":0,"reason":"routine"}]}\n```'
   const m = parseScores(raw, ids)
   assert.equal(m.get('a')!.tier, 3)
   assert.equal(m.get('a')!.reason, 'mayday in progress')
+  assert.equal(m.get('a')!.cleanText, 'Mayday, mayday, firefighter down.')
+  assert.equal(m.get('c')!.cleanText, undefined, 'no cleanText when model omits it')
   assert.equal(m.has('b'), false, 'tier 9 rejected')
   assert.equal(m.has('zzz'), false, 'unknown id rejected')
   assert.equal(m.get('c')!.tier, 0)
@@ -77,7 +79,7 @@ function rig(chat: ChatClient) {
     guidanceFn: () => 'test guidance',
     chatClient: chat,
     transcribeFn: async () => ({
-      text: 'This is K0BUL with a funnel cloud report near Longmont.',
+      text: 'This is K0BUL with a funnel cloud report near Longmont, wall cloud rotating to the northeast, requesting SKYWARN net control acknowledge.',
       segments: [{ startS: 0.2, endS: 3, text: 'This is K0BUL with a funnel cloud report near Longmont.' }],
       avgLogprob: -0.2, maxNoSpeechProb: 0.05, apiMs: 100,
     }),
@@ -85,8 +87,8 @@ function rig(chat: ChatClient) {
   svc.subscribe((e) => events.push(e))
   return { svc, dir, clock, events }
 }
-function saveClip(svc: Transcriber, dir: string, id: string): TranscribableClip {
-  const wav = speechWav()
+function saveClip(svc: Transcriber, dir: string, id: string, seconds = 4): TranscribableClip {
+  const wav = speechWav(seconds)
   writeFileSync(join(dir, `${id}.wav`), wav)
   const clip = { id, startedAt: 1, durationMs: analyzeSpeech(parseWav(wav)).durationMs, channelName: 'COLCON DENVER' }
   svc.onClipSaved(clip)
@@ -133,6 +135,31 @@ test('transcriber: importance 429 re-queues the batch, does not lose clips', asy
   clock.t += 120_000 // past the 429 cooldown
   await svc.tick() // retry succeeds
   assert.equal(svc.transcript('s1')!.importance, 1)
+})
+
+test('transcriber: cleanup requested for long clips, cleanText persisted + verbatim kept', async () => {
+  let sawClean = false
+  const { svc, dir, clock } = rig({
+    complete: async (_s, user) => {
+      const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string; clean: boolean }[]
+      sawClean = items.some((i) => i.clean)
+      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'ragchew', cleanText: 'This is K0BUL with a funnel cloud report near Longmont.' })) })
+    },
+  })
+  saveClip(svc, dir, 'short1', 4) // under the 8s clean floor
+  await svc.tick()
+  clock.t += 6 * 60_000
+  await svc.tick()
+  assert.equal(sawClean, false, 'short clip not marked for cleanup')
+
+  saveClip(svc, dir, 'long1', 10) // over the floor → cleanup requested
+  await svc.tick()
+  clock.t += 6 * 60_000
+  await svc.tick()
+  assert.equal(sawClean, true, 'long clip marked for cleanup')
+  const side = svc.transcript('long1') as TranscriptSidecar
+  assert.ok(side.text && side.text.includes('funnel'), 'verbatim Whisper text preserved')
+  assert.equal(side.cleanText, 'This is K0BUL with a funnel cloud report near Longmont.', 'cleanText persisted alongside verbatim')
 })
 
 test('transcriber: recurring preamble carries a high recurrence flag to the model', async () => {

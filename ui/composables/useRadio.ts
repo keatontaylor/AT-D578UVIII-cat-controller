@@ -50,6 +50,9 @@ export interface ClipTranscript {
   status: 'done' | 'skipped' | 'failed'
   reason?: string
   text?: string
+  /** LLM-cleaned transcript (formatting, callsigns, lingo). Preferred for display; `text` is the
+   * verbatim Whisper output, kept so a wrong "correction" is always recoverable. */
+  cleanText?: string
   segments?: { startMs: number; endMs: number; text: string }[]
   flags?: string[]
   importance?: number

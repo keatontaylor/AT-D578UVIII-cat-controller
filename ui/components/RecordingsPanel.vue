@@ -362,11 +362,13 @@ const selected = computed(() => recordings.value.find((c) => c.id === selectedId
 // clip's status changes (e.g. queued → done while the user is looking at it). ──
 const transcript = ref<ClipTranscript | null>(null)
 const transcriptBusy = ref(false)
+const showRaw = ref(false) // toggle raw Whisper vs LLM-cleaned; resets per clip
 watch(
   // Re-fetch on selection, on status change (queued→done), AND on importance change (scores land
   // minutes after the transcript — the sidecar gains importanceReason then).
   () => [selectedId.value, selected.value?.transcript, selected.value?.importance] as const,
   async ([id, status]) => {
+    showRaw.value = false
     if (!id || !status || status === 'queued' || status === 'deferred') {
       transcript.value = null
       return
@@ -652,8 +654,11 @@ onBeforeUnmount(() => {
           <span v-if="transcript?.importanceReason" class="rec-importance-reason">{{ transcript.importanceReason }}</span>
         </div>
         <template v-if="transcript?.status === 'done' && transcript.text">
-          <p class="rec-transcript-text">{{ transcript.text }}</p>
-          <span v-if="transcript.flags?.length" class="rec-transcript-flags" :title="'Transcription confidence flags: ' + transcript.flags.join(', ')">{{ transcript.flags.join(' · ') }}</span>
+          <p class="rec-transcript-text">{{ showRaw ? transcript.text : (transcript.cleanText || transcript.text) }}</p>
+          <div class="rec-transcript-foot">
+            <span v-if="transcript.flags?.length" class="rec-transcript-flags" :title="'Transcription confidence flags: ' + transcript.flags.join(', ')">{{ transcript.flags.join(' · ') }}</span>
+            <button v-if="transcript.cleanText" class="rec-transcript-raw" :title="showRaw ? 'Show the cleaned transcript' : 'Show the raw Whisper transcript'" @click="showRaw = !showRaw">{{ showRaw ? 'cleaned' : 'raw' }}</button>
+          </div>
         </template>
         <span v-else-if="selected.transcript === 'queued'" class="rec-transcript-status">transcribing…</span>
         <span v-else-if="selected.transcript === 'deferred'" class="rec-transcript-status">transcription deferred (quota) — will catch up</span>
@@ -792,7 +797,12 @@ onBeforeUnmount(() => {
   white-space: pre-wrap; user-select: text; max-height: 9.5em; overflow-y: auto;
 }
 .rec-transcript-status { font-size: 0.78rem; color: var(--text-dim, #8b949e); font-style: italic; }
+.rec-transcript-foot { display: flex; align-items: center; gap: 10px; }
 .rec-transcript-flags { font-size: 0.72rem; color: var(--warn, #d29922); }
+.rec-transcript-raw {
+  margin-left: auto; background: none; border: none; padding: 0; cursor: pointer;
+  font-size: 0.72rem; color: var(--text-dim, #8b949e); text-decoration: underline;
+}
 .rec-transcript-btn { align-self: flex-start; }
 
 /* ── IMPORTANCE ── amber = important (tier 2), red = urgent (tier 3). Rings/marks not fills, so

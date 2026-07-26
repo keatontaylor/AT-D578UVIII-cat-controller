@@ -34,8 +34,13 @@ export interface GroqOptions {
   readonly endpoint?: string
 }
 
+// Whisper treats the prompt as PRECEDING TRANSCRIPT, not instructions — it mimics what it sees.
+// So this is a fake exchange written in the exact style we want out: callsign shapes (K0/W0/KF0
+// prefixes), ham lingo as numerals ("73", "5-9"), local proper nouns, punctuation. ~60 tokens,
+// leaving prompt budget for the per-clip channel/talkgroup context line.
 export const PROMPT_BASE =
-  'Amateur ham radio voice traffic. ITU phonetic alphabet, callsigns such as KF0WWS, K0NR, W0ABC, signal reports, repeater nets.'
+  "KF0WWS, this is K0NR, you're 5-9 into the Colorado Connection. QSL on the QTH, I'm simplex " +
+  'from Longmont, 5 watts to a J-pole. 73 to you and the SKYWARN net, W0ABC clear on the repeater.'
 
 export function buildPrompt(channelName: string | null, talkgroupName: string | null): string {
   const ctx = [
