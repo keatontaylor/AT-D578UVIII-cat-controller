@@ -15,6 +15,7 @@ import { BluealsaHfp } from './audio'
 import { AudioBridge, wired48kTo8k, type IceServer } from './audio/rtc'
 import { cloudflareTurn, staticIce } from './audio/ice'
 import { Recorder } from './audio/recorder'
+import { Transcriber } from './transcribe/service'
 import { ScoKick } from './audio/sco-kick'
 import { PacketService } from './packet/service'
 import { createBtManager, resolveSppChannel } from './bluetooth'
@@ -210,6 +211,9 @@ let txRtpPoll: ReturnType<typeof setInterval> | null = null
 controller.onChange((s) => {
   const pttActive = s.radio.ptt === 'keying' || s.radio.ptt === 'keyed' || s.radio.ptt === 'unkeying'
   if (pttActive && !txRtpPoll) {
+    // Keying a channel is the strongest engagement signal the transcription learner gets.
+    const keyedCh = s.radio.sides[s.radio.selectedSide]?.channelName
+    if (keyedCh) transcriber.noteEngagement('ptt', keyedCh)
     txRtpPoll = setInterval(() => {
       void audio.txPacketsReceived().then((n) => {
         if (n != null) controller.noteTxRtpPackets(n)
@@ -260,6 +264,20 @@ const recorder = new Recorder(
   },
   (m) => console.log(`[rec] ${m}`),
 )
+
+// Transcription side-process: auto-ON whenever recording is on AND a Groq key exists
+// (GROQ_API_KEY or ~/.groq_key) — no toggle of its own; absent key = everything stays
+// untranscribed. Sidecar files next to the clips; learned per-channel priority; free-tier budget.
+const transcriber = new Transcriber({
+  dir: RECORDINGS_DIR,
+  recorderEnabled: () => recorder.status.enabled,
+  log: (m) => console.log(`[stt] ${m}`),
+})
+recorder.subscribe((e) => {
+  if (e.type === 'saved') transcriber.onClipSaved(e.clip)
+})
+// Boot rescan: queue clips saved since first-enable that never got transcribed (crash recovery).
+void recorder.list().then((clips) => transcriber.rescan(clips)).catch(() => {})
 
 // UI PTT deadman: keyed with no `ptt.hold` beacon for this long → force-release (see server.ts).
 const PTT_DEADMAN_MS = Number(process.env['ANYTONE_PTT_DEADMAN_MS'] ?? 4000)
@@ -410,6 +428,7 @@ const app = await createServer(
     audio,
     recorder,
     txRecorder,
+    transcriber,
     packet,
     saveTxGain: (gain) => {
       runtimeCfg.txGain = gain
@@ -431,6 +450,7 @@ async function shutdown(): Promise<void> {
   // Finalize any in-flight clip FIRST (saved/discarded pushed, sidecar written) — a restart must
   // never strand an orphan WAV or leave clients holding a phantom "live" recording.
   await Promise.all([recorder.setEnabled(false), txRecorder.setEnabled(false)]).catch(() => {})
+  transcriber.close()
   await packet.disable().catch(() => {})
   await controller.disconnect().catch(() => {})
   await app.close().catch(() => {})

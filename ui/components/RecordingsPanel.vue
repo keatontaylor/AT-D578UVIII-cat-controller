@@ -7,10 +7,10 @@
 // growing toward "now". A CURSOR scrubs the timeline; Play runs continuously from the cursor,
 // auto-advancing to the next clip (Next jumps manually). Audio streams from the range-capable
 // /recordings/<id>.wav route. Touch: horizontal drag pans, tap seeks/plays.
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import AppSelect from './AppSelect.vue'
 import AppSlider from './AppSlider.vue'
-import { useRadio, type LiveRecording, type RecordingClip } from '../composables/useRadio'
+import { useRadio, type ClipTranscript, type LiveRecording, type RecordingClip } from '../composables/useRadio'
 
 const radio = useRadio()
 const recordings = radio.recordings
@@ -179,6 +179,7 @@ function playClip(clip: RecordingClip, offsetSec = 0): void {
   if (!audio) return
   playingId.value = clip.id
   selectedId.value = clip.id
+  notePlayed(clip)
   posSec.value = offsetSec
   cursorTime.value = clip.startedAt + offsetSec * 1000
   audio.src = clipUrl(clip.id)
@@ -351,6 +352,40 @@ function goLive(): void {
 }
 
 const selected = computed(() => recordings.value.find((c) => c.id === selectedId.value) ?? null)
+
+// ── Transcript (side-process metadata): status rides the clip list; TEXT is fetched lazily here,
+// only for the selected clip — deliberately never part of hydration. Re-fetches when the selected
+// clip's status changes (e.g. queued → done while the user is looking at it). ──
+const transcript = ref<ClipTranscript | null>(null)
+const transcriptBusy = ref(false)
+watch(
+  () => [selectedId.value, selected.value?.transcript] as const,
+  async ([id, status]) => {
+    transcript.value = null
+    if (!id || !status || status === 'queued' || status === 'deferred') return
+    try {
+      transcript.value = await radio.recordingsTranscript(id)
+    } catch { /* transcript fetch is best-effort; the chip still shows status */ }
+  },
+  { immediate: true },
+)
+async function forceTranscribe(id: string): Promise<void> {
+  transcriptBusy.value = true
+  try {
+    await radio.recordingsTranscribeNow(id) // status flips via the pushed event
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    transcriptBusy.value = false
+  }
+}
+// Playback engagement → transcription priority learner (throttled to one note per clip load).
+let lastPlayNoted: string | null = null
+function notePlayed(clip: RecordingClip): void {
+  if (clip.id === lastPlayNoted || clip.direction === 'tx' || !clip.channelName) return
+  lastPlayNoted = clip.id
+  void radio.recordingsPlayed(clip.id, clip.channelName).catch(() => {})
+}
 const clipUrl = (id: string): string => `${import.meta.env.BASE_URL}recordings/${id}.wav`
 const fmtTime = (ms: number): string =>
   new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -594,6 +629,24 @@ onBeforeUnmount(() => {
         <AppSlider class="rec-player-slider" :model-value="posSec" :min="0" :max="selected.durationMs / 1000" :step="0.1" aria-label="Position in clip" @update:model-value="seekWithin" />
         <span class="rec-player-pos">{{ fmtDur(selected.durationMs) }}</span>
       </div>
+
+      <!-- ═══ TRANSCRIPT — under the loaded clip's player/metadata/scrubber. Text arrives lazily
+           (recordings.transcript on selection); the list only ever carries the status. ═══ -->
+      <div v-if="selected && !isTx(selected)" class="rec-transcript">
+        <template v-if="transcript?.status === 'done' && transcript.text">
+          <p class="rec-transcript-text">{{ transcript.text }}</p>
+          <span v-if="transcript.flags?.length" class="rec-transcript-flags" :title="'Transcription confidence flags: ' + transcript.flags.join(', ')">{{ transcript.flags.join(' · ') }}</span>
+        </template>
+        <span v-else-if="selected.transcript === 'queued'" class="rec-transcript-status">transcribing…</span>
+        <span v-else-if="selected.transcript === 'deferred'" class="rec-transcript-status">transcription deferred (quota) — will catch up</span>
+        <span v-else-if="transcript?.status === 'skipped'" class="rec-transcript-status">no speech detected</span>
+        <template v-else>
+          <span v-if="transcript?.status === 'failed'" class="rec-transcript-status">transcription failed</span>
+          <button class="btn btn-sm btn-ghost rec-transcript-btn" :disabled="transcriptBusy" :title="transcript?.status === 'failed' ? 'Retry transcription' : 'Transcribe this clip now'" @click="forceTranscribe(selected.id)">
+            {{ transcript?.status === 'failed' ? 'Retry transcript' : 'Transcribe' }}
+          </button>
+        </template>
+      </div>
     </div>
 
     <!-- Single hidden player drives continuous timeline playback (auto-advances via @ended). -->
@@ -713,6 +766,16 @@ onBeforeUnmount(() => {
 }
 
 .rec-player-scrub { display: flex; align-items: center; gap: 10px; }
+
+/* ── TRANSCRIPT — below the scrubber; long net transcripts scroll inside the block ── */
+.rec-transcript { border-top: 1px solid var(--border, #30363d); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.rec-transcript-text {
+  margin: 0; font-size: 0.85rem; line-height: 1.45; color: var(--text, #e6edf3);
+  white-space: pre-wrap; user-select: text; max-height: 9.5em; overflow-y: auto;
+}
+.rec-transcript-status { font-size: 0.78rem; color: var(--text-dim, #8b949e); font-style: italic; }
+.rec-transcript-flags { font-size: 0.72rem; color: var(--warn, #d29922); }
+.rec-transcript-btn { align-self: flex-start; }
 .rec-player-slider { flex: 1; }
 .rec-player-pos { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted, #8b949e); min-width: 4ch; text-align: center; }
 .rec-pill { font-size: 10px; font-weight: 800; padding: 1px 6px; border-radius: 4px; align-self: center; }

@@ -17,6 +17,7 @@ import { basename } from 'node:path'
 import type { AppState, RadioController, WireCaptureInfo } from '../services/radio-service'
 import type { AudioBridge, RtcAudioSession } from '../audio/rtc'
 import type { Recorder } from '../audio/recorder'
+import type { Transcriber } from '../transcribe/service'
 import type { PacketService } from '../packet/service'
 import type { StateBroadcaster } from './broadcast'
 import { fail, idOf, notify, ok, RpcErrorCode, RpcRequest } from './jsonrpc'
@@ -53,6 +54,9 @@ export interface ServerDeps {
   /** TX (operator transmission) recorder — same directory as `recorder`, so list/delete/WAV
    * serving go through `recorder`; this one only needs its events relayed + enable mirrored. */
   txRecorder?: Recorder
+  /** Transcription side-process (auto-on with recording + Groq key). Omitted → transcript
+   * methods return null/unavailable; recordings.* work identically without it. */
+  transcriber?: Transcriber
   /** Persist a runtime mic-gain change (rtc.setGain) so it survives restarts. */
   saveTxGain?: (gain: number) => void
   /** Packet TNC (direwolf bridge). Omitted → packet.* methods report unavailable. */
@@ -142,6 +146,8 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
     // channel — its clips carry direction:'tx'. One subscription each per socket; dropped on close.
     const unsubscribeRec = deps.recorder?.subscribe((e) => send(notify(`recordings.${e.type}`, e)))
     const unsubscribeTx = deps.txRecorder?.subscribe((e) => e.type !== 'status' && send(notify(`recordings.${e.type}`, e)))
+    // Transcript status changes (queued/deferred/done/skipped/failed) → live timeline badges.
+    const unsubscribeStt = deps.transcriber?.subscribe((e) => send(notify('recordings.transcript', e)))
     // Packet TNC status pushes (enable/disable, direwolf health, PTT, decode counters).
     const unsubscribePkt = deps.packet?.subscribe((s) => send(notify('packet.status', s)))
 
@@ -260,7 +266,27 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
           await deps.txRecorder?.setEnabled(p.enabled) // TX recording rides the same switch
           if (id !== null) send(ok(id, rec.status))
         } else if (req.method === 'recordings.list') {
-          if (id !== null) send(ok(id, await rec.list()))
+          if (id !== null) {
+            const clips = await rec.list()
+            const st = deps.transcriber?.statuses() ?? {}
+            send(ok(id, clips.map((c) => ({ ...c, transcript: st[c.id] ?? null }))))
+          }
+        } else if (req.method === 'recordings.transcript') {
+          // Full transcript text is deliberately NOT in hydration/list payloads — pulled here
+          // on clip selection only (status rides the list; text is fetched lazily).
+          const p = z.object({ id: z.string() }).parse(req.params)
+          if (id !== null) send(ok(id, deps.transcriber?.transcript(p.id) ?? null))
+        } else if (req.method === 'recordings.transcribeNow') {
+          const p = z.object({ id: z.string() }).parse(req.params)
+          const clip = (await rec.list()).find((c) => c.id === p.id)
+          if (!clip) throw new Error(`unknown clip: ${p.id}`)
+          deps.transcriber?.transcribeNow(clip)
+          if (id !== null) send(ok(id, { status: deps.transcriber?.statusOf(p.id) ?? null }))
+        } else if (req.method === 'recordings.played') {
+          // Playback engagement — a soft priority signal for the transcription learner.
+          const p = z.object({ id: z.string(), channel: z.string() }).parse(req.params)
+          deps.transcriber?.noteEngagement('play', p.channel)
+          if (id !== null) send(ok(id, {}))
         } else if (req.method === 'recordings.delete') {
           const p = z.object({ id: z.string() }).parse(req.params)
           await rec.remove(p.id)
@@ -303,6 +329,7 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
       clearInterval(heartbeat)
       unsubscribe()
       unsubscribeRec?.()
+      unsubscribeStt?.()
       unsubscribeTx?.()
       unsubscribePkt?.()
       void rtc?.then((s) => s.close()).catch(() => {})

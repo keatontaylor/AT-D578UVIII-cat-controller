@@ -37,6 +37,18 @@ export interface RecordingClip {
   talkgroupName?: string | null
   /** 'rx' = radio squelch audio; 'tx' = the operator's own transmission (mic tap). */
   direction?: 'rx' | 'tx'
+  /** Transcription status (side-process): queued/deferred/done/skipped/failed, null = none.
+   * Status only — the transcript TEXT is fetched lazily on clip selection, never in this list. */
+  transcript?: string | null
+}
+
+/** Lazily-fetched transcript sidecar (recordings.transcript). */
+export interface ClipTranscript {
+  status: 'done' | 'skipped' | 'failed'
+  reason?: string
+  text?: string
+  segments?: { startMs: number; endMs: number; text: string }[]
+  flags?: string[]
 }
 /** A recording IN PROGRESS (recordings.opened) — drawn growing toward "now" until it resolves
  * into saved (→ recordings list) or discarded (a blip). */
@@ -64,7 +76,8 @@ const MUTATING_METHODS = new Set([
   'bt.scan', 'bt.pair', 'bt.forget', 'connect', 'disconnect', 'setting.set', 'ptt.key', 'ptt.unkey',
   'ptt.hold', 'side.select', 'vfo.setMode', 'channel.step', 'zone.step', 'channel.setting', 'channel.tone',
   'channel.frequency', 'channel.volume', 'scan.start', 'scan.stop', 'channel.select', 'channel.selectIn', 'dmr.dial',
-  'recordings.setEnabled', 'recordings.delete', 'rtc.offer', 'rtc.ice', 'rtc.stop', 'rtc.mic', 'rtc.setGain',
+  'recordings.setEnabled', 'recordings.delete', 'recordings.transcribeNow', 'recordings.played',
+  'rtc.offer', 'rtc.ice', 'rtc.stop', 'rtc.mic', 'rtc.setGain',
   'packet.setEnabled',
 ])
 
@@ -199,6 +212,11 @@ function ensureSocket(): void {
     }
     else if (m.method === 'recordings.status') {
       recorderStatus.value = (m.params as { status: typeof recorderStatus.value }).status
+    }
+    else if (m.method === 'recordings.transcript') {
+      const { id, status } = m.params as { id: string; status: string }
+      const clip = recordings.value.find((c) => c.id === id)
+      if (clip) clip.transcript = status
     }
     else if (m.method === 'packet.status') packetStatus.value = m.params as PacketStatus
     else if (m.method === 'rtc.ice' && audioPc) void audioPc.addIceCandidate(m.params as RTCIceCandidateInit).catch(() => {})
@@ -676,6 +694,9 @@ export function useRadio() {
     loadRecordings: hydrateRecordings,
     recordingsSetEnabled: (enabled: boolean) => rpc<{ enabled: boolean }>('recordings.setEnabled', { enabled }),
     recordingsDelete: (id: string) => rpc('recordings.delete', { id }),
+    recordingsTranscript: (id: string) => rpc<ClipTranscript | null>('recordings.transcript', { id }),
+    recordingsTranscribeNow: (id: string) => rpc<{ status: string | null }>('recordings.transcribeNow', { id }),
+    recordingsPlayed: (id: string, channel: string) => rpc('recordings.played', { id, channel }),
     // Packet TNC (direwolf): pushed status + the enable/disable switch.
     packetStatus,
     packetSetEnabled: (enabled: boolean) => rpc<PacketStatus>('packet.setEnabled', { enabled }),
