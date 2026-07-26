@@ -80,8 +80,14 @@ const laneKey = (c: AnyClip): string =>
 const laneLabel = (c: AnyClip): string =>
   isDmrClip(c) ? `TG ${c.talkgroupName || c.talkgroup}` : c.channelName || (c.freqMHz != null ? `${c.freqMHz.toFixed(4)} MHz` : (c.side ?? 'clip'))
 const clipEnd = (c: RecordingClip): number => c.startedAt + c.durationMs
+// Importance filter: off = everything; on = tier ≥2 (important/urgent) only.
+const importantOnly = ref(false)
+const importantCount = computed(() => recordings.value.filter((c) => (c.importance ?? 0) >= 2).length)
+const importTier = (c: RecordingClip): number => c.importance ?? 0
 const passesFilters = (c: RecordingClip): boolean =>
-  c.durationMs >= minDurationSec.value * 1000 && (channelFilter.value === 'all' || laneKey(c) === channelFilter.value)
+  c.durationMs >= minDurationSec.value * 1000 &&
+  (channelFilter.value === 'all' || laneKey(c) === channelFilter.value) &&
+  (!importantOnly.value || (c.importance ?? 0) >= 2)
 
 const channels = computed(() => {
   const map = new Map<string, string>() // key → display label
@@ -359,10 +365,14 @@ const selected = computed(() => recordings.value.find((c) => c.id === selectedId
 const transcript = ref<ClipTranscript | null>(null)
 const transcriptBusy = ref(false)
 watch(
-  () => [selectedId.value, selected.value?.transcript] as const,
+  // Re-fetch on selection, on status change (queued→done), AND on importance change (scores land
+  // minutes after the transcript — the sidecar gains importanceReason then).
+  () => [selectedId.value, selected.value?.transcript, selected.value?.importance] as const,
   async ([id, status]) => {
-    transcript.value = null
-    if (!id || !status || status === 'queued' || status === 'deferred') return
+    if (!id || !status || status === 'queued' || status === 'deferred') {
+      transcript.value = null
+      return
+    }
     try {
       transcript.value = await radio.recordingsTranscript(id)
     } catch { /* transcript fetch is best-effort; the chip still shows status */ }
@@ -473,6 +483,12 @@ onBeforeUnmount(() => {
         <AppSlider v-model="minDurationSec" :min="0" :max="30" aria-label="Minimum clip duration" />
         <span class="rec-range-val">{{ minDurationSec }}s</span>
       </label>
+      <button
+        class="btn btn-sm rec-important-chip"
+        :class="{ 'rec-important-on': importantOnly }"
+        :title="importantOnly ? 'Showing important clips only — tap to show all' : 'Show only important/urgent clips'"
+        @click="importantOnly = !importantOnly"
+      >! Important<span v-if="importantCount" class="rec-important-count">{{ importantCount }}</span></button>
       <span class="rec-ctl-group rec-view-toggle" role="group" aria-label="View">
         <button class="btn btn-ghost btn-sm" :class="{ 'rec-view-on': effectiveView === 'lanes' }" title="Timeline lanes (best on wide screens); tap again for auto" @click="setView(viewMode === 'lanes' ? 'auto' : 'lanes')">▤</button>
         <button class="btn btn-ghost btn-sm" :class="{ 'rec-view-on': effectiveView === 'feed' }" title="Activity feed (best on phones); tap again for auto" @click="setView(viewMode === 'feed' ? 'auto' : 'feed')">☰</button>
@@ -501,7 +517,7 @@ onBeforeUnmount(() => {
           :key="clip.id"
           type="button"
           class="rec-row"
-          :class="{ 'rec-row--sel': clip.id === selectedId, 'rec-row--playing': clip.id === playingId }"
+          :class="{ 'rec-row--sel': clip.id === selectedId, 'rec-row--playing': clip.id === playingId, 'rec-row--urgent': importTier(clip) >= 3 }"
           @click="playClip(clip, 0)"
         >
           <i class="rec-row-edge" :style="{ background: clipColor(clip) }" />
@@ -510,6 +526,8 @@ onBeforeUnmount(() => {
               <!-- name in its own span so it ellipsizes (a flex container's anonymous text can't) —
                    mirrors the timeline lane-label, keeping the pill on the same baseline -->
               <span class="rec-row-name">{{ laneLabel(clip) }}</span>
+              <span v-if="importTier(clip) >= 3" class="rec-pill rec-pill--urgent">URGENT</span>
+              <span v-else-if="importTier(clip) === 2" class="rec-pill rec-pill--important">IMPORTANT</span>
               <span v-if="isTx(clip)" class="rec-pill rec-pill--tx">TX</span>
               <span v-else-if="clip.mode" class="rec-pill" :class="`rec-pill--${modeClass(clip.mode)}`">{{ clip.mode }}</span>
             </span>
@@ -531,6 +549,8 @@ onBeforeUnmount(() => {
         <span class="rec-legend-item"><i class="rec-swatch rec-swatch--dmr" />DMR</span>
         <span class="rec-legend-item"><i class="rec-swatch rec-swatch--tx" />TX</span>
         <span class="rec-legend-item"><i class="rec-swatch rec-swatch--rec" />live</span>
+        <span class="rec-legend-item"><i class="rec-swatch rec-swatch--important" />important</span>
+        <span class="rec-legend-item"><i class="rec-swatch rec-swatch--urgent" />urgent</span>
       </span>
     </div>
 
@@ -569,11 +589,11 @@ onBeforeUnmount(() => {
             :key="clip.id"
             type="button"
             class="rec-block"
-            :class="{ 'rec-block--sel': clip.id === selectedId, 'rec-block--playing': clip.id === playingId, 'rec-block--tx': isTx(clip) }"
+            :class="{ 'rec-block--sel': clip.id === selectedId, 'rec-block--playing': clip.id === playingId, 'rec-block--tx': isTx(clip), 'rec-block--important': importTier(clip) === 2, 'rec-block--urgent': importTier(clip) >= 3 }"
             :style="blockStyle(clip)"
             :title="clipTitle(clip)"
             @click.stop="playClip(clip, 0)"
-          />
+          ><i v-if="importTier(clip) >= 2" class="rec-block-mark" :class="{ 'rec-block-mark--urgent': importTier(clip) >= 3 }" /></button>
           <!-- Recording IN PROGRESS: grows toward "now", pulsing — not clickable (no audio yet). -->
           <div
             v-for="clip in lane.live"
@@ -633,6 +653,11 @@ onBeforeUnmount(() => {
       <!-- ═══ TRANSCRIPT — under the loaded clip's player/metadata/scrubber. Text arrives lazily
            (recordings.transcript on selection); the list only ever carries the status. ═══ -->
       <div v-if="selected && !isTx(selected)" class="rec-transcript">
+        <!-- Importance reason — the "why" surface: tier badge + one-line model reason. -->
+        <div v-if="importTier(selected) >= 1" class="rec-importance" :class="{ 'rec-importance--urgent': importTier(selected) >= 3, 'rec-importance--important': importTier(selected) === 2 }">
+          <span class="rec-importance-badge">{{ importTier(selected) >= 3 ? 'URGENT' : importTier(selected) === 2 ? 'IMPORTANT' : 'NOTABLE' }}</span>
+          <span v-if="transcript?.importanceReason" class="rec-importance-reason">{{ transcript.importanceReason }}</span>
+        </div>
         <template v-if="transcript?.status === 'done' && transcript.text">
           <p class="rec-transcript-text">{{ transcript.text }}</p>
           <span v-if="transcript.flags?.length" class="rec-transcript-flags" :title="'Transcription confidence flags: ' + transcript.flags.join(', ')">{{ transcript.flags.join(' · ') }}</span>
@@ -776,6 +801,39 @@ onBeforeUnmount(() => {
 .rec-transcript-status { font-size: 0.78rem; color: var(--text-dim, #8b949e); font-style: italic; }
 .rec-transcript-flags { font-size: 0.72rem; color: var(--warn, #d29922); }
 .rec-transcript-btn { align-self: flex-start; }
+
+/* ── IMPORTANCE ── amber = important (tier 2), red = urgent (tier 3). Rings/marks not fills, so
+   mode color still owns the block. */
+.rec-importance { display: flex; align-items: baseline; gap: 8px; padding-bottom: 2px; }
+.rec-importance-badge {
+  font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em; padding: 1px 6px; border-radius: 4px;
+  background: rgba(210, 153, 34, 0.18); color: var(--warn, #d29922); white-space: nowrap;
+}
+.rec-importance--urgent .rec-importance-badge { background: rgba(248, 81, 73, 0.2); color: var(--danger, #f85149); }
+.rec-importance-reason { font-size: 0.82rem; color: var(--text, #e6edf3); }
+
+/* filter chip */
+.rec-important-chip { display: inline-flex; align-items: center; gap: 5px; }
+.rec-important-on { background: rgba(210, 153, 34, 0.2); color: var(--warn, #d29922); border-color: var(--warn, #d29922); }
+.rec-important-count { font-weight: 700; font-size: 0.72rem; padding: 0 5px; border-radius: 8px; background: var(--warn, #d29922); color: #0d1117; }
+
+/* timeline marks + rings — marked blocks get a floor width so the ring reads even when the raw
+   clip would render at ~1px (long windows); the mark sits inside the top edge (track clips
+   overflow, so it can't float above). */
+.rec-block--important { box-shadow: inset 0 0 0 2px var(--warn, #d29922); min-width: 7px; }
+.rec-block--urgent { box-shadow: inset 0 0 0 2px var(--danger, #f85149); min-width: 7px; }
+.rec-block-mark {
+  position: absolute; top: 1px; left: 50%; transform: translateX(-50%);
+  width: 4px; height: 4px; border-radius: 50%; background: var(--warn, #d29922); pointer-events: none;
+}
+.rec-block-mark--urgent { background: var(--danger, #f85149); }
+.rec-swatch--important { background: transparent; box-shadow: inset 0 0 0 2px var(--warn, #d29922); }
+.rec-swatch--urgent { background: transparent; box-shadow: inset 0 0 0 2px var(--danger, #f85149); }
+
+/* feed pills + urgent row tint */
+.rec-pill--important { background: rgba(210, 153, 34, 0.2); color: var(--warn, #d29922); }
+.rec-pill--urgent { background: rgba(248, 81, 73, 0.22); color: var(--danger, #f85149); }
+.rec-row--urgent { background: rgba(248, 81, 73, 0.07); }
 .rec-player-slider { flex: 1; }
 .rec-player-pos { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted, #8b949e); min-width: 4ch; text-align: center; }
 .rec-pill { font-size: 10px; font-weight: 800; padding: 1px 6px; border-radius: 4px; align-self: center; }

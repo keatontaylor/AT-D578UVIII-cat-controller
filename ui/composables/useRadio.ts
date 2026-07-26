@@ -40,6 +40,9 @@ export interface RecordingClip {
   /** Transcription status (side-process): queued/deferred/done/skipped/failed, null = none.
    * Status only — the transcript TEXT is fetched lazily on clip selection, never in this list. */
   transcript?: string | null
+  /** Importance tier (stage 2): 1 notable / 2 important / 3 urgent; null/0 = routine. Rides the
+   * list + live pushes so the timeline can badge without fetching the transcript text. */
+  importance?: number | null
 }
 
 /** Lazily-fetched transcript sidecar (recordings.transcript). */
@@ -49,6 +52,8 @@ export interface ClipTranscript {
   text?: string
   segments?: { startMs: number; endMs: number; text: string }[]
   flags?: string[]
+  importance?: number
+  importanceReason?: string
 }
 /** A recording IN PROGRESS (recordings.opened) — drawn growing toward "now" until it resolves
  * into saved (→ recordings list) or discarded (a blip). */
@@ -214,9 +219,12 @@ function ensureSocket(): void {
       recorderStatus.value = (m.params as { status: typeof recorderStatus.value }).status
     }
     else if (m.method === 'recordings.transcript') {
-      const { id, status } = m.params as { id: string; status: string }
+      const { id, status, importance } = m.params as { id: string; status: string; importance?: number }
       const clip = recordings.value.find((c) => c.id === id)
-      if (clip) clip.transcript = status
+      if (clip) {
+        clip.transcript = status
+        if (importance !== undefined) clip.importance = importance
+      }
     }
     else if (m.method === 'packet.status') packetStatus.value = m.params as PacketStatus
     else if (m.method === 'rtc.ice' && audioPc) void audioPc.addIceCandidate(m.params as RTCIceCandidateInit).catch(() => {})

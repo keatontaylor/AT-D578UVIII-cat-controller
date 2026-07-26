@@ -87,3 +87,30 @@ export async function transcribe(wav: Buffer, opts: GroqOptions): Promise<GroqRe
     apiMs: Date.now() - t0,
   }
 }
+
+// ── Chat completion (importance scoring) — same key/base, separate chat quota. ────────────────
+export interface GroqChatOptions {
+  readonly key: string
+  readonly model: string
+  readonly fetchImpl?: typeof fetch
+  readonly endpoint?: string
+}
+
+/** JSON-forced chat completion. Throws GroqQuotaError on 429 so the caller defers the batch. */
+export async function chatComplete(system: string, user: string, opts: GroqChatOptions): Promise<string> {
+  const doFetch = opts.fetchImpl ?? fetch
+  const res = await doFetch(opts.endpoint ?? 'https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${opts.key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: opts.model,
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+    }),
+  })
+  if (res.status === 429) throw new GroqQuotaError(Number(res.headers.get('retry-after') ?? 60))
+  if (!res.ok) throw new Error(`groq chat ${res.status}: ${(await res.text()).slice(0, 200)}`)
+  const body = (await res.json()) as { choices?: { message?: { content?: string } }[] }
+  return body.choices?.[0]?.message?.content ?? ''
+}

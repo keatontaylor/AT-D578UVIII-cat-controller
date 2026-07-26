@@ -269,7 +269,7 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
           if (id !== null) {
             const clips = await rec.list()
             const st = deps.transcriber?.statuses() ?? {}
-            send(ok(id, clips.map((c) => ({ ...c, transcript: st[c.id] ?? null }))))
+            send(ok(id, clips.map((c) => ({ ...c, transcript: st[c.id]?.status ?? null, importance: st[c.id]?.importance ?? null }))))
           }
         } else if (req.method === 'recordings.transcript') {
           // Full transcript text is deliberately NOT in hydration/list payloads — pulled here

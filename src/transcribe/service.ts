@@ -13,8 +13,9 @@
 import { readFileSync, writeFileSync, renameSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { analyzeSpeech, parseWav, sliceWav, trimPlan } from './trim'
-import { buildPrompt, isPromptEcho, transcribe as groqTranscribe, GroqQuotaError, type GroqResult } from './groq'
+import { buildPrompt, isPromptEcho, transcribe as groqTranscribe, chatComplete, GroqQuotaError, type GroqResult } from './groq'
 import { InterestLearner, type EngagementKind } from './learner'
+import { recurrenceScore, scoreBatch, type ChatClient, type ImportanceTier, type ScoreInput } from './importance'
 
 export interface TranscribableClip {
   readonly id: string
@@ -30,21 +31,26 @@ export type TranscriptStatus = 'queued' | 'deferred' | 'done' | 'skipped' | 'fai
 /** The `<id>.transcript.json` sidecar. Segment times are ms into the ORIGINAL clip. */
 export interface TranscriptSidecar {
   readonly v: 1
-  readonly status: 'done' | 'skipped' | 'failed'
-  readonly reason?: string
-  readonly model?: string
-  readonly text?: string
-  readonly segments?: { startMs: number; endMs: number; text: string }[]
-  readonly flags?: string[]
-  readonly avgLogprob?: number | null
-  readonly trim?: { startMs: number; endMs: number; speechMs: number }
-  readonly billedS?: number
-  readonly transcribedAt?: string
+  status: 'done' | 'skipped' | 'failed'
+  reason?: string
+  model?: string
+  text?: string
+  segments?: { startMs: number; endMs: number; text: string }[]
+  flags?: string[]
+  avgLogprob?: number | null
+  trim?: { startMs: number; endMs: number; speechMs: number }
+  billedS?: number
+  transcribedAt?: string
+  /** Importance (stage 2) — added after scoring; absent = not yet scored, 0 = routine. */
+  importance?: ImportanceTier
+  importanceReason?: string
 }
 
 export interface TranscriberEvent {
   readonly id: string
   readonly status: TranscriptStatus
+  /** Set when the event is an importance-score update (status stays 'done'). */
+  readonly importance?: ImportanceTier
 }
 
 interface QueueItem {
@@ -73,6 +79,15 @@ const DEFAULTS = {
   dailyReqCap: Number(process.env['ANYTONE_TRANSCRIBE_DAILY_REQ'] ?? 1_800),
   tickMs: 4_000,
 }
+// Importance scoring (stage 2): batched over the Groq CHAT endpoint (separate quota from Whisper).
+// Model ladder is env-overridable; gpt-oss-120b = current free-tier best, llama fallbacks behind.
+const IMPORTANCE = {
+  model: process.env['ANYTONE_IMPORTANCE_MODEL'] ?? 'openai/gpt-oss-120b',
+  batchSize: 15,
+  batchWindowMs: 5 * 60_000, // score after 15 clips OR 5 minutes, whichever first
+  recurrenceLookback: 40, // prior same-channel transcripts compared for the scheduled-preamble flag
+  enabled: process.env['ANYTONE_IMPORTANCE'] !== '0',
+}
 
 export interface TranscriberDeps {
   readonly dir: string
@@ -84,6 +99,10 @@ export interface TranscriberDeps {
   readonly keyFn?: () => string | null
   readonly model?: string
   readonly startTimer?: boolean
+  /** Importance scorer chat client; default = Groq chat. Null-returning key disables scoring. */
+  readonly chatClient?: ChatClient
+  /** Reads the user-editable importance guidance; default = data/importance-guidance.md. */
+  readonly guidanceFn?: () => string
 }
 
 function defaultKey(): string | null {
@@ -94,6 +113,20 @@ function defaultKey(): string | null {
     if (existsSync(p)) return readFileSync(p, 'utf8').trim() || null
   } catch { /* unreadable = absent */ }
   return null
+}
+
+const GUIDANCE_PATH = new URL('../../data/importance-guidance.md', import.meta.url)
+const GUIDANCE_FALLBACK =
+  'Important: severe weather reports, public-safety/emergency traffic, real net activations, ' +
+  'unusual activity on a quiet channel. Not important: routine nets and their scripted preambles ' +
+  '(even when they mention emergencies), ragchews, radio checks, drills announced as drills. ' +
+  'Tiers: 0 routine, 1 notable, 2 important, 3 urgent. When unsure, pick the lower tier.'
+function defaultGuidance(): string {
+  try {
+    return readFileSync(GUIDANCE_PATH, 'utf8')
+  } catch {
+    return GUIDANCE_FALLBACK
+  }
 }
 
 export class Transcriber {
@@ -110,6 +143,17 @@ export class Transcriber {
   private readonly doTranscribe: typeof groqTranscribe
   private readonly keyFn: () => string | null
   private readonly model: string
+  private readonly chat: ChatClient | null
+  private readonly guidanceFn: () => string
+  /** Ids awaiting importance scoring (transcript done), flushed in batches. */
+  private readonly scoreQueue: string[] = []
+  private scoreDeferUntil = 0
+  private oldestScoreAt = 0
+  private scoring = false
+  /** Rolling buffer of recently-transcribed clips (newest first, capped) — supplies the score
+   * inputs' channel/time and the per-channel recurrence history. In-memory: recurrence detection
+   * spans the current session (sessions run for days), not restarts. */
+  private readonly recentDone: { id: string; channel: string; startedAt: number; text: string }[] = []
 
   constructor(private readonly deps: TranscriberDeps) {
     this.now = deps.now ?? Date.now
@@ -117,11 +161,23 @@ export class Transcriber {
     this.doTranscribe = deps.transcribeFn ?? groqTranscribe
     this.keyFn = deps.keyFn ?? defaultKey
     this.model = deps.model ?? DEFAULTS.model
+    this.guidanceFn = deps.guidanceFn ?? defaultGuidance
+    this.chat = deps.chatClient ?? (IMPORTANCE.enabled ? this.makeGroqChat() : null)
     this.learner = new InterestLearner(join(deps.dir, 'transcribe-learner.json'), this.now)
     this.loadState()
     if (deps.startTimer !== false) {
       this.timer = setInterval(() => void this.tick(), DEFAULTS.tickMs)
       this.timer.unref?.()
+    }
+  }
+
+  private makeGroqChat(): ChatClient {
+    return {
+      complete: (system, user) => {
+        const key = this.keyFn()
+        if (!key) throw new Error('no key')
+        return chatComplete(system, user, { key, model: IMPORTANCE.model })
+      },
     }
   }
 
@@ -197,8 +253,10 @@ export class Transcriber {
     this.timer = null
   }
 
-  /** One scheduling step: pick the best queued item and process it. Public for tests. */
+  /** One scheduling step: transcribe the best queued clip, and flush the importance-score batch
+   * when it's full or the batch window has elapsed. Public for tests. */
   async tick(): Promise<void> {
+    await this.maybeScore()
     if (this.busy || !this.enabled || this.queue.size === 0) return
     if (this.now() < this.resumeAt) return
     const item = this.pick()
@@ -209,6 +267,73 @@ export class Transcriber {
     } finally {
       this.busy = false
     }
+  }
+
+  // ── importance scoring (stage 2, batched) ─────────────────────────────────────
+  private enqueueScore(id: string): void {
+    if (!this.chat) return
+    if (this.scoreQueue.length === 0) this.oldestScoreAt = this.now()
+    this.scoreQueue.push(id)
+  }
+
+  private async maybeScore(): Promise<void> {
+    if (this.scoring || !this.chat || this.scoreQueue.length === 0) return
+    if (this.now() < this.scoreDeferUntil) return
+    const full = this.scoreQueue.length >= IMPORTANCE.batchSize
+    const windowUp = this.now() - this.oldestScoreAt >= IMPORTANCE.batchWindowMs
+    if (!full && !windowUp) return
+    const batch = this.scoreQueue.splice(0, IMPORTANCE.batchSize)
+    if (this.scoreQueue.length) this.oldestScoreAt = this.now()
+    this.scoring = true
+    try {
+      await this.scoreBatchNow(batch)
+    } finally {
+      this.scoring = false
+    }
+  }
+
+  /** Score a batch of already-transcribed clips and patch their sidecars in place. */
+  private async scoreBatchNow(ids: string[]): Promise<void> {
+    const inputs: ScoreInput[] = []
+    for (const id of ids) {
+      const rec = this.recentDone.find((r) => r.id === id)
+      const side = this.sidecar(id)
+      if (!rec || !side || side.status !== 'done' || !side.text) continue
+      const priors = this.recentDone.filter((r) => r.channel === rec.channel && r.id !== id).slice(0, IMPORTANCE.recurrenceLookback).map((r) => r.text)
+      inputs.push({
+        id,
+        channel: rec.channel,
+        startedAt: rec.startedAt,
+        durationMs: (side.trim?.endMs ?? 0) - (side.trim?.startMs ?? 0),
+        text: side.text,
+        recurrence: recurrenceScore(side.text, priors),
+      })
+    }
+    if (inputs.length === 0) return
+    let scores
+    try {
+      scores = await scoreBatch(this.chat!, this.guidanceFn(), inputs)
+    } catch (e) {
+      if (e instanceof GroqQuotaError) {
+        this.scoreQueue.unshift(...ids) // re-queue whole batch; retry after cooldown
+        this.scoreDeferUntil = this.now() + Math.max(30, e.retryAfterS) * 1000
+        this.log(`transcriber: importance 429 — deferring batch (${new Date(this.scoreDeferUntil).toISOString()})`)
+        return
+      }
+      this.log(`transcriber: importance scoring failed: ${(e as Error).message}`)
+      return // unscored clips stay tier-absent (routine); no retry storm
+    }
+    for (const input of inputs) {
+      const s = scores.get(input.id) ?? { id: input.id, tier: 0 as ImportanceTier, reason: '' }
+      const side = this.sidecar(input.id)
+      if (!side) continue
+      side.importance = s.tier
+      side.importanceReason = s.reason
+      this.writeSidecar(input.id, side)
+      this.emit({ id: input.id, status: side.status, importance: s.tier })
+    }
+    const notable = inputs.filter((i) => (scores.get(i.id)?.tier ?? 0) >= 2).length
+    this.log(`transcriber: scored ${inputs.length} clip(s)${notable ? `, ${notable} important+` : ''}`)
   }
 
   private pick(): QueueItem | null {
@@ -300,6 +425,9 @@ export class Transcriber {
       })
       return
     }
+    // Record for scoring context BEFORE finishing (recurrence history + score inputs).
+    this.recentDone.unshift({ id: clip.id, channel: clip.channelName ?? '', startedAt: clip.startedAt, text: result.text })
+    if (this.recentDone.length > 500) this.recentDone.length = 500
     this.finish(clip.id, {
       v: 1,
       status: 'done',
@@ -316,10 +444,11 @@ export class Transcriber {
       billedS,
       transcribedAt: new Date(this.now()).toISOString(),
     })
+    this.enqueueScore(clip.id)
     this.log(`transcriber: ${clip.id} done (${billedS.toFixed(1)}s billed, ${result.apiMs}ms${flags.length ? `, ${flags.join(',')}` : ''})`)
   }
 
-  private finish(id: string, sidecar: TranscriptSidecar): void {
+  private writeSidecar(id: string, sidecar: TranscriptSidecar): void {
     const path = join(this.deps.dir, `${id}.transcript.json`)
     try {
       writeFileSync(`${path}.tmp`, JSON.stringify(sidecar))
@@ -328,6 +457,10 @@ export class Transcriber {
       this.log(`transcriber: sidecar write failed for ${id}: ${(e as Error).message}`)
     }
     this.sidecarCache.set(id, sidecar)
+  }
+
+  private finish(id: string, sidecar: TranscriptSidecar): void {
+    this.writeSidecar(id, sidecar)
     this.queue.delete(id)
     this.emit({ id, status: sidecar.status })
   }
@@ -344,18 +477,19 @@ export class Transcriber {
     return side
   }
 
-  /** All known sidecar statuses (for merging into recordings.list) — scans the dir once. */
-  statuses(): Record<string, TranscriptStatus> {
-    const out: Record<string, TranscriptStatus> = {}
+  /** Per-clip status + importance tier for merging into recordings.list — scans the dir once.
+   * Only tier ≥1 is included (0/absent = routine, the UI default). */
+  statuses(): Record<string, { status: TranscriptStatus; importance?: ImportanceTier }> {
+    const out: Record<string, { status: TranscriptStatus; importance?: ImportanceTier }> = {}
     try {
       for (const f of readdirSync(this.deps.dir)) {
         if (!f.endsWith('.transcript.json')) continue
         const id = f.slice(0, -'.transcript.json'.length)
         const s = this.sidecar(id)
-        if (s) out[id] = s.status
+        if (s) out[id] = { status: s.status, ...(s.importance ? { importance: s.importance } : {}) }
       }
     } catch { /* dir unreadable → statuses from queue only */ }
-    for (const [id, item] of this.queue) out[id] = item.deferred && this.now() < this.resumeAt ? 'deferred' : 'queued'
+    for (const [id, item] of this.queue) out[id] = { status: item.deferred && this.now() < this.resumeAt ? 'deferred' : 'queued' }
     return out
   }
 
