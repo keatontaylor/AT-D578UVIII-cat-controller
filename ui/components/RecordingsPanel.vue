@@ -80,14 +80,12 @@ const laneKey = (c: AnyClip): string =>
 const laneLabel = (c: AnyClip): string =>
   isDmrClip(c) ? `TG ${c.talkgroupName || c.talkgroup}` : c.channelName || (c.freqMHz != null ? `${c.freqMHz.toFixed(4)} MHz` : (c.side ?? 'clip'))
 const clipEnd = (c: RecordingClip): number => c.startedAt + c.durationMs
-// Importance filter: off = everything; on = tier ≥2 (important/urgent) only.
-const importantOnly = ref(false)
-const importantCount = computed(() => recordings.value.filter((c) => (c.importance ?? 0) >= 2).length)
+// Importance (tier 2 amber / 3 red) shows as rings + pills IN CONTEXT — deliberately no filter:
+// the clips around an important one are the conversation it belongs to, and tier 1 ("notable")
+// is a model-internal buffer, never surfaced.
 const importTier = (c: RecordingClip): number => c.importance ?? 0
 const passesFilters = (c: RecordingClip): boolean =>
-  c.durationMs >= minDurationSec.value * 1000 &&
-  (channelFilter.value === 'all' || laneKey(c) === channelFilter.value) &&
-  (!importantOnly.value || (c.importance ?? 0) >= 2)
+  c.durationMs >= minDurationSec.value * 1000 && (channelFilter.value === 'all' || laneKey(c) === channelFilter.value)
 
 const channels = computed(() => {
   const map = new Map<string, string>() // key → display label
@@ -483,12 +481,6 @@ onBeforeUnmount(() => {
         <AppSlider v-model="minDurationSec" :min="0" :max="30" aria-label="Minimum clip duration" />
         <span class="rec-range-val">{{ minDurationSec }}s</span>
       </label>
-      <button
-        class="btn btn-sm rec-important-chip"
-        :class="{ 'rec-important-on': importantOnly }"
-        :title="importantOnly ? 'Showing important clips only — tap to show all' : 'Show only important/urgent clips'"
-        @click="importantOnly = !importantOnly"
-      >! Important<span v-if="importantCount" class="rec-important-count">{{ importantCount }}</span></button>
       <span class="rec-ctl-group rec-view-toggle" role="group" aria-label="View">
         <button class="btn btn-ghost btn-sm" :class="{ 'rec-view-on': effectiveView === 'lanes' }" title="Timeline lanes (best on wide screens); tap again for auto" @click="setView(viewMode === 'lanes' ? 'auto' : 'lanes')">▤</button>
         <button class="btn btn-ghost btn-sm" :class="{ 'rec-view-on': effectiveView === 'feed' }" title="Activity feed (best on phones); tap again for auto" @click="setView(viewMode === 'feed' ? 'auto' : 'feed')">☰</button>
@@ -653,9 +645,10 @@ onBeforeUnmount(() => {
       <!-- ═══ TRANSCRIPT — under the loaded clip's player/metadata/scrubber. Text arrives lazily
            (recordings.transcript on selection); the list only ever carries the status. ═══ -->
       <div v-if="selected && !isTx(selected)" class="rec-transcript">
-        <!-- Importance reason — the "why" surface: tier badge + one-line model reason. -->
-        <div v-if="importTier(selected) >= 1" class="rec-importance" :class="{ 'rec-importance--urgent': importTier(selected) >= 3, 'rec-importance--important': importTier(selected) === 2 }">
-          <span class="rec-importance-badge">{{ importTier(selected) >= 3 ? 'URGENT' : importTier(selected) === 2 ? 'IMPORTANT' : 'NOTABLE' }}</span>
+        <!-- Importance reason — the "why" surface: tier badge + one-line model reason (tier ≥2
+             only; tier 1 is a model-internal buffer, never shown). -->
+        <div v-if="importTier(selected) >= 2" class="rec-importance" :class="{ 'rec-importance--urgent': importTier(selected) >= 3 }">
+          <span class="rec-importance-badge">{{ importTier(selected) >= 3 ? 'URGENT' : 'IMPORTANT' }}</span>
           <span v-if="transcript?.importanceReason" class="rec-importance-reason">{{ transcript.importanceReason }}</span>
         </div>
         <template v-if="transcript?.status === 'done' && transcript.text">
@@ -811,11 +804,6 @@ onBeforeUnmount(() => {
 }
 .rec-importance--urgent .rec-importance-badge { background: rgba(248, 81, 73, 0.2); color: var(--danger, #f85149); }
 .rec-importance-reason { font-size: 0.82rem; color: var(--text, #e6edf3); }
-
-/* filter chip */
-.rec-important-chip { display: inline-flex; align-items: center; gap: 5px; }
-.rec-important-on { background: rgba(210, 153, 34, 0.2); color: var(--warn, #d29922); border-color: var(--warn, #d29922); }
-.rec-important-count { font-weight: 700; font-size: 0.72rem; padding: 0 5px; border-radius: 8px; background: var(--warn, #d29922); color: #0d1117; }
 
 /* timeline marks + rings — marked blocks get a floor width so the ring reads even when the raw
    clip would render at ~1px (long windows); the mark sits inside the top edge (track clips

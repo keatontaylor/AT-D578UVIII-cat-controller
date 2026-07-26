@@ -26,8 +26,9 @@ it is re-read per scoring batch.
 ## Tiers
 
 - **0 routine** — ordinary traffic.
-- **1 notable** — mildly interesting, worth a glance (unusual topic, first-time station on a quiet
-  channel). Shown only in the player, never badged on the timeline.
+- **1 notable** — mildly interesting but not worth flagging (unusual topic, first-time station on
+  a quiet channel). This tier is a buffer: it is never shown in the UI — use it for borderline
+  cases instead of inflating them to important.
 - **2 important** — I would want to notice this: real weather reports, public-safety traffic,
   genuine net activations.
 - **3 urgent** — active emergency / life-safety / mayday in progress.
