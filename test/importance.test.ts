@@ -164,6 +164,57 @@ test('transcriber: cleanup requested for long clips, cleanText persisted + verba
   assert.equal(side.summary, 'Weather report ragchew', 'summary persisted for a tier-0 clip')
 })
 
+test('transcriber: settle-based flush scores a lone clip in ~20s, not 5 minutes', async () => {
+  const { svc, dir, clock } = rig({
+    complete: async (_s, user) => {
+      const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]
+      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r', summary: 's' })) })
+    },
+  })
+  saveClip(svc, dir, 'fast1')
+  await svc.tick() // transcribe
+  await svc.tick() // 0s since enqueue — no flush yet
+  assert.equal(svc.transcript('fast1')!.importance, undefined, 'not scored immediately')
+  clock.t += 5_000
+  await svc.tick()
+  assert.equal(svc.transcript('fast1')!.importance, undefined, 'not scored at +5s (still settling)')
+  clock.t += 17_000 // +22s total > settleMs
+  await svc.tick()
+  assert.equal(svc.transcript('fast1')!.importance, 0, 'scored once the queue settled')
+})
+
+test('transcriber: minute token budget splits oversized batches across windows (429 guard)', async () => {
+  const big = 'x'.repeat(15_000) // clipCost ≈ 7.5k tokens > the 6k/min cap
+  const calls: number[] = []
+  const { svc, dir, clock } = rig({
+    complete: async (_s, user) => {
+      const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]
+      calls.push(items.length)
+      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r' })) })
+    },
+  })
+  // override the fake transcription to return an enormous text
+  ;(svc as unknown as { doTranscribe: unknown }).doTranscribe = async () => ({
+    text: big, segments: [], avgLogprob: -0.1, maxNoSpeechProb: 0.01, apiMs: 1,
+  })
+  saveClip(svc, dir, 'big1', 10)
+  await svc.tick()
+  saveClip(svc, dir, 'big2', 10)
+  await svc.tick()
+  clock.t += 25_000 // settled
+  await svc.tick() // flush #1 — only big1 fits (oversized single allowed on a fresh window)
+  assert.deepEqual(calls, [1], 'first batch limited to one oversized clip')
+  assert.equal(svc.transcript('big1')!.importance, 0)
+  assert.equal(svc.statusOf('big2'), 'done', 'big2 transcribed but unscored')
+  assert.equal(svc.transcript('big2')!.importance, undefined, 'big2 waiting on the minute window')
+  await svc.tick() // same minute — still paced
+  assert.deepEqual(calls, [1])
+  clock.t += 62_000 // minute window rolls
+  await svc.tick()
+  assert.deepEqual(calls, [1, 1], 'second clip scored in the next minute window')
+  assert.equal(svc.transcript('big2')!.importance, 0)
+})
+
 test('transcriber: recurring preamble carries a high recurrence flag to the model', async () => {
   let seenRecurrence = -1
   const { svc, dir, clock } = rig({

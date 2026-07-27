@@ -97,12 +97,20 @@ const IMPORTANCE = {
   model: process.env['ANYTONE_IMPORTANCE_MODEL'] ?? 'openai/gpt-oss-120b',
   fallbackModel: process.env['ANYTONE_IMPORTANCE_FALLBACK'] ?? 'llama-3.1-8b-instant',
   batchSize: 15,
-  batchWindowMs: 5 * 60_000, // score after 15 clips OR 5 minutes, whichever first
+  // Burst-aware flushing (replaces the old flat 5-min window, which made enhancement feel slow):
+  // flush when the batch is full, OR the queue has SETTLED (no new transcript for settleMs — calls
+  // arrive in bursts; once the burst ends, score it), OR the oldest item has waited maxWaitMs.
+  settleMs: 20_000,
+  maxWaitMs: 90_000,
   recurrenceLookback: 40, // prior same-channel transcripts compared for the scheduled-preamble flag
   enabled: process.env['ANYTONE_IMPORTANCE'] !== '0',
   cleanMinChars: 80, // selective cleanup floor: short blurts don't need pretty formatting
   cleanMinDurationMs: 8_000,
   dailyTokenCap: Number(process.env['ANYTONE_IMPORTANCE_DAILY_TOKENS'] ?? 150_000), // est., margin under free TPD
+  // Per-MINUTE token pacing — the actual 429 source: gpt-oss-120b's free tier is ~8k tokens/min,
+  // and one full cleanup batch is ~6-8k, so two batches inside a minute (a spike) hit the wall.
+  // Batches are sized by ESTIMATED TOKENS against a sliding 60s window, not by clip count.
+  minuteTokenCap: Number(process.env['ANYTONE_IMPORTANCE_TPM'] ?? 6_000),
 }
 
 export interface TranscriberDeps {
@@ -165,7 +173,10 @@ export class Transcriber {
   private readonly scoreQueue: string[] = []
   private scoreDeferUntil = 0
   private oldestScoreAt = 0
+  private lastScoreAddAt = 0
   private scoring = false
+  /** Sliding 60s log of estimated chat tokens (per-minute pacing — the 429 guard). */
+  private readonly minuteLog: { at: number; tokens: number }[] = []
   /** Rolling buffer of recently-transcribed clips (newest first, capped) — supplies the score
    * inputs' channel/time and the per-channel recurrence history. In-memory: recurrence detection
    * spans the current session (sessions run for days), not restarts. */
@@ -290,15 +301,54 @@ export class Transcriber {
     if (!this.chat) return
     if (this.scoreQueue.length === 0) this.oldestScoreAt = this.now()
     this.scoreQueue.push(id)
+    this.lastScoreAddAt = this.now()
+  }
+
+  /** Estimated tokens a clip contributes to a batch (input + its share of output). */
+  private clipCost(id: string): number {
+    const side = this.sidecar(id)
+    const len = side?.text?.length ?? 200
+    const clean = side?.text ? side.text.length >= IMPORTANCE.cleanMinChars : false
+    return Math.ceil((len * (clean ? 2 : 1)) / 4) + 60 // + json wrapper, reason, summary
+  }
+  /** Fixed per-call overhead: system prompt + the guidance file. */
+  private callOverhead(): number {
+    return Math.ceil((this.guidanceFn().length + 1500) / 4)
+  }
+  private minutePrune(): void {
+    const cutoff = this.now() - 60_000
+    while (this.minuteLog.length && this.minuteLog[0]!.at < cutoff) this.minuteLog.shift()
+  }
+  private minuteSpent(): number {
+    this.minutePrune()
+    return this.minuteLog.reduce((a, e) => a + e.tokens, 0)
   }
 
   private async maybeScore(): Promise<void> {
     if (this.scoring || !this.chat || this.scoreQueue.length === 0) return
     if (this.now() < this.scoreDeferUntil) return
     const full = this.scoreQueue.length >= IMPORTANCE.batchSize
-    const windowUp = this.now() - this.oldestScoreAt >= IMPORTANCE.batchWindowMs
-    if (!full && !windowUp) return
-    const batch = this.scoreQueue.splice(0, IMPORTANCE.batchSize)
+    const settled = this.now() - this.lastScoreAddAt >= IMPORTANCE.settleMs
+    const overdue = this.now() - this.oldestScoreAt >= IMPORTANCE.maxWaitMs
+    if (!full && !settled && !overdue) return
+    // Per-minute token pacing: size the batch to what the sliding 60s window still allows.
+    const spent = this.minuteSpent()
+    let budget = IMPORTANCE.minuteTokenCap - spent - this.callOverhead()
+    const batch: string[] = []
+    for (const id of this.scoreQueue) {
+      if (batch.length >= IMPORTANCE.batchSize) break
+      const cost = this.clipCost(id)
+      if (batch.length > 0 && cost > budget) break
+      if (batch.length === 0 && cost > budget && spent > 0) {
+        // not even one clip fits right now — resume when the oldest minute-window entry expires
+        this.scoreDeferUntil = (this.minuteLog[0]?.at ?? this.now()) + 61_000
+        return
+      }
+      batch.push(id)
+      budget -= cost
+    }
+    if (batch.length === 0) return
+    this.scoreQueue.splice(0, batch.length)
     if (this.scoreQueue.length) this.oldestScoreAt = this.now()
     this.scoring = true
     try {
@@ -358,6 +408,7 @@ export class Transcriber {
       }
     }
     this.spendChat(estTokens)
+    this.minuteLog.push({ at: this.now(), tokens: estTokens })
     for (const input of inputs) {
       const s = scores.get(input.id) ?? { id: input.id, tier: 0 as ImportanceTier, reason: '' }
       const side = this.sidecar(input.id)
