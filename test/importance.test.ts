@@ -120,24 +120,54 @@ test('transcriber: batch flushes on window elapse and patches sidecar + pushes t
   assert.equal((JSON.parse(readFileSync(join(dir, 'w1.transcript.json'), 'utf8')) as TranscriptSidecar).importance, 2)
 })
 
-test('transcriber: importance 429 re-queues the batch, does not lose clips', async () => {
+test('transcriber: primary 429 fails over to the fallback IN THE SAME FLUSH (scoring-only)', async () => {
+  const { GroqQuotaError } = await import('../src/transcribe/groq')
+  let calls = 0
+  let fallbackSawClean: boolean | null = null
+  const { svc, dir, clock } = rig({
+    complete: async (_s, user) => {
+      calls++
+      if (calls === 1) throw new GroqQuotaError(600) // primary: daily pool drained
+      const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string; clean: boolean }[]
+      fallbackSawClean = items.some((i) => i.clean)
+      return reply(JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 1, reason: 'notable' })) }))
+    },
+  })
+  saveClip(svc, dir, 's1', 10)
+  await svc.tick()
+  clock.t += 25_000
+  await svc.tick() // primary 429 → immediate fallback → scored, no stall
+  assert.equal(calls, 2, 'fallback called in the same flush')
+  assert.equal(svc.transcript('s1')!.importance, 1, 'scored via fallback')
+  assert.equal(fallbackSawClean, false, 'cleanup stripped on the fallback path')
+  // during the starvation window the primary is not re-attempted
+  saveClip(svc, dir, 's2', 10)
+  await svc.tick()
+  clock.t += 25_000
+  await svc.tick()
+  assert.equal(calls, 3, 'straight to fallback while primary starved (one call, not two)')
+  assert.equal(svc.transcript('s2')!.importance, 1)
+})
+
+test('transcriber: BOTH models quota-limited → batch re-queued, retried later', async () => {
   const { GroqQuotaError } = await import('../src/transcribe/groq')
   let calls = 0
   const { svc, dir, clock } = rig({
     complete: async () => {
       calls++
-      if (calls === 1) throw new GroqQuotaError(60)
-      return reply(JSON.stringify({ scores: [{ id: 's1', tier: 1, reason: 'notable' }] }))
+      if (calls <= 2) throw new GroqQuotaError(60) // primary AND fallback both dry
+      return reply(JSON.stringify({ scores: [{ id: 'q1', tier: 0, reason: 'r' }] }))
     },
   })
-  saveClip(svc, dir, 's1')
+  saveClip(svc, dir, 'q1')
   await svc.tick()
-  clock.t += 6 * 60_000
-  await svc.tick() // first score attempt → 429, deferred
-  assert.equal(svc.transcript('s1')!.importance, undefined, 'not scored yet')
-  clock.t += 120_000 // past the 429 cooldown
-  await svc.tick() // retry succeeds
-  assert.equal(svc.transcript('s1')!.importance, 1)
+  clock.t += 25_000
+  await svc.tick() // primary 429 → fallback 429 → deferred
+  assert.equal(calls, 2)
+  assert.equal(svc.transcript('q1')!.importance, undefined, 'unscored but retained in the queue')
+  clock.t += 120_000 // past the fallback cooldown (primary still starved → fallback again)
+  await svc.tick()
+  assert.equal(svc.transcript('q1')!.importance, 0, 'scored once quota returns')
 })
 
 test('transcriber: cleanup requested for long clips, cleanText persisted + verbatim kept', async () => {

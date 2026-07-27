@@ -174,6 +174,8 @@ export class Transcriber {
   private scoreDeferUntil = 0
   private oldestScoreAt = 0
   private lastScoreAddAt = 0
+  /** Primary chat model's quota-starvation window — score via fallback until it passes. */
+  private primaryStarvedUntil = 0
   private scoring = false
   /** Sliding 60s log of estimated chat tokens (per-minute pacing — the 429 guard). */
   private readonly minuteLog: { at: number; tokens: number }[] = []
@@ -392,25 +394,36 @@ export class Transcriber {
       inputs = inputs.map((i) => ({ ...i, clean: false }))
       this.log('transcriber: chat token budget low — scoring without cleanup this batch')
     }
-    let result
-    try {
-      result = await scoreBatch(this.chat!, this.guidanceFn(), inputs)
-    } catch (e) {
-      if (e instanceof GroqQuotaError) {
-        this.scoreQueue.unshift(...ids) // re-queue whole batch; retry after cooldown
-        // Honor Groq's retry-after but CLAMP it (observed up to ~13 min): probing early costs one
-        // free 429; going silent for many minutes was the field complaint.
-        const waitS = Math.min(Math.max(30, e.retryAfterS), 300)
-        this.scoreDeferUntil = this.now() + waitS * 1000
-        this.log(`transcriber: importance 429 (retry-after ${e.retryAfterS}s) — deferring ${waitS}s`)
-        return
+    let result = null
+    // Primary starvation window: when gpt-oss's DAILY pool is drained (field-observed retry-afters
+    // of 10-25 min), attempting it is pointless — go straight to the fallback (separate bucket)
+    // until the window passes. Scoring must keep flowing; cleanup waits for the primary.
+    const primaryStarved = this.now() < this.primaryStarvedUntil
+    if (!primaryStarved) {
+      try {
+        result = await scoreBatch(this.chat!, this.guidanceFn(), inputs)
+      } catch (e) {
+        if (e instanceof GroqQuotaError) {
+          const waitS = Math.min(Math.max(30, e.retryAfterS), 900)
+          this.primaryStarvedUntil = this.now() + waitS * 1000
+          this.log(`transcriber: ${IMPORTANCE.model} quota (retry-after ${e.retryAfterS}s) — failing over to ${IMPORTANCE.fallbackModel} for ${waitS}s`)
+        } else {
+          this.log(`transcriber: importance scoring failed on ${IMPORTANCE.model}: ${(e as Error).message} — retrying on ${IMPORTANCE.fallbackModel}`)
+        }
       }
-      // Primary model hiccup (bad output, 5xx, retired model): one retry on the fallback,
-      // scoring-only — triage survives even when the good model is unavailable.
-      this.log(`transcriber: importance scoring failed on ${IMPORTANCE.model}: ${(e as Error).message} — retrying on ${IMPORTANCE.fallbackModel}`)
+    }
+    if (!result) {
+      // Fallback: scoring-only (the llamas no-op cleanup anyway — shootout-verified).
       try {
         result = await scoreBatch(this.deps.chatClient ?? this.makeGroqChat(IMPORTANCE.fallbackModel), this.guidanceFn(), inputs.map((i) => ({ ...i, clean: false })))
       } catch (e2) {
+        if (e2 instanceof GroqQuotaError) {
+          this.scoreQueue.unshift(...ids) // both models starved — re-queue and wait
+          const waitS = Math.min(Math.max(30, e2.retryAfterS), 300)
+          this.scoreDeferUntil = this.now() + waitS * 1000
+          this.log(`transcriber: fallback also quota-limited (retry-after ${e2.retryAfterS}s) — deferring ${waitS}s`)
+          return
+        }
         this.log(`transcriber: importance fallback failed: ${(e2 as Error).message}`)
         return // unscored clips stay tier-absent (routine); no retry storm
       }
