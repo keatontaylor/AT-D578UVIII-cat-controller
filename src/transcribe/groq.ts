@@ -76,8 +76,12 @@ export async function transcribe(wav: Buffer, opts: GroqOptions): Promise<GroqRe
     method: 'POST',
     headers: { authorization: `Bearer ${opts.key}` },
     body: form,
+    signal: AbortSignal.timeout(90_000), // a hung upload must never wedge the queue (busy flag)
   })
-  if (res.status === 429) throw new GroqQuotaError(Number(res.headers.get('retry-after') ?? 60))
+  if (res.status === 429) {
+    const ra = Number(res.headers.get('retry-after'))
+    throw new GroqQuotaError(Number.isFinite(ra) ? ra : 60)
+  }
   if (!res.ok) throw new Error(`groq ${res.status}: ${(await res.text()).slice(0, 200)}`)
   const body = (await res.json()) as {
     text?: string
@@ -97,25 +101,67 @@ export async function transcribe(wav: Buffer, opts: GroqOptions): Promise<GroqRe
 export interface GroqChatOptions {
   readonly key: string
   readonly model: string
+  /** For reasoning models (gpt-oss-*): cap deliberation — classification needs none, and hidden
+   * reasoning tokens are what blew past our token estimates (the field-observed 429 storms). */
+  readonly reasoningEffort?: 'low' | 'medium' | 'high'
   readonly fetchImpl?: typeof fetch
   readonly endpoint?: string
 }
 
+/** The reply plus the ACTUAL token accounting — estimates cannot see reasoning tokens, so the
+ * caller's budgets must be fed from these, not from chars/4 guesses. */
+export interface ChatReply {
+  readonly content: string
+  /** usage.total_tokens from the response body (real spend incl. reasoning), or null. */
+  readonly totalTokens: number | null
+  /** x-ratelimit-remaining-tokens header — Groq's own view of what's left in the bucket. */
+  readonly remainingTokens: number | null
+}
+
 /** JSON-forced chat completion. Throws GroqQuotaError on 429 so the caller defers the batch. */
-export async function chatComplete(system: string, user: string, opts: GroqChatOptions): Promise<string> {
+export async function chatComplete(system: string, user: string, opts: GroqChatOptions): Promise<ChatReply> {
   const doFetch = opts.fetchImpl ?? fetch
-  const res = await doFetch(opts.endpoint ?? 'https://api.groq.com/openai/v1/chat/completions', {
+  const payload: Record<string, unknown> = {
+    model: opts.model,
+    temperature: 0,
+    response_format: { type: 'json_object' },
+    messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
+  }
+  if (opts.reasoningEffort) payload['reasoning_effort'] = opts.reasoningEffort
+  let res = await doFetch(opts.endpoint ?? 'https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { authorization: `Bearer ${opts.key}`, 'content-type': 'application/json' },
-    body: JSON.stringify({
-      model: opts.model,
-      temperature: 0,
-      response_format: { type: 'json_object' },
-      messages: [{ role: 'system', content: system }, { role: 'user', content: user }],
-    }),
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(45_000),
   })
-  if (res.status === 429) throw new GroqQuotaError(Number(res.headers.get('retry-after') ?? 60))
+  if (res.status === 400 && opts.reasoningEffort) {
+    // model/param mismatch (lineup rotates) — retry once without the reasoning knob
+    const errText = await res.text()
+    if (/reasoning/i.test(errText)) {
+      delete payload['reasoning_effort']
+      res = await doFetch(opts.endpoint ?? 'https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { authorization: `Bearer ${opts.key}`, 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(45_000),
+      })
+    } else {
+      throw new Error(`groq chat 400: ${errText.slice(0, 200)}`)
+    }
+  }
+  if (res.status === 429) {
+    const ra = Number(res.headers.get('retry-after'))
+    throw new GroqQuotaError(Number.isFinite(ra) ? ra : 60)
+  }
   if (!res.ok) throw new Error(`groq chat ${res.status}: ${(await res.text()).slice(0, 200)}`)
-  const body = (await res.json()) as { choices?: { message?: { content?: string } }[] }
-  return body.choices?.[0]?.message?.content ?? ''
+  const body = (await res.json()) as {
+    choices?: { message?: { content?: string } }[]
+    usage?: { total_tokens?: number }
+  }
+  const remaining = Number(res.headers.get('x-ratelimit-remaining-tokens'))
+  return {
+    content: body.choices?.[0]?.message?.content ?? '',
+    totalTokens: typeof body.usage?.total_tokens === 'number' ? body.usage.total_tokens : null,
+    remainingTokens: Number.isFinite(remaining) ? remaining : null,
+  }
 }

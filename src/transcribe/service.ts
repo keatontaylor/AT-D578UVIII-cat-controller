@@ -203,7 +203,12 @@ export class Transcriber {
       complete: (system, user) => {
         const key = this.keyFn()
         if (!key) throw new Error('no key')
-        return chatComplete(system, user, { key, model })
+        // Reasoning models burn hidden deliberation tokens — the real cause of the observed 429
+        // storms (usage far above estimates). Classification needs none: force low.
+        return chatComplete(system, user, {
+          key, model,
+          ...(model.includes('gpt-oss') ? { reasoningEffort: 'low' as const } : {}),
+        })
       },
     }
   }
@@ -387,28 +392,40 @@ export class Transcriber {
       inputs = inputs.map((i) => ({ ...i, clean: false }))
       this.log('transcriber: chat token budget low — scoring without cleanup this batch')
     }
-    let scores
+    let result
     try {
-      scores = await scoreBatch(this.chat!, this.guidanceFn(), inputs)
+      result = await scoreBatch(this.chat!, this.guidanceFn(), inputs)
     } catch (e) {
       if (e instanceof GroqQuotaError) {
         this.scoreQueue.unshift(...ids) // re-queue whole batch; retry after cooldown
-        this.scoreDeferUntil = this.now() + Math.max(30, e.retryAfterS) * 1000
-        this.log(`transcriber: importance 429 — deferring batch (${new Date(this.scoreDeferUntil).toISOString()})`)
+        // Honor Groq's retry-after but CLAMP it (observed up to ~13 min): probing early costs one
+        // free 429; going silent for many minutes was the field complaint.
+        const waitS = Math.min(Math.max(30, e.retryAfterS), 300)
+        this.scoreDeferUntil = this.now() + waitS * 1000
+        this.log(`transcriber: importance 429 (retry-after ${e.retryAfterS}s) — deferring ${waitS}s`)
         return
       }
       // Primary model hiccup (bad output, 5xx, retired model): one retry on the fallback,
       // scoring-only — triage survives even when the good model is unavailable.
       this.log(`transcriber: importance scoring failed on ${IMPORTANCE.model}: ${(e as Error).message} — retrying on ${IMPORTANCE.fallbackModel}`)
       try {
-        scores = await scoreBatch(this.deps.chatClient ?? this.makeGroqChat(IMPORTANCE.fallbackModel), this.guidanceFn(), inputs.map((i) => ({ ...i, clean: false })))
+        result = await scoreBatch(this.deps.chatClient ?? this.makeGroqChat(IMPORTANCE.fallbackModel), this.guidanceFn(), inputs.map((i) => ({ ...i, clean: false })))
       } catch (e2) {
         this.log(`transcriber: importance fallback failed: ${(e2 as Error).message}`)
         return // unscored clips stay tier-absent (routine); no retry storm
       }
     }
-    this.spendChat(estTokens)
-    this.minuteLog.push({ at: this.now(), tokens: estTokens })
+    const scores = result.scores
+    // Budgets run on REAL usage when the API reports it (reasoning tokens made estimates
+    // fictional); the estimate is only the fallback.
+    const spentTokens = result.totalTokens ?? estTokens
+    this.spendChat(spentTokens)
+    this.minuteLog.push({ at: this.now(), tokens: spentTokens })
+    // Groq's own bucket view: if it says we're nearly dry, defer proactively instead of 429ing.
+    if (result.remainingTokens !== null && result.remainingTokens < 2_500 && this.scoreQueue.length) {
+      this.scoreDeferUntil = this.now() + 60_000
+      this.log(`transcriber: groq token bucket low (${result.remainingTokens} left) — pausing 60s`)
+    }
     for (const input of inputs) {
       const s = scores.get(input.id) ?? { id: input.id, tier: 0 as ImportanceTier, reason: '' }
       const side = this.sidecar(input.id)
@@ -502,7 +519,7 @@ export class Transcriber {
     } catch (e) {
       if (e instanceof GroqQuotaError) {
         item.deferred = true
-        this.resumeAt = this.now() + Math.max(30, e.retryAfterS) * 1000
+        this.resumeAt = this.now() + Math.min(Math.max(30, e.retryAfterS), 300) * 1000
         this.emit({ id: clip.id, status: 'deferred' })
         this.log(`transcriber: 429 — resuming ${new Date(this.resumeAt).toISOString()}`)
         return

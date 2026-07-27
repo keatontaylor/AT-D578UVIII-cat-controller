@@ -15,6 +15,8 @@ import { Transcriber, type TranscribableClip, type TranscriptSidecar } from '../
 import { analyzeSpeech, parseWav } from '../src/transcribe/trim'
 import { wavHeader } from '../src/audio/recorder'
 
+const reply = (content: string) => ({ content, totalTokens: null, remainingTokens: null })
+
 const RATE = 8000
 function speechWav(seconds = 4): Buffer {
   const n = Math.round(seconds * RATE)
@@ -60,14 +62,14 @@ test('buildUserPrompt: embeds guidance + clip context incl. recurrence', () => {
 
 test('scoreBatch: maps model output back onto clip ids', async () => {
   const chat: ChatClient = {
-    complete: async () => JSON.stringify({ scores: [{ id: 'c1', tier: 2, reason: 'funnel cloud reported' }, { id: 'c2', tier: 0, reason: 'radio check' }] }),
+    complete: async () => reply(JSON.stringify({ scores: [{ id: 'c1', tier: 2, reason: 'funnel cloud reported' }, { id: 'c2', tier: 0, reason: 'radio check' }] })),
   }
   const out = await scoreBatch(chat, 'g', [
     { id: 'c1', channel: 'A', startedAt: 0, durationMs: 5000, text: 'funnel cloud on the ground', recurrence: 0 },
     { id: 'c2', channel: 'A', startedAt: 0, durationMs: 3000, text: 'radio check', recurrence: 0 },
   ])
-  assert.equal(out.get('c1')!.tier, 2)
-  assert.equal(out.get('c2')!.tier, 0)
+  assert.equal(out.scores.get('c1')!.tier, 2)
+  assert.equal(out.scores.get('c2')!.tier, 0)
 })
 
 // ── Transcriber batch lifecycle ───────────────────────────────────────────────
@@ -101,7 +103,7 @@ test('transcriber: batch flushes on window elapse and patches sidecar + pushes t
   const { svc, dir, clock, events } = rig({
     complete: async (_s, user) => {
       batchIds = (JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]).map((c) => c.id)
-      return JSON.stringify({ scores: batchIds.map((id) => ({ id, tier: 2, reason: 'weather report' })) })
+      return reply(JSON.stringify({ scores: batchIds.map((id) => ({ id, tier: 2, reason: 'weather report' })) }))
     },
   })
   saveClip(svc, dir, 'w1')
@@ -125,7 +127,7 @@ test('transcriber: importance 429 re-queues the batch, does not lose clips', asy
     complete: async () => {
       calls++
       if (calls === 1) throw new GroqQuotaError(60)
-      return JSON.stringify({ scores: [{ id: 's1', tier: 1, reason: 'notable' }] })
+      return reply(JSON.stringify({ scores: [{ id: 's1', tier: 1, reason: 'notable' }] }))
     },
   })
   saveClip(svc, dir, 's1')
@@ -144,7 +146,7 @@ test('transcriber: cleanup requested for long clips, cleanText persisted + verba
     complete: async (_s, user) => {
       const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string; clean: boolean }[]
       sawClean = items.some((i) => i.clean)
-      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'ragchew', summary: 'Weather report ragchew', cleanText: 'This is K0BUL with a funnel cloud report near Longmont.' })) })
+      return reply(JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'ragchew', summary: 'Weather report ragchew', cleanText: 'This is K0BUL with a funnel cloud report near Longmont.' })) }))
     },
   })
   saveClip(svc, dir, 'short1', 4) // under the 8s clean floor
@@ -168,7 +170,7 @@ test('transcriber: settle-based flush scores a lone clip in ~20s, not 5 minutes'
   const { svc, dir, clock } = rig({
     complete: async (_s, user) => {
       const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]
-      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r', summary: 's' })) })
+      return reply(JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r', summary: 's' })) }))
     },
   })
   saveClip(svc, dir, 'fast1')
@@ -190,7 +192,7 @@ test('transcriber: minute token budget splits oversized batches across windows (
     complete: async (_s, user) => {
       const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]
       calls.push(items.length)
-      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r' })) })
+      return reply(JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r' })) }))
     },
   })
   // override the fake transcription to return an enormous text
@@ -215,6 +217,36 @@ test('transcriber: minute token budget splits oversized batches across windows (
   assert.equal(svc.transcript('big2')!.importance, 0)
 })
 
+test('transcriber: REAL usage + groq bucket headers drive the pacer, not estimates', async () => {
+  let calls = 0
+  const { svc, dir, clock } = rig({
+    complete: async (_s, user) => {
+      const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]
+      calls++
+      // report HUGE real usage (reasoning tokens) + a nearly-dry bucket — far above any estimate
+      return {
+        content: JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r' })) }),
+        totalTokens: 5_900,
+        remainingTokens: 900,
+      }
+    },
+  })
+  saveClip(svc, dir, 'u1')
+  await svc.tick()
+  clock.t += 25_000
+  await svc.tick() // flush #1: real usage 5,900 tokens recorded from the API response
+  assert.equal(calls, 1)
+  saveClip(svc, dir, 'u2') // arrives AFTER the heavy call
+  await svc.tick()
+  clock.t += 21_000 // settled — but the minute window still holds 5,900 REAL tokens
+  await svc.tick()
+  assert.equal(calls, 1, 'real usage blocks a second call in the same minute')
+  clock.t += 45_000 // first call ages out of the 60s window
+  await svc.tick()
+  assert.equal(calls, 2, 'resumes in the next window')
+  assert.equal(svc.transcript('u2')!.importance, 0)
+})
+
 test('transcriber: recurring preamble carries a high recurrence flag to the model', async () => {
   let seenRecurrence = -1
   const { svc, dir, clock } = rig({
@@ -222,7 +254,7 @@ test('transcriber: recurring preamble carries a high recurrence flag to the mode
       const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string; recurrence: number }[]
       const p = items.find((i) => i.id === 'p2')
       if (p) seenRecurrence = p.recurrence
-      return JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'scheduled net preamble' })) })
+      return reply(JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'scheduled net preamble' })) }))
     },
   })
   // two near-identical preambles on the same channel

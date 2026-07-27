@@ -34,9 +34,15 @@ export interface ScoreOutput {
   readonly cleanText?: string
 }
 
+export interface ChatReply {
+  readonly content: string
+  readonly totalTokens: number | null
+  readonly remainingTokens: number | null
+}
+
 export interface ChatClient {
-  /** Return the model's raw text response to a JSON-forced prompt. */
-  complete(system: string, user: string): Promise<string>
+  /** Return the model's response + real token accounting for a JSON-forced prompt. */
+  complete(system: string, user: string): Promise<ChatReply>
 }
 
 // ── local recurrence detection ────────────────────────────────────────────────
@@ -140,12 +146,24 @@ export function parseScores(raw: string, ids: string[]): Map<string, ScoreOutput
   return out
 }
 
+export interface BatchResult {
+  readonly scores: Map<string, ScoreOutput>
+  /** Real token spend for this call (incl. reasoning tokens), null if the API omitted usage. */
+  readonly totalTokens: number | null
+  /** Groq's remaining-token-bucket header after this call, null if absent. */
+  readonly remainingTokens: number | null
+}
+
 export async function scoreBatch(
   chat: ChatClient,
   guidance: string,
   clips: ScoreInput[],
-): Promise<Map<string, ScoreOutput>> {
-  if (clips.length === 0) return new Map()
-  const raw = await chat.complete(SYSTEM_PROMPT, buildUserPrompt(guidance, clips))
-  return parseScores(raw, clips.map((c) => c.id))
+): Promise<BatchResult> {
+  if (clips.length === 0) return { scores: new Map(), totalTokens: null, remainingTokens: null }
+  const reply = await chat.complete(SYSTEM_PROMPT, buildUserPrompt(guidance, clips))
+  return {
+    scores: parseScores(reply.content, clips.map((c) => c.id)),
+    totalTokens: reply.totalTokens,
+    remainingTokens: reply.remainingTokens,
+  }
 }
