@@ -439,7 +439,10 @@ export class Transcriber {
     }
     const notable = inputs.filter((i) => (scores.get(i.id)?.tier ?? 0) >= 2).length
     const cleaned = inputs.filter((i) => scores.get(i.id)?.cleanText).length
-    this.log(`transcriber: scored ${inputs.length} clip(s)${cleaned ? `, cleaned ${cleaned}` : ''}${notable ? `, ${notable} important+` : ''}`)
+    this.log(
+      `transcriber: scored ${inputs.length} clip(s)${cleaned ? `, cleaned ${cleaned}` : ''}${notable ? `, ${notable} important+` : ''}` +
+      ` [${spentTokens} tok${result.totalTokens === null ? ' est' : ''}, ${this.state.chatTokens ?? 0} today${result.remainingTokens !== null ? `, bucket ${result.remainingTokens}` : ''}]`,
+    )
   }
 
   private rollChat(): void {
