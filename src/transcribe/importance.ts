@@ -94,7 +94,12 @@ export const SYSTEM_PROMPT =
   'For clips marked "clean":true, ALSO return a cleaned transcript as "cleanText": fix punctuation, ' +
   'capitalization and paragraphing; resolve spoken ITU phonetics into callsigns (e.g. "kilo foxtrot ' +
   'zero whiskey whiskey sierra" -> "KF0WWS"); write ham lingo conventionally ("seventy-three" -> ' +
-  '"73", "five nine" -> "5-9", QSL/QSO/QTH uppercase). Be CONSERVATIVE: never invent or reword ' +
+  '"73", "five nine" -> "5-9", QSL/QSO/QTH uppercase). When more than one speaker is audible ' +
+  '(half-duplex turn-taking: "go ahead", replies, dispatch/unit exchanges), break cleanText into ' +
+  'one line per transmission with a blank line between turns, and prefix each turn with the ' +
+  "speaker's callsign or unit number and a colon when it is identifiable from the words themselves " +
+  '("K0NR: ...", "Lincoln 58: ..."); leave the prefix off when the speaker is unclear — never ' +
+  'guess an identity. Be CONSERVATIVE: never invent or reword ' +
   'content, never turn garbled fragments into fluent sentences — leave unclear stretches as-is or ' +
   'mark them [unclear]. Preserve every factual detail verbatim. ' +
   'Respond ONLY with a JSON object {"scores":[{"id","tier","reason","summary","cleanText"?}...]} covering every clip id.'
