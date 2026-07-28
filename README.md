@@ -92,6 +92,21 @@ Groq's free tier; typical daily monitoring stays comfortably within it.
 - Privacy note: received RX audio is sent to Groq for transcription. It's public-airwaves
   traffic, but if that's not for you, simply don't add a key — everything else works identically.
 
+**Push notifications** — point `ANYTONE_NOTIFY_URL` at a webhook and important/urgent clips push
+to your phone. Two formats, auto-detected (override with `ANYTONE_NOTIFY_FORMAT`):
+
+- **ntfy** (`https://ntfy.sh/your-topic` or self-hosted): standard ntfy publish — title, priority
+  (urgent→5, important→4), tags; `ANYTONE_NOTIFY_TOKEN` for protected topics. Instant iOS/Android
+  push with the ntfy app, no native app needed.
+- **Generic JSON** (anything else, e.g. a Home Assistant webhook
+  `https://ha.local:8123/api/webhook/anytone-alerts`): one POST per clip with
+  `{event, tier, tierLabel, title, message, channel, talkgroup, clipId, startedAt, reason, summary,
+  transcript}` — in Home Assistant use a webhook trigger and read `trigger.json.tier` etc. to route
+  to `notify.mobile_app_*` or anything else.
+
+Default threshold is tier 2 (important + urgent); `ANYTONE_NOTIFY_MIN_TIER=3` for urgent-only.
+Delivery is best-effort (one retry, never blocks the pipeline) with a 20/hour flood cap.
+
 ## Manual run (development)
 
 ```sh
@@ -117,6 +132,10 @@ Everything is optional; defaults suit a Pi with one radio.
 | `GROQ_API_KEY` / `~/.groq_key` | unset | Enables AI transcription + importance scoring (see above); absent = features off |
 | `ANYTONE_TRANSCRIBE` | on | `0` disables transcription even with a key |
 | `ANYTONE_IMPORTANCE_MODEL` | `openai/gpt-oss-120b` | Chat model for importance/summaries/cleanup (fallback `llama-3.1-8b-instant`) |
+| `ANYTONE_NOTIFY_URL` | unset | Webhook for important/urgent clip pushes — an ntfy topic URL or any JSON endpoint (Home Assistant webhook); absent = no pushes |
+| `ANYTONE_NOTIFY_FORMAT` | auto | `ntfy` (headers convention) or `json` (full-event POST); auto-detects ntfy from the hostname |
+| `ANYTONE_NOTIFY_MIN_TIER` | `2` | Minimum importance tier that pushes (`2` important+urgent, `3` urgent only) |
+| `ANYTONE_NOTIFY_TOKEN` | unset | `Authorization: Bearer` for the webhook (ntfy access token etc.) |
 | `ANYTONE_AUDIO_TX_GAIN` | `0.6` | Mic → radio gain |
 | `ANYTONE_CF_TURN_KEY_ID` / `ANYTONE_CF_TURN_API_TOKEN` | unset | Mint Cloudflare TURN credentials for WebRTC relay — put these in a mode-600 systemd drop-in, **never** in the repo |
 | `ANYTONE_ICE_SERVERS` | unset | Static ICE server JSON (alternative to Cloudflare TURN) |

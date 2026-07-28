@@ -73,7 +73,7 @@ test('scoreBatch: maps model output back onto clip ids', async () => {
 })
 
 // ── Transcriber batch lifecycle ───────────────────────────────────────────────
-function rig(chat: ChatClient) {
+function rig(chat: ChatClient, extra: { notifier?: { notify(n: unknown): void } } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'imp-'))
   const clock = { t: Date.UTC(2026, 6, 26, 12, 0, 0) }
   const events: { id: string; status: string; importance?: number }[] = []
@@ -81,6 +81,7 @@ function rig(chat: ChatClient) {
     dir, recorderEnabled: () => true, now: () => clock.t, keyFn: () => 'k', startTimer: false,
     guidanceFn: () => 'test guidance',
     chatClient: chat,
+    ...extra,
     transcribeFn: async () => ({
       text: 'This is K0BUL with a funnel cloud report near Longmont, wall cloud rotating to the northeast, requesting SKYWARN net control acknowledge.',
       segments: [{ startS: 0.2, endS: 3, text: 'This is K0BUL with a funnel cloud report near Longmont.' }],
@@ -298,4 +299,27 @@ test('transcriber: recurring preamble carries a high recurrence flag to the mode
   await svc.tick()
   await svc.tick()
   assert.ok(seenRecurrence > 0.9, `p2 should match p1 (recurrence=${seenRecurrence})`)
+})
+
+test('transcriber: scored tier>=threshold fires the notifier with summary + clean text', async () => {
+  const pushed: { clipId: string; tier: number; channel: string; summary?: string; text?: string }[] = []
+  const { svc, dir, clock } = rig(
+    {
+      complete: async (_s, user) => {
+        const ids = (JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]).map((c) => c.id)
+        return reply(JSON.stringify({ scores: ids.map((id) => ({ id, tier: 3, reason: 'wildfire evacuation', summary: 'Evacuations ordered near Lyons.', cleanText: 'Cleaned transcript here.' })) }))
+      },
+    },
+    { notifier: { notify: (n) => pushed.push(n as (typeof pushed)[number]) } },
+  )
+  saveClip(svc, dir, 'n1')
+  await svc.tick()
+  clock.t += 6 * 60_000
+  await svc.tick()
+  assert.equal(pushed.length, 1, 'one notification per scored clip')
+  assert.equal(pushed[0]!.clipId, 'n1')
+  assert.equal(pushed[0]!.tier, 3)
+  assert.equal(pushed[0]!.channel, 'COLCON DENVER')
+  assert.equal(pushed[0]!.summary, 'Evacuations ordered near Lyons.')
+  assert.equal(pushed[0]!.text, 'Cleaned transcript here.', 'clean text preferred for the push body')
 })

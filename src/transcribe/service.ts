@@ -16,6 +16,7 @@ import { analyzeSpeech, parseWav, sliceWav, trimPlan } from './trim'
 import { buildPrompt, isPromptEcho, transcribe as groqTranscribe, chatComplete, GroqQuotaError, type GroqResult } from './groq'
 import { InterestLearner, type EngagementKind } from './learner'
 import { recurrenceScore, scoreBatch, type ChatClient, type ImportanceTier, type ScoreInput } from './importance'
+import type { Notifier } from './notify'
 
 export interface TranscribableClip {
   readonly id: string
@@ -127,6 +128,8 @@ export interface TranscriberDeps {
   readonly chatClient?: ChatClient
   /** Reads the user-editable importance guidance; default = data/importance-guidance.md. */
   readonly guidanceFn?: () => string
+  /** Outbound webhook for important/urgent clips (ntfy / Home Assistant); absent = no pushes. */
+  readonly notifier?: Pick<Notifier, 'notify'>
 }
 
 function defaultKey(): string | null {
@@ -449,6 +452,16 @@ export class Transcriber {
       if (s.cleanText) side.cleanText = s.cleanText
       this.writeSidecar(input.id, side)
       this.emit({ id: input.id, status: side.status, importance: s.tier })
+      this.deps.notifier?.notify({
+        clipId: input.id,
+        tier: s.tier,
+        channel: input.channel,
+        talkgroup: this.recentDone.find((r) => r.id === input.id)?.talkgroupName ?? null,
+        startedAt: input.startedAt,
+        ...(s.reason ? { reason: s.reason } : {}),
+        ...(s.summary ? { summary: s.summary } : {}),
+        text: s.cleanText ?? side.text ?? '',
+      })
     }
     const notable = inputs.filter((i) => (scores.get(i.id)?.tier ?? 0) >= 2).length
     const cleaned = inputs.filter((i) => scores.get(i.id)?.cleanText).length

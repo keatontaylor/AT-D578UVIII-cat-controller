@@ -39,6 +39,10 @@
 #   ANYTONE_NGINX_TLS_DAYS     self-signed validity in days (default: 3650)
 #   ANYTONE_GROQ_KEY           Groq API key → enables AI transcription non-interactively
 #   ANYTONE_NO_TRANSCRIBE=1    skip the transcription-setup prompt entirely
+#   ANYTONE_NOTIFY_URL         push webhook for important/urgent clips (ntfy topic URL or a
+#                              generic JSON endpoint, e.g. a Home Assistant webhook) — written
+#                              to a mode-600 drop-in (notify.conf); see README "Push notifications"
+#   ANYTONE_NOTIFY_FORMAT / ANYTONE_NOTIFY_MIN_TIER / ANYTONE_NOTIFY_TOKEN  (companions, same)
 #
 set -eu
 # pipefail is bash/ksh only — enable it where available, but stay POSIX so `curl … | sh`
@@ -264,6 +268,35 @@ EOF
 # Environment=ANYTONE_CF_TURN_API_TOKEN=your-api-token
 EOF
     as_root install -m 0600 -o "$USER_NAME" "$drop_tmp" "$UNIT_DIR/anytone-v2.service.d/turn.conf"
+    rm -f "$drop_tmp"
+  fi
+  # Push-notification webhook (ntfy / Home Assistant) — mode-600 drop-in too (the token is a
+  # secret). Env at install time writes real values; otherwise leave a fill-in template.
+  if [ -n "${ANYTONE_NOTIFY_URL:-}" ]; then
+    drop_tmp="$(mktemp)"
+    {
+      printf '# Push webhook for important/urgent clips (see README "Push notifications").\n'
+      printf '[Service]\n'
+      printf 'Environment=ANYTONE_NOTIFY_URL=%s\n' "$ANYTONE_NOTIFY_URL"
+      if [ -n "${ANYTONE_NOTIFY_FORMAT:-}" ]; then printf 'Environment=ANYTONE_NOTIFY_FORMAT=%s\n' "$ANYTONE_NOTIFY_FORMAT"; fi
+      if [ -n "${ANYTONE_NOTIFY_MIN_TIER:-}" ]; then printf 'Environment=ANYTONE_NOTIFY_MIN_TIER=%s\n' "$ANYTONE_NOTIFY_MIN_TIER"; fi
+      if [ -n "${ANYTONE_NOTIFY_TOKEN:-}" ]; then printf 'Environment=ANYTONE_NOTIFY_TOKEN=%s\n' "$ANYTONE_NOTIFY_TOKEN"; fi
+    } >"$drop_tmp"
+    as_root install -m 0600 -o "$USER_NAME" "$drop_tmp" "$UNIT_DIR/anytone-v2.service.d/notify.conf"
+    rm -f "$drop_tmp"
+    info "Push webhook configured → $ANYTONE_NOTIFY_URL"
+  elif [ ! -f "$UNIT_DIR/anytone-v2.service.d/notify.conf" ]; then
+    drop_tmp="$(mktemp)"
+    cat >"$drop_tmp" <<'EOF'
+# Optional: push webhook for important/urgent clips — an ntfy topic URL or a generic JSON
+# endpoint (e.g. a Home Assistant webhook). See README "Push notifications".
+# Uncomment and fill in, then: systemctl --user restart anytone-v2
+# [Service]
+# Environment=ANYTONE_NOTIFY_URL=https://ntfy.sh/your-topic
+# Environment=ANYTONE_NOTIFY_MIN_TIER=2
+# Environment=ANYTONE_NOTIFY_TOKEN=your-token
+EOF
+    as_root install -m 0600 -o "$USER_NAME" "$drop_tmp" "$UNIT_DIR/anytone-v2.service.d/notify.conf"
     rm -f "$drop_tmp"
   fi
   as_root loginctl enable-linger "$USER_NAME"

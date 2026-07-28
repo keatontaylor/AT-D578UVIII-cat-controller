@@ -16,6 +16,7 @@ import { AudioBridge, wired48kTo8k, type IceServer } from './audio/rtc'
 import { cloudflareTurn, staticIce } from './audio/ice'
 import { Recorder } from './audio/recorder'
 import { Transcriber } from './transcribe/service'
+import { Notifier, envNotifierConfig } from './transcribe/notify'
 import { ScoKick } from './audio/sco-kick'
 import { PacketService } from './packet/service'
 import { createBtManager, resolveSppChannel } from './bluetooth'
@@ -268,10 +269,18 @@ const recorder = new Recorder(
 // Transcription side-process: auto-ON whenever recording is on AND a Groq key exists
 // (GROQ_API_KEY or ~/.groq_key) — no toggle of its own; absent key = everything stays
 // untranscribed. Sidecar files next to the clips; learned per-channel priority; free-tier budget.
+// Optional push webhook for important/urgent clips: ANYTONE_NOTIFY_URL (ntfy topic URL or a
+// generic JSON endpoint like a Home Assistant webhook); format auto-detects, see notify.ts.
+const notifier = new Notifier({
+  ...envNotifierConfig(),
+  log: (m) => console.log(`[stt] ${m}`),
+})
+if (notifier.enabled) console.log(`[stt] notify: webhook armed (${notifier.format}, tier ≥${notifier.minTier})`)
 const transcriber = new Transcriber({
   dir: RECORDINGS_DIR,
   recorderEnabled: () => recorder.status.enabled,
   log: (m) => console.log(`[stt] ${m}`),
+  notifier,
 })
 recorder.subscribe((e) => {
   if (e.type === 'saved') transcriber.onClipSaved(e.clip)
