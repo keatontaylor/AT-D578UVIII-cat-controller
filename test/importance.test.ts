@@ -353,3 +353,15 @@ test('junk transcripts never enter a scoring batch (but keep their sidecar)', as
   assert.equal(chatCalls, 0, 'no scoring flush for junk-only queue')
   assert.equal(svc.transcript('j1')!.importance, undefined)
 })
+
+test('guidanceInSystem client gets guidance in the system prompt, clips-only user message', async () => {
+  let sys = '', usr = ''
+  const chat: ChatClient = {
+    guidanceInSystem: true,
+    complete: async (s, u) => { sys = s; usr = u; return reply('{"scores":[{"id":"g1","tier":0,"reason":"r"}]}') },
+  }
+  await scoreBatch(chat, 'MY GUIDANCE', [{ id: 'g1', channel: 'A', startedAt: 0, durationMs: 4000, text: 'hello', recurrence: 0 }])
+  assert.ok(sys.includes('MY GUIDANCE'), 'guidance moved to system prompt')
+  assert.ok(!usr.includes('MY GUIDANCE'), 'user message is clips-only')
+  assert.ok(usr.startsWith('CLIPS TO SCORE'), 'clips payload intact')
+})

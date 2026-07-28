@@ -121,7 +121,7 @@ const IMPORTANCE = {
   // a few minutes; busy periods pack 5-15 clips per call.
   settleMs: 20_000,
   minFlush: 5,
-  maxWaitMs: 300_000,
+  maxWaitMs: Number(process.env['ANYTONE_IMPORTANCE_MAX_WAIT_MS'] ?? 60_000),
   recurrenceLookback: 40, // prior same-channel transcripts compared for the scheduled-preamble flag
   enabled: process.env['ANYTONE_IMPORTANCE'] !== '0',
   cleanMinChars: 80, // selective cleanup floor: short blurts don't need pretty formatting
@@ -202,6 +202,7 @@ function claudeBin(): string {
 }
 function makeClaudeCli(model: string): ChatClient {
   return {
+    guidanceInSystem: true,
     complete: (system, user) =>
       new Promise((resolve, reject) => {
         const child = execFile(

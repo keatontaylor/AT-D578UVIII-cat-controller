@@ -41,6 +41,10 @@ export interface ChatReply {
 }
 
 export interface ChatClient {
+  /** True → scoreBatch puts the guidance in the SYSTEM prompt (stable across calls, so providers
+   * with prefix caching — Claude, ~5-min TTL — pay cache-read prices for the preamble) and sends
+   * only the clips as the user message. */
+  readonly guidanceInSystem?: boolean
   /** Return the model's response + real token accounting for a JSON-forced prompt. */
   complete(system: string, user: string): Promise<ChatReply>
 }
@@ -95,7 +99,9 @@ export const SYSTEM_PROMPT =
   'mark them [unclear]. Preserve every factual detail verbatim. ' +
   'Respond ONLY with a JSON object {"scores":[{"id","tier","reason","summary","cleanText"?}...]} covering every clip id.'
 
-export function buildUserPrompt(guidance: string, clips: ScoreInput[]): string {
+/** Clips-only payload — for providers that carry the guidance in their (cache-eligible) system
+ * prompt instead of re-sending it per call. */
+export function buildClipsPrompt(clips: ScoreInput[]): string {
   const items = clips.map((c) => ({
     id: c.id,
     channel: c.channel,
@@ -106,7 +112,11 @@ export function buildUserPrompt(guidance: string, clips: ScoreInput[]): string {
     ...(c.hints ? { hints: c.hints } : {}),
     text: c.text.slice(0, 1500),
   }))
-  return `USER GUIDANCE:\n${guidance}\n\nCLIPS TO SCORE (JSON):\n${JSON.stringify(items)}`
+  return `CLIPS TO SCORE (JSON):\n${JSON.stringify(items)}`
+}
+
+export function buildUserPrompt(guidance: string, clips: ScoreInput[]): string {
+  return `USER GUIDANCE:\n${guidance}\n\n${buildClipsPrompt(clips)}`
 }
 
 const TIERS: ReadonlySet<number> = new Set([0, 1, 2, 3])
@@ -160,7 +170,9 @@ export async function scoreBatch(
   clips: ScoreInput[],
 ): Promise<BatchResult> {
   if (clips.length === 0) return { scores: new Map(), totalTokens: null, remainingTokens: null }
-  const reply = await chat.complete(SYSTEM_PROMPT, buildUserPrompt(guidance, clips))
+  const reply = chat.guidanceInSystem
+    ? await chat.complete(`${SYSTEM_PROMPT}\n\nUSER GUIDANCE:\n${guidance}`, buildClipsPrompt(clips))
+    : await chat.complete(SYSTEM_PROMPT, buildUserPrompt(guidance, clips))
   return {
     scores: parseScores(reply.content, clips.map((c) => c.id)),
     totalTokens: reply.totalTokens,
