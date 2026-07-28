@@ -139,3 +139,8 @@ missed low-tier items. This is a hobbyist monitoring aid, not a safety system.
   for a signal report" is N1QRZ SPEAKING (trailing call = signature, and "please come back" =
   inviting others to call THEM). The reply "you were probably talking about me, W2XY" is W2XY.
   Anchor the whole alternation on those first two turns.
+- Open calls vs directed calls: a transmission asking "anybody / anyone" is an OPEN call — a
+  callsign at its START is the speaker self-identifying, not an addressee (you don't name one
+  station and then ask "anybody"). A later "X, this is Y" answering it is Y REPLYING — always a
+  separate turn (worked example: "N1QRZ, I'm mobile on the interstate, curious if anybody has a
+  weather report" = N1QRZ speaking; "N1QRZ, this is W2XY" = W2XY's reply, new turn).
