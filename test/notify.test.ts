@@ -155,16 +155,41 @@ test('notify: truncates very long transcripts', async () => {
   assert.ok(body.transcript.endsWith('…'))
 })
 
+test('notify: publicUrl adds a clip deep link — json url field + ntfy Click header', async () => {
+  const sink: Sent[] = []
+  const jsonN = new Notifier({ url: 'https://ha.local/hook', publicUrl: 'https://ftx.example.com/anytone-v2/', fetchFn: fakeFetch(sink) })
+  jsonN.notify(urgent({ clipId: 'rx 01' }))
+  await flush()
+  const body = JSON.parse(sink[0]!.init.body as string) as { url: string }
+  assert.equal(body.url, 'https://ftx.example.com/anytone-v2/?clip=rx%2001', 'trailing slash collapsed, id encoded')
+
+  const ntfyN = new Notifier({ url: 'https://ntfy.sh/t', publicUrl: 'https://ftx.example.com/anytone-v2', fetchFn: fakeFetch(sink) })
+  ntfyN.notify(urgent({ clipId: 'c9' }))
+  await flush()
+  assert.equal((sink[1]!.init.headers as Record<string, string>)['click'], 'https://ftx.example.com/anytone-v2/?clip=c9')
+})
+
+test('notify: no publicUrl → json url is null, no ntfy Click header', async () => {
+  const sink: Sent[] = []
+  new Notifier({ url: 'https://ha.local/hook', fetchFn: fakeFetch(sink) }).notify(urgent())
+  new Notifier({ url: 'https://ntfy.sh/t', fetchFn: fakeFetch(sink) }).notify(urgent())
+  await flush()
+  assert.equal((JSON.parse(sink[0]!.init.body as string) as { url: null }).url, null)
+  assert.equal((sink[1]!.init.headers as Record<string, string>)['click'], undefined)
+})
+
 test('notify: envNotifierConfig reads the ANYTONE_NOTIFY_* family', () => {
   const cfg = envNotifierConfig({
     ANYTONE_NOTIFY_URL: ' https://ha.local/api/webhook/x ',
     ANYTONE_NOTIFY_FORMAT: 'ntfy',
     ANYTONE_NOTIFY_MIN_TIER: '3',
     ANYTONE_NOTIFY_TOKEN: 'tk',
+    ANYTONE_PUBLIC_URL: 'https://ftx.example.com/anytone-v2/',
   } as NodeJS.ProcessEnv)
   assert.equal(cfg.url, 'https://ha.local/api/webhook/x')
   assert.equal(cfg.format, 'ntfy')
   assert.equal(cfg.minTier, 3)
   assert.equal(cfg.token, 'tk')
+  assert.equal(cfg.publicUrl, 'https://ftx.example.com/anytone-v2/')
   assert.equal(envNotifierConfig({} as NodeJS.ProcessEnv).url, null)
 })

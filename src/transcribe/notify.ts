@@ -35,6 +35,9 @@ export interface NotifierConfig {
   readonly minTier?: number
   /** Bearer token (ntfy access token, or any server expecting Authorization). */
   readonly token?: string | null
+  /** The app's public base URL (e.g. https://host/anytone-v2/) — when set, each event carries a
+   * click-through link that opens the UI and plays the clip (`?clip=<id>` deep link). */
+  readonly publicUrl?: string | null
   readonly log?: (m: string) => void
   readonly now?: () => number
   readonly fetchFn?: typeof fetch
@@ -53,6 +56,7 @@ export function envNotifierConfig(env: NodeJS.ProcessEnv = process.env): Notifie
     ...(fmt === 'ntfy' || fmt === 'json' ? { format: fmt } : {}),
     minTier: Number(env['ANYTONE_NOTIFY_MIN_TIER'] ?? 2),
     token: env['ANYTONE_NOTIFY_TOKEN'] ?? null,
+    publicUrl: env['ANYTONE_PUBLIC_URL']?.trim() || null,
   }
 }
 
@@ -114,12 +118,20 @@ export class Notifier {
     if (!res.ok) throw new Error(`webhook HTTP ${res.status}`)
   }
 
+  /** Click-through into the SPA: opens the recordings panel with the clip loaded + playing. */
+  private clipLink(clipId: string): string | null {
+    const base = this.cfg.publicUrl
+    if (!base) return null
+    return `${base.replace(/\/+$/, '')}/?clip=${encodeURIComponent(clipId)}`
+  }
+
   private buildRequest(n: ImportanceNotification): { body: string; headers: Record<string, string> } {
     const label = TIER_LABEL[n.tier] ?? `tier ${n.tier}`
     const where = n.talkgroup ? `${n.channel} · ${n.talkgroup}` : n.channel
     const title = `${label.toUpperCase()} — ${where}`
     const message = n.summary || n.reason || n.text?.slice(0, 200) || 'flagged traffic'
     const text = n.text && n.text.length > TEXT_LIMIT ? `${n.text.slice(0, TEXT_LIMIT)}…` : n.text
+    const url = this.clipLink(n.clipId)
     const auth: Record<string, string> = this.cfg.token ? { authorization: `Bearer ${this.cfg.token}` } : {}
     if (this.format === 'ntfy') {
       return {
@@ -129,6 +141,7 @@ export class Notifier {
           title,
           priority: n.tier >= 3 ? '5' : '4',
           tags: n.tier >= 3 ? 'rotating_light' : 'warning',
+          ...(url ? { click: url } : {}),
           ...auth,
         },
       }
@@ -147,6 +160,7 @@ export class Notifier {
         reason: n.reason ?? null,
         summary: n.summary ?? null,
         transcript: text ?? null,
+        url,
       }),
       headers: { 'content-type': 'application/json', ...auth },
     }

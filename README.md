@@ -107,6 +107,13 @@ to your phone. Two formats, auto-detected (override with `ANYTONE_NOTIFY_FORMAT`
 Default threshold is tier 2 (important + urgent); `ANYTONE_NOTIFY_MIN_TIER=3` for urgent-only.
 Delivery is best-effort (one retry, never blocks the pipeline) with a 20/hour flood cap.
 
+Set `ANYTONE_PUBLIC_URL` to the app's outside address (e.g.
+`https://your-host/anytone-v2/`) and every event also carries a **click-through link**
+(`url` in the JSON, `Click` header for ntfy) that opens the app with that clip loaded and
+playing — in Home Assistant, pass `trigger.json.url` as the notification's tap-action URL.
+(Browsers may block audio autoplay on a fresh page; the clip is loaded and selected either
+way, one tap on Play starts it.)
+
 ## Manual run (development)
 
 ```sh
@@ -136,6 +143,7 @@ Everything is optional; defaults suit a Pi with one radio.
 | `ANYTONE_NOTIFY_FORMAT` | auto | `ntfy` (headers convention) or `json` (full-event POST); auto-detects ntfy from the hostname |
 | `ANYTONE_NOTIFY_MIN_TIER` | `2` | Minimum importance tier that pushes (`2` important+urgent, `3` urgent only) |
 | `ANYTONE_NOTIFY_TOKEN` | unset | `Authorization: Bearer` for the webhook (ntfy access token etc.) |
+| `ANYTONE_PUBLIC_URL` | unset | The app's public base URL; adds a click-through link to each push that opens the UI playing the clip |
 | `ANYTONE_AUDIO_TX_GAIN` | `0.6` | Mic → radio gain |
 | `ANYTONE_CF_TURN_KEY_ID` / `ANYTONE_CF_TURN_API_TOKEN` | unset | Mint Cloudflare TURN credentials for WebRTC relay — put these in a mode-600 systemd drop-in, **never** in the repo |
 | `ANYTONE_ICE_SERVERS` | unset | Static ICE server JSON (alternative to Cloudflare TURN) |

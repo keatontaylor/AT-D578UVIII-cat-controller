@@ -428,11 +428,33 @@ async function remove(id: string): Promise<void> {
   }
 }
 
+// Deep link (?clip=<id>) — the push-notification click-through: load + play that clip as soon as
+// the panel mounts with the list hydrated. The param is stripped after handling so a manual
+// reload doesn't replay it. Autoplay may be blocked on a fresh page (no user gesture yet) —
+// playClip's catch leaves the clip loaded + selected, one tap on Play resumes.
+function handleDeepLink(): void {
+  const params = new URLSearchParams(location.search)
+  const deepId = params.get('clip')
+  if (!deepId) return
+  params.delete('clip')
+  history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}${location.hash}`)
+  const clip = recordings.value.find((c) => c.id === deepId)
+  if (!clip) {
+    error.value = 'Linked clip not found (deleted or pruned)'
+    return
+  }
+  // Pan the timeline so the clip is in view before playing it.
+  const mid = clip.startedAt + clip.durationMs / 2
+  if (mid < windowStart.value) panMs.value = mid + windowMs.value / 2 - now.value
+  playClip(clip)
+}
+
 onMounted(async () => {
   ticker = window.setInterval(() => (now.value = Date.now()), 1000)
   mq.addEventListener('change', onMq)
   try {
     await radio.loadRecordings()
+    handleDeepLink()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   }

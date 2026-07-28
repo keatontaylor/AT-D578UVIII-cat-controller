@@ -43,6 +43,8 @@
 #                              generic JSON endpoint, e.g. a Home Assistant webhook) — written
 #                              to a mode-600 drop-in (notify.conf); see README "Push notifications"
 #   ANYTONE_NOTIFY_FORMAT / ANYTONE_NOTIFY_MIN_TIER / ANYTONE_NOTIFY_TOKEN  (companions, same)
+#   ANYTONE_PUBLIC_URL         the app's public base URL — adds a click-through link to each
+#                              push that opens the UI playing the clip (same drop-in)
 #
 set -eu
 # pipefail is bash/ksh only — enable it where available, but stay POSIX so `curl … | sh`
@@ -281,6 +283,7 @@ EOF
       if [ -n "${ANYTONE_NOTIFY_FORMAT:-}" ]; then printf 'Environment=ANYTONE_NOTIFY_FORMAT=%s\n' "$ANYTONE_NOTIFY_FORMAT"; fi
       if [ -n "${ANYTONE_NOTIFY_MIN_TIER:-}" ]; then printf 'Environment=ANYTONE_NOTIFY_MIN_TIER=%s\n' "$ANYTONE_NOTIFY_MIN_TIER"; fi
       if [ -n "${ANYTONE_NOTIFY_TOKEN:-}" ]; then printf 'Environment=ANYTONE_NOTIFY_TOKEN=%s\n' "$ANYTONE_NOTIFY_TOKEN"; fi
+      if [ -n "${ANYTONE_PUBLIC_URL:-}" ]; then printf 'Environment=ANYTONE_PUBLIC_URL=%s\n' "$ANYTONE_PUBLIC_URL"; fi
     } >"$drop_tmp"
     as_root install -m 0600 -o "$USER_NAME" "$drop_tmp" "$UNIT_DIR/anytone-v2.service.d/notify.conf"
     rm -f "$drop_tmp"
@@ -295,6 +298,7 @@ EOF
 # Environment=ANYTONE_NOTIFY_URL=https://ntfy.sh/your-topic
 # Environment=ANYTONE_NOTIFY_MIN_TIER=2
 # Environment=ANYTONE_NOTIFY_TOKEN=your-token
+# Environment=ANYTONE_PUBLIC_URL=https://your-host/anytone-v2/
 EOF
     as_root install -m 0600 -o "$USER_NAME" "$drop_tmp" "$UNIT_DIR/anytone-v2.service.d/notify.conf"
     rm -f "$drop_tmp"
