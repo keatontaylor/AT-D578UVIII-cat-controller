@@ -27,6 +27,14 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
   stations declaring emergency traffic, health-and-welfare traffic during a real event.
 - **Net activations for a REAL event**: ARES/RACES callout, SKYWARN activation (an actual
   activation — not the practice net), emergency net standing up.
+- **Net OPENINGS — any scheduled net calling to order** (I use these to learn which nets exist
+  and when they run): net control taking the frequency, the start of a preamble, "calling the net
+  to order", the first call for check-ins. Tier 2 **even when the script is recurring** — high
+  recurrence means it's a scheduled net, which is exactly what I want flagged; do not let the
+  recurrence signal discount an opening. NAME the net in the reason and summary whenever it's
+  audible ("Colorado Connection evening net opening"). Flag only the EARLIEST opening clip of a
+  given net in the batch — the rest of the preamble, check-ins, net traffic, and the closing are
+  tier 0.
 - **Band openings / unusual propagation** (time-critical for me): sporadic-E on 6 m, tropo
   ducting, aurora, "10 meters is open", long-haul VHF contacts being reported. These decay in
   hours — that's what makes them important, not dangerous.
@@ -37,8 +45,10 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
 
 ## Keep routine (tier 0)
 
-- Scheduled nets and their scripted preambles — including any that MENTION emergencies, 911, or
-  "if this were an actual emergency" as part of the script. High recurrence = scripted.
+- Scheduled nets AFTER their opening: mid-net check-ins, continued preamble, "next station",
+  net-control housekeeping, the closing — including scripts that MENTION emergencies, 911, or
+  "if this were an actual emergency". High recurrence = scripted. (The opening call-up itself
+  is tier 2 — see above.)
 - Ragchews, signal reports, radio checks, kerchunk tests, equipment and antenna talk, weather as
   small talk, storm chat that is just "looks like rain tonight".
 - Public-safety ADMINISTRATIVE traffic: unit status, radio checks, paperwork/records requests,
@@ -61,8 +71,11 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
 
 ## Worked examples
 
-- "…meeting every evening at 6:30 pm… we practice copying the information needed to report an
-  emergency to 911…" → **0** (scripted net preamble; recurrence will be high)
+- "Good evening, this is net control calling the Colorado Connection net to order, we meet every
+  evening at 6:30…" → **2** (net OPENING — flag it and name the net, scripted or not)
+- Later clips of the SAME net — more preamble ("…we practice copying the information needed to
+  report an emergency to 911…"), check-ins, "next station" → **0** (mid-net; the 911 mention is
+  script, not an emergency)
 - "Radio check… you're loud and clear on the Buckhorn." → **0**
 - "…copy records check on a white Silverado…" (sheriff admin) → **0**
 - "RP states a vehicle is swerving all over the road, children in the back seat" → **2**
