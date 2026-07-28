@@ -23,18 +23,29 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
   search-and-rescue operations. Escalations rank higher: second/third alarm, mutual-aid
   activation, mass-casualty. An officer or firefighter emergency ("mayday", officer down) is
   always urgent.
-- **Amateur emergency traffic**: mayday / pan-pan, "break break" interrupting a conversation,
-  stations declaring emergency traffic, health-and-welfare traffic during a real event.
+- **Amateur emergency traffic**: mayday / pan-pan, "break break" interrupting an AMATEUR
+  conversation, stations declaring emergency traffic, health-and-welfare traffic during a real
+  event. (On dispatch channels "break" is a routine procedure word between transmissions — not
+  an emergency signal.)
 - **Net activations for a REAL event**: ARES/RACES callout, SKYWARN activation (an actual
   activation — not the practice net), emergency net standing up.
-- **Net OPENINGS — any scheduled net calling to order** (I use these to learn which nets exist
-  and when they run): net control taking the frequency, the start of a preamble, "calling the net
-  to order", the first call for check-ins. Tier 2 **even when the script is recurring** — high
-  recurrence means it's a scheduled net, which is exactly what I want flagged; do not let the
-  recurrence signal discount an opening. NAME the net in the reason and summary whenever it's
-  audible ("Colorado Connection evening net opening"). Flag only the EARLIEST opening clip of a
-  given net in the batch — the rest of the preamble, check-ins, net traffic, and the closing are
-  tier 0.
+- **Net OPENINGS — a net actively being called to order** (I use these to learn which nets exist
+  and when they run): net control taking the frequency RIGHT NOW and convening the net — "calling
+  the net to order", the first call for check-ins. Tier 2 **even when the script is recurring**;
+  do not let the recurrence signal discount a real opening. NAME the net in the reason and
+  summary whenever it's audible ("Colorado Connection evening net opening"). What is NOT an
+  opening (all tier 0): automated schedule announcements or reminders ("...Net, Tuesday night,
+  7 o'clock"), repeater/system IDs ("This is the Colorado Connection"), a station announcing they
+  are MONITORING for calls, preamble instruction fragments ("key up for two seconds..."), and
+  anything with mid-net texture — reports or check-ins already flowing, "next station", "standing
+  by for reports". Mid-net is mid-net even if you see no opening clip in this batch (batches are
+  short windows; the opening was probably earlier). Flag only the EARLIEST true opening of a
+  given net in the batch.
+- **Colorful / sensational conversations** — ragchews on wild, provocative, or morbid topics
+  (geopolitics, nukes, crime, conspiracies) that are genuinely interesting listening: tier 2 at
+  most, with a reason that frames it honestly as CONVERSATION ("colorful ragchew about arming
+  Iran"), never wording that presents the topic as a real event or threat. These are NEVER
+  urgent — tier 3 is reserved for real, local, actionable emergencies.
 - **Band openings / unusual propagation** (time-critical for me): sporadic-E on 6 m, tropo
   ducting, aurora, "10 meters is open", long-haul VHF contacts being reported. These decay in
   hours — that's what makes them important, not dangerous.
@@ -85,6 +96,18 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
 - "The Denver link has been down since this morning, techs are aware" → **2**
 - Garbled fragment that merely contains the word "fire" with no coherent report → **0**
   (transcripts are auto-generated; do not over-read errors)
+- "Colorado Astronomy Net, Tuesday night, 7 o'clock." → **0** (automated schedule announcement,
+  not an opening — no matter how many times it repeats)
+- "…monitoring COLCON for the Colorado Emergency Reporting Network to answer any emergency
+  call…" → **0** (a station announcing they're listening, not a net convening)
+- "444, suspicious individual" (bare dispatch callout, no substance) → **0** — the detailed
+  follow-up clip seconds later is the one to flag
+- "I'm a proponent of giving Iran nukes…" (ragchew hyperbole) → **2** reason "colorful ragchew
+  about arming Iran" — interesting listening, NOT an urgent threat
+
+The reason must name a CONCRETE thing — an incident, a net, a topic — built from words actually
+present in the transcript. If you cannot, the clip is tier 0; never flag on vibes ("notable
+incident report") or by echoing a phrase from this guidance.
 
 When uncertain between two tiers, choose the LOWER one. False alarms erode trust faster than
 missed low-tier items. This is a hobbyist monitoring aid, not a safety system.
