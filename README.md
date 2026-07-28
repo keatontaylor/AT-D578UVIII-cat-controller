@@ -138,7 +138,8 @@ Everything is optional; defaults suit a Pi with one radio.
 | `ANYTONE_RECORDER_AUTOSTART` | on | Squelch/TX recorders arm on connect (`0` opts out) |
 | `GROQ_API_KEY` / `~/.groq_key` | unset | Enables AI transcription + importance scoring (see above); absent = features off |
 | `ANYTONE_TRANSCRIBE` | on | `0` disables transcription even with a key |
-| `ANYTONE_IMPORTANCE_MODEL` | `openai/gpt-oss-120b` | Chat model for importance/summaries/cleanup (fallback `llama-3.1-8b-instant`) |
+| `ANYTONE_IMPORTANCE_MODEL` | `openai/gpt-oss-120b` | Groq chat model for importance/summaries/cleanup (fallback `llama-3.1-8b-instant`) |
+| `CEREBRAS_API_KEY` / `~/.cerebras_key` | unset | Optional [Cerebras](https://cloud.cerebras.ai) key — the same gpt-oss-120b at 1M free tokens/day becomes the top scoring rung; Groq drops to backup (transcription itself stays on Groq) |
 | `ANYTONE_NOTIFY_URL` | unset | Webhook for important/urgent clip pushes — an ntfy topic URL or any JSON endpoint (Home Assistant webhook); absent = no pushes |
 | `ANYTONE_NOTIFY_FORMAT` | auto | `ntfy` (headers convention) or `json` (full-event POST); auto-detects ntfy from the hostname |
 | `ANYTONE_NOTIFY_MIN_TIER` | `2` | Minimum importance tier that pushes (`2` important+urgent, `3` urgent only) |

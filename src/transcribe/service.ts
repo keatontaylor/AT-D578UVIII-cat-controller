@@ -98,11 +98,15 @@ const IMPORTANCE = {
   model: process.env['ANYTONE_IMPORTANCE_MODEL'] ?? 'openai/gpt-oss-120b',
   fallbackModel: process.env['ANYTONE_IMPORTANCE_FALLBACK'] ?? 'llama-3.1-8b-instant',
   batchSize: 15,
-  // Burst-aware flushing (replaces the old flat 5-min window, which made enhancement feel slow):
-  // flush when the batch is full, OR the queue has SETTLED (no new transcript for settleMs — calls
-  // arrive in bursts; once the burst ends, score it), OR the oldest item has waited maxWaitMs.
+  // Burst-aware flushing. Every call pays a FIXED fee (system prompt + the guidance file,
+  // ~2.3k tokens) before any clips — field-measured at 70-90% of total spend when steady dispatch
+  // traffic made 20s-settle ship 1-2-clip batches (606k tokens in a day, both Groq pools
+  // drained). So: flush when the batch is full, OR the queue has settled AND holds enough clips
+  // to amortize the fee (minFlush), OR the oldest item has waited maxWaitMs. Quiet channels wait
+  // a few minutes; busy periods pack 5-15 clips per call.
   settleMs: 20_000,
-  maxWaitMs: 90_000,
+  minFlush: 5,
+  maxWaitMs: 300_000,
   recurrenceLookback: 40, // prior same-channel transcripts compared for the scheduled-preamble flag
   enabled: process.env['ANYTONE_IMPORTANCE'] !== '0',
   cleanMinChars: 80, // selective cleanup floor: short blurts don't need pretty formatting
@@ -142,6 +146,31 @@ function defaultKey(): string | null {
   return null
 }
 
+// Cerebras hosts the SAME gpt-oss-120b weights free at 1M tokens/day (5x Groq's 200k TPD, 30k
+// TPM) — with a key present it becomes the top scoring rung and Groq drops to backup. Caveats
+// baked in below: free tier is ~5 req/min (min-batch flushing keeps us ~1/min) and an 8k context
+// cap (batch sizing already stays well under). OpenAI-compatible, so chatComplete just needs the
+// endpoint. Whisper stays on Groq — Cerebras is chat-only.
+const CEREBRAS_ENDPOINT = 'https://api.cerebras.ai/v1/chat/completions'
+const CEREBRAS_MODEL = process.env['ANYTONE_CEREBRAS_MODEL'] ?? 'gpt-oss-120b'
+function cerebrasKey(): string | null {
+  const env = process.env['CEREBRAS_API_KEY']
+  if (env) return env
+  try {
+    const p = join(process.env['HOME'] ?? '', '.cerebras_key')
+    if (existsSync(p)) return readFileSync(p, 'utf8').trim() || null
+  } catch { /* unreadable = absent */ }
+  return null
+}
+
+/** One scoring provider in the failover ladder. cleanCapable rungs may return cleanText; the
+ * llamas no-op cleanup (shootout-verified) so their rung strips it and scores only. */
+interface ChatRung {
+  readonly name: string
+  readonly client: ChatClient
+  readonly cleanCapable: boolean
+}
+
 const GUIDANCE_PATH = new URL('../../data/importance-guidance.md', import.meta.url)
 const GUIDANCE_FALLBACK =
   'Important: severe weather reports, public-safety/emergency traffic, real net activations, ' +
@@ -177,8 +206,8 @@ export class Transcriber {
   private scoreDeferUntil = 0
   private oldestScoreAt = 0
   private lastScoreAddAt = 0
-  /** Primary chat model's quota-starvation window — score via fallback until it passes. */
-  private primaryStarvedUntil = 0
+  /** Per-rung quota-starvation windows — a 429'd rung is skipped until its window passes. */
+  private readonly starved = new Map<string, number>()
   private scoring = false
   /** Sliding 60s log of estimated chat tokens (per-minute pacing — the 429 guard). */
   private readonly minuteLog: { at: number; tokens: number }[] = []
@@ -203,19 +232,40 @@ export class Transcriber {
     }
   }
 
-  private makeGroqChat(model = IMPORTANCE.model): ChatClient {
+  private makeChat(model: string, opts: { endpoint?: string; keyFn?: () => string | null } = {}): ChatClient {
     return {
       complete: (system, user) => {
-        const key = this.keyFn()
+        const key = (opts.keyFn ?? this.keyFn)()
         if (!key) throw new Error('no key')
         // Reasoning models burn hidden deliberation tokens — the real cause of the observed 429
         // storms (usage far above estimates). Classification needs none: force low.
         return chatComplete(system, user, {
           key, model,
+          ...(opts.endpoint ? { endpoint: opts.endpoint } : {}),
           ...(model.includes('gpt-oss') ? { reasoningEffort: 'low' as const } : {}),
         })
       },
     }
+  }
+
+  private makeGroqChat(model = IMPORTANCE.model): ChatClient {
+    return this.makeChat(model)
+  }
+
+  /** The scoring ladder, best rung first. An injected test client fills both rungs (primary
+   * clean-capable, fallback scoring-only) to preserve the two-tier semantics tests exercise. */
+  private ladder(): ChatRung[] {
+    if (this.deps.chatClient) {
+      return [
+        { name: IMPORTANCE.model, client: this.deps.chatClient, cleanCapable: true },
+        { name: IMPORTANCE.fallbackModel, client: this.deps.chatClient, cleanCapable: false },
+      ]
+    }
+    const rungs: ChatRung[] = []
+    if (cerebrasKey()) rungs.push({ name: `cerebras/${CEREBRAS_MODEL}`, client: this.makeChat(CEREBRAS_MODEL, { endpoint: CEREBRAS_ENDPOINT, keyFn: cerebrasKey }), cleanCapable: true })
+    rungs.push({ name: IMPORTANCE.model, client: this.makeGroqChat(IMPORTANCE.model), cleanCapable: true })
+    rungs.push({ name: IMPORTANCE.fallbackModel, client: this.makeGroqChat(IMPORTANCE.fallbackModel), cleanCapable: false })
+    return rungs
   }
 
   /** ON = recording on + key present (+ no kill switch). Checked live so key/recorder changes
@@ -338,7 +388,7 @@ export class Transcriber {
     if (this.scoring || !this.chat || this.scoreQueue.length === 0) return
     if (this.now() < this.scoreDeferUntil) return
     const full = this.scoreQueue.length >= IMPORTANCE.batchSize
-    const settled = this.now() - this.lastScoreAddAt >= IMPORTANCE.settleMs
+    const settled = this.now() - this.lastScoreAddAt >= IMPORTANCE.settleMs && this.scoreQueue.length >= IMPORTANCE.minFlush
     const overdue = this.now() - this.oldestScoreAt >= IMPORTANCE.maxWaitMs
     if (!full && !settled && !overdue) return
     // Per-minute token pacing: size the batch to what the sliding 60s window still allows.
@@ -397,39 +447,37 @@ export class Transcriber {
       inputs = inputs.map((i) => ({ ...i, clean: false }))
       this.log('transcriber: chat token budget low — scoring without cleanup this batch')
     }
+    // Walk the ladder best-rung-first, skipping rungs inside their quota-starvation window
+    // (attempting a drained daily pool is pointless — field-observed retry-afters of 10-60 min).
+    // A 429 opens that rung's window and the SAME flush tries the next rung; non-quota errors
+    // also fall through. Scoring must keep flowing; cleanup quality degrades rung by rung.
     let result = null
-    // Primary starvation window: when gpt-oss's DAILY pool is drained (field-observed retry-afters
-    // of 10-25 min), attempting it is pointless — go straight to the fallback (separate bucket)
-    // until the window passes. Scoring must keep flowing; cleanup waits for the primary.
-    const primaryStarved = this.now() < this.primaryStarvedUntil
-    if (!primaryStarved) {
+    let allQuota = true
+    let minRetryS = 300
+    for (const rung of this.ladder()) {
+      if (this.now() < (this.starved.get(rung.name) ?? 0)) continue
       try {
-        result = await scoreBatch(this.chat!, this.guidanceFn(), inputs)
+        result = await scoreBatch(rung.client, this.guidanceFn(), rung.cleanCapable ? inputs : inputs.map((i) => ({ ...i, clean: false })))
+        break
       } catch (e) {
         if (e instanceof GroqQuotaError) {
           const waitS = Math.min(Math.max(30, e.retryAfterS), 900)
-          this.primaryStarvedUntil = this.now() + waitS * 1000
-          this.log(`transcriber: ${IMPORTANCE.model} quota (retry-after ${e.retryAfterS}s) — failing over to ${IMPORTANCE.fallbackModel} for ${waitS}s`)
+          this.starved.set(rung.name, this.now() + waitS * 1000)
+          minRetryS = Math.min(minRetryS, Math.max(30, e.retryAfterS))
+          this.log(`transcriber: ${rung.name} quota (retry-after ${e.retryAfterS}s) — trying next rung`)
         } else {
-          this.log(`transcriber: importance scoring failed on ${IMPORTANCE.model}: ${(e as Error).message} — retrying on ${IMPORTANCE.fallbackModel}`)
+          allQuota = false
+          this.log(`transcriber: scoring failed on ${rung.name}: ${(e as Error).message} — trying next rung`)
         }
       }
     }
     if (!result) {
-      // Fallback: scoring-only (the llamas no-op cleanup anyway — shootout-verified).
-      try {
-        result = await scoreBatch(this.deps.chatClient ?? this.makeGroqChat(IMPORTANCE.fallbackModel), this.guidanceFn(), inputs.map((i) => ({ ...i, clean: false })))
-      } catch (e2) {
-        if (e2 instanceof GroqQuotaError) {
-          this.scoreQueue.unshift(...ids) // both models starved — re-queue and wait
-          const waitS = Math.min(Math.max(30, e2.retryAfterS), 300)
-          this.scoreDeferUntil = this.now() + waitS * 1000
-          this.log(`transcriber: fallback also quota-limited (retry-after ${e2.retryAfterS}s) — deferring ${waitS}s`)
-          return
-        }
-        this.log(`transcriber: importance fallback failed: ${(e2 as Error).message}`)
-        return // unscored clips stay tier-absent (routine); no retry storm
+      if (allQuota) {
+        this.scoreQueue.unshift(...ids) // every rung starved — re-queue and wait
+        this.scoreDeferUntil = this.now() + Math.min(minRetryS, 300) * 1000
+        this.log(`transcriber: all scoring rungs quota-limited — deferring ${Math.min(minRetryS, 300)}s`)
       }
+      return // non-quota exhaustion: unscored clips stay tier-absent (routine); no retry storm
     }
     const scores = result.scores
     // Budgets run on REAL usage when the API reports it (reasoning tokens made estimates

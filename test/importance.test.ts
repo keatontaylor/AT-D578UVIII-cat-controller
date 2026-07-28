@@ -136,7 +136,7 @@ test('transcriber: primary 429 fails over to the fallback IN THE SAME FLUSH (sco
   })
   saveClip(svc, dir, 's1', 10)
   await svc.tick()
-  clock.t += 25_000
+  clock.t += 301_000 // past maxWait (a lone clip no longer flushes at settle)
   await svc.tick() // primary 429 → immediate fallback → scored, no stall
   assert.equal(calls, 2, 'fallback called in the same flush')
   assert.equal(svc.transcript('s1')!.importance, 1, 'scored via fallback')
@@ -144,7 +144,7 @@ test('transcriber: primary 429 fails over to the fallback IN THE SAME FLUSH (sco
   // during the starvation window the primary is not re-attempted
   saveClip(svc, dir, 's2', 10)
   await svc.tick()
-  clock.t += 25_000
+  clock.t += 301_000
   await svc.tick()
   assert.equal(calls, 3, 'straight to fallback while primary starved (one call, not two)')
   assert.equal(svc.transcript('s2')!.importance, 1)
@@ -162,7 +162,7 @@ test('transcriber: BOTH models quota-limited → batch re-queued, retried later'
   })
   saveClip(svc, dir, 'q1')
   await svc.tick()
-  clock.t += 25_000
+  clock.t += 301_000 // past maxWait
   await svc.tick() // primary 429 → fallback 429 → deferred
   assert.equal(calls, 2)
   assert.equal(svc.transcript('q1')!.importance, undefined, 'unscored but retained in the queue')
@@ -197,7 +197,7 @@ test('transcriber: cleanup requested for long clips, cleanText persisted + verba
   assert.equal(side.summary, 'Weather report ragchew', 'summary persisted for a tier-0 clip')
 })
 
-test('transcriber: settle-based flush scores a lone clip in ~20s, not 5 minutes', async () => {
+test('transcriber: min-batch flush — a lone clip waits for maxWait; 5 clips flush at settle', async () => {
   const { svc, dir, clock } = rig({
     complete: async (_s, user) => {
       const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]
@@ -211,9 +211,17 @@ test('transcriber: settle-based flush scores a lone clip in ~20s, not 5 minutes'
   clock.t += 5_000
   await svc.tick()
   assert.equal(svc.transcript('fast1')!.importance, undefined, 'not scored at +5s (still settling)')
-  clock.t += 17_000 // +22s total > settleMs
+  clock.t += 17_000 // +22s total > settleMs — but 1 clip < minFlush: the per-call fee is not worth it
   await svc.tick()
-  assert.equal(svc.transcript('fast1')!.importance, 0, 'scored once the queue settled')
+  assert.equal(svc.transcript('fast1')!.importance, undefined, 'lone clip does NOT flush at settle')
+  clock.t += 280_000 // past maxWaitMs
+  await svc.tick()
+  assert.equal(svc.transcript('fast1')!.importance, 0, 'lone clip scored at maxWait')
+  // a settled queue holding >= minFlush clips flushes without waiting for maxWait
+  for (const id of ['s1','s2','s3','s4','s5']) { saveClip(svc, dir, id); await svc.tick() }
+  clock.t += 22_000
+  await svc.tick()
+  assert.equal(svc.transcript('s5')!.importance, 0, 'full-enough batch flushed at settle')
 })
 
 test('transcriber: minute token budget splits oversized batches across windows (429 guard)', async () => {
@@ -234,7 +242,7 @@ test('transcriber: minute token budget splits oversized batches across windows (
   await svc.tick()
   saveClip(svc, dir, 'big2', 10)
   await svc.tick()
-  clock.t += 25_000 // settled
+  clock.t += 301_000 // past maxWait (2 clips < minFlush)
   await svc.tick() // flush #1 — only big1 fits (oversized single allowed on a fresh window)
   assert.deepEqual(calls, [1], 'first batch limited to one oversized clip')
   assert.equal(svc.transcript('big1')!.importance, 0)
@@ -242,7 +250,7 @@ test('transcriber: minute token budget splits oversized batches across windows (
   assert.equal(svc.transcript('big2')!.importance, undefined, 'big2 waiting on the minute window')
   await svc.tick() // same minute — still paced
   assert.deepEqual(calls, [1])
-  clock.t += 62_000 // minute window rolls
+  clock.t += 302_000 // minute window rolls AND big2 goes overdue
   await svc.tick()
   assert.deepEqual(calls, [1, 1], 'second clip scored in the next minute window')
   assert.equal(svc.transcript('big2')!.importance, 0)
@@ -264,12 +272,12 @@ test('transcriber: REAL usage + groq bucket headers drive the pacer, not estimat
   })
   saveClip(svc, dir, 'u1')
   await svc.tick()
-  clock.t += 25_000
+  clock.t += 301_000 // past maxWait
   await svc.tick() // flush #1: real usage 5,900 tokens recorded from the API response
   assert.equal(calls, 1)
-  saveClip(svc, dir, 'u2') // arrives AFTER the heavy call
-  await svc.tick()
-  clock.t += 21_000 // settled — but the minute window still holds 5,900 REAL tokens
+  // a full minFlush batch arrives AFTER the heavy call
+  for (const id of ['u2','u3','u4','u5','u6']) { saveClip(svc, dir, id); await svc.tick() }
+  clock.t += 21_000 // settled with 5 clips — but the minute window still holds 5,900 REAL tokens
   await svc.tick()
   assert.equal(calls, 1, 'real usage blocks a second call in the same minute')
   clock.t += 45_000 // first call ages out of the 60s window
