@@ -62,12 +62,15 @@ export function buildPrompt(channelName: string | null, talkgroupName: string | 
  * (field: 147 archive sidecars). Deterministic; matched against the FULL built prompt because
  * the channel name is woven in and bleeds with it ("5-9 on COLCON DENVER"). */
 export function scrubPromptBleed(text: string, prompt: string): { text: string; hits: number } {
-  const words = (s: string): string[] => s.toLowerCase().replace(/[^a-z0-9']+/g, ' ').trim().split(/\s+/).filter(Boolean)
+  // number-word normalization: Whisper may render primer digits as words ("five nine" for 5-9)
+  const NUM: Record<string, string> = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9' }
+  const canon = (w: string): string => NUM[w] ?? w
+  const words = (s: string): string[] => s.toLowerCase().replace(/[^a-z0-9']+/g, ' ').trim().split(/\s+/).filter(Boolean).map(canon)
   const P = words(prompt)
   const toks: { w: string; start: number; end: number }[] = []
   const re = /[a-zA-Z0-9']+/g
   let m
-  while ((m = re.exec(text))) toks.push({ w: m[0].toLowerCase(), start: m.index, end: m.index + m[0].length })
+  while ((m = re.exec(text))) toks.push({ w: canon(m[0].toLowerCase()), start: m.index, end: m.index + m[0].length })
   const spans: { from: number; to: number }[] = []
   for (let i = 0; i < toks.length; i++) {
     let best = 0

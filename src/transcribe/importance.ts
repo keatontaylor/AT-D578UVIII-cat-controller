@@ -120,7 +120,9 @@ export function buildClipsPrompt(clips: ScoreInput[]): string {
     recurrence: Number(c.recurrence.toFixed(2)),
     clean: c.clean === true,
     ...(c.hints ? { hints: c.hints } : {}),
-    text: c.text.slice(0, 1500),
+    // clean clips need the WHOLE transcript (a 1500-char cap silently truncated cleanup tails);
+    // scoring-only clips stay capped for cost.
+    text: c.text.slice(0, c.clean === true ? 8000 : 1500),
   }))
   return `CLIPS TO SCORE (JSON):\n${JSON.stringify(items)}`
 }
