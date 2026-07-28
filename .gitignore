@@ -48,3 +48,4 @@ tools/*
 !tools/wire-health.ts
 __pycache__/
 *.pyc
+groundtruth/
