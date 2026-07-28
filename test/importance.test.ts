@@ -73,7 +73,7 @@ test('scoreBatch: maps model output back onto clip ids', async () => {
 })
 
 // ── Transcriber batch lifecycle ───────────────────────────────────────────────
-function rig(chat: ChatClient, extra: { notifier?: { notify(n: unknown): void } } = {}) {
+function rig(chat: ChatClient, extra: { notifier?: { notify(n: unknown): void }; chatQuotaFree?: boolean } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'imp-'))
   const clock = { t: Date.UTC(2026, 6, 26, 12, 0, 0) }
   const events: { id: string; status: string; importance?: number }[] = []
@@ -364,4 +364,27 @@ test('guidanceInSystem client gets guidance in the system prompt, clips-only use
   assert.ok(sys.includes('MY GUIDANCE'), 'guidance moved to system prompt')
   assert.ok(!usr.includes('MY GUIDANCE'), 'user message is clips-only')
   assert.ok(usr.startsWith('CLIPS TO SCORE'), 'clips payload intact')
+})
+
+test('quota-free top rung: instant flush — no settle, no minute pacing', async () => {
+  let calls = 0
+  const { svc, dir } = rig(
+    { complete: async (_s, user) => {
+      calls++
+      const items = JSON.parse(user.split('CLIPS TO SCORE (JSON):\n')[1]!) as { id: string }[]
+      return reply(JSON.stringify({ scores: items.map((i) => ({ id: i.id, tier: 0, reason: 'r' })) }))
+    } },
+    { chatQuotaFree: true },
+  )
+  saveClip(svc, dir, 'i1')
+  await svc.tick() // transcribe
+  await svc.tick() // NEXT TICK scores it — zero clock advance needed
+  assert.equal(calls, 1, 'flushed immediately')
+  assert.equal(svc.transcript('i1')!.importance, 0)
+  // a second clip also goes straight through — no minute-window defer between calls
+  saveClip(svc, dir, 'i2')
+  await svc.tick()
+  await svc.tick()
+  assert.equal(calls, 2, 'no pacing between instant flushes')
+  assert.equal(svc.transcript('i2')!.importance, 0)
 })

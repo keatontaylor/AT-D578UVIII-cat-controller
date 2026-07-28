@@ -149,6 +149,8 @@ export interface TranscriberDeps {
   readonly guidanceFn?: () => string
   /** Outbound webhook for important/urgent clips (ntfy / Home Assistant); absent = no pushes. */
   readonly notifier?: Pick<Notifier, 'notify'>
+  /** Test hook: mark the injected chatClient's primary rung quota-free (instant flush path). */
+  readonly chatQuotaFree?: boolean
 }
 
 function defaultKey(): string | null {
@@ -305,7 +307,7 @@ export class Transcriber {
   private ladder(): ChatRung[] {
     if (this.deps.chatClient) {
       return [
-        { name: IMPORTANCE.model, client: this.deps.chatClient, cleanCapable: true },
+        { name: IMPORTANCE.model, client: this.deps.chatClient, cleanCapable: true, ...(this.deps.chatQuotaFree ? { quotaFree: true } : {}) },
         { name: IMPORTANCE.fallbackModel, client: this.deps.chatClient, cleanCapable: false },
       ]
     }
@@ -436,13 +438,18 @@ export class Transcriber {
   private async maybeScore(): Promise<void> {
     if (this.scoring || !this.chat || this.scoreQueue.length === 0) return
     if (this.now() < this.scoreDeferUntil) return
+    // Quota-free top rung (subscription CLI, prefix-cached preamble): no accumulation, no minute
+    // pacing — whatever has queued ships this tick (clips landing together still micro-batch).
+    // The batching gates below exist for the Groq pools and reapply the moment the ladder's
+    // first healthy rung is a metered one.
+    const instant = this.ladder().find((r) => this.now() >= (this.starved.get(r.name) ?? 0))?.quotaFree === true
     const full = this.scoreQueue.length >= IMPORTANCE.batchSize
     const settled = this.now() - this.lastScoreAddAt >= IMPORTANCE.settleMs && this.scoreQueue.length >= IMPORTANCE.minFlush
     const overdue = this.now() - this.oldestScoreAt >= IMPORTANCE.maxWaitMs
-    if (!full && !settled && !overdue) return
+    if (!instant && !full && !settled && !overdue) return
     // Per-minute token pacing: size the batch to what the sliding 60s window still allows.
-    const spent = this.minuteSpent()
-    let budget = IMPORTANCE.minuteTokenCap - spent - this.callOverhead()
+    const spent = instant ? 0 : this.minuteSpent()
+    let budget = instant ? Number.POSITIVE_INFINITY : IMPORTANCE.minuteTokenCap - spent - this.callOverhead()
     const batch: string[] = []
     for (const id of this.scoreQueue) {
       if (batch.length >= IMPORTANCE.batchSize) break
