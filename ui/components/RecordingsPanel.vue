@@ -432,9 +432,8 @@ async function remove(id: string): Promise<void> {
 // the panel mounts with the list hydrated, and scroll the panel into view (it sits below the VFO
 // cards). The param is stripped after handling so a manual reload doesn't replay it. Autoplay may
 // be blocked on a fresh page (no user gesture yet) — playClip's catch leaves the clip loaded +
-// selected, and the FIRST tap/click anywhere counts as the gesture and starts it.
+// selected in the player, one tap on Play when ready.
 const panelRef = ref<HTMLElement | null>(null)
-let deepLinkResume: (() => void) | null = null
 async function handleDeepLink(): Promise<void> {
   const params = new URLSearchParams(location.search)
   const deepId = params.get('clip')
@@ -456,17 +455,6 @@ async function handleDeepLink(): Promise<void> {
   if (mid < windowStart.value) panMs.value = mid + windowMs.value / 2 - now.value
   playClip(clip)
   void nextTick().then(() => panelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
-  // Autoplay-block rescue: if the browser refused play() (no user gesture yet), the first
-  // interaction anywhere retries it — the notification tap flows straight into audio.
-  deepLinkResume = (): void => {
-    const cb = deepLinkResume
-    deepLinkResume = null
-    if (cb) window.removeEventListener('pointerdown', cb)
-    if (!playing.value && playingId.value === clip.id && playerRef.value?.src) {
-      void playerRef.value.play().then(() => (playing.value = true)).catch(() => {})
-    }
-  }
-  window.addEventListener('pointerdown', deepLinkResume)
 }
 
 // Lazy history: hydration covers the recent slice; panning/zooming the lanes view past the
@@ -490,7 +478,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.clearInterval(ticker)
   mq.removeEventListener('change', onMq)
-  if (deepLinkResume) window.removeEventListener('pointerdown', deepLinkResume)
 })
 </script>
 
