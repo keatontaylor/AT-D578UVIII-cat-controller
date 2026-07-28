@@ -224,6 +224,60 @@ test('list() defaults pre-TX-era sidecars (no direction field) to rx', async () 
   }
 })
 
+test('list() time window: id-timestamp pre-filter + precise meta filter + odd-name fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-'))
+  try {
+    const { writeFileSync } = await import('node:fs')
+    const { idStartTime } = await import('../src/audio/recorder')
+    const idAt = (t: number): string => new Date(t).toISOString().replace(/[:.]/g, '-')
+    const DAY = 24 * 3600_000
+    const base = Date.UTC(2026, 6, 28)
+    const clip = (id: string, startedAt: number, durationMs = 5000): object => (
+      { id, startedAt, durationMs, side: 'a', channelName: 'X', freqMHz: null, mode: 'FM', talkgroup: null, talkgroupName: null, direction: 'rx' }
+    )
+    const oldId = idAt(base - 3 * DAY)
+    const recentId = idAt(base - 3600_000)
+    // Overlapper: STARTED 30 min before the cutoff but its audio crosses it (slack path).
+    const overlapId = idAt(base - 2 * 3600_000 - 1800_000)
+    writeFileSync(join(dir, `${oldId}.json`), JSON.stringify(clip(oldId, base - 3 * DAY)))
+    writeFileSync(join(dir, `${recentId}.json`), JSON.stringify(clip(recentId, base - 3600_000)))
+    writeFileSync(join(dir, `${overlapId}.json`), JSON.stringify(clip(overlapId, base - 2 * 3600_000 - 1800_000, 2 * 3600_000)))
+    // Foreign name: no timestamp in the id → must be read + filtered on metadata, not skipped.
+    writeFileSync(join(dir, 'imported-clip.json'), JSON.stringify(clip('imported-clip', base - 1800_000)))
+    const rec = new Recorder(fakeCapture, dir, ctx)
+
+    assert.equal(idStartTime(recentId), base - 3600_000, 'id round-trips to its start time')
+    assert.equal(idStartTime(`${recentId}-tx`), base - 3600_000, 'tx suffix still parses')
+    assert.equal(idStartTime('imported-clip'), null)
+
+    const all = await rec.list()
+    assert.equal(all.length, 4, 'no window → everything')
+    const windowed = await rec.list({ sinceMs: base - 2 * 3600_000 })
+    assert.deepEqual(windowed.map((c) => c.id).sort(), ['imported-clip', overlapId, recentId].sort(),
+      'old clip excluded; overlapper + odd-name included')
+    const sliced = await rec.list({ sinceMs: base - 4 * DAY, untilMs: base - DAY })
+    assert.deepEqual(sliced.map((c) => c.id), [oldId], 'untilMs bounds the top end')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('meta(): one clip without a directory scan; unsafe/unknown ids → null', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-'))
+  try {
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(join(dir, 'c1.json'), JSON.stringify({ id: 'c1', startedAt: 5, durationMs: 100, side: 'a', channelName: 'X', freqMHz: null, mode: 'FM', talkgroup: null }))
+    const rec = new Recorder(fakeCapture, dir, ctx)
+    const m = await rec.meta('c1')
+    assert.equal(m!.id, 'c1')
+    assert.equal(m!.direction, 'rx', 'legacy sidecar defaulted')
+    assert.equal(await rec.meta('nope'), null)
+    assert.equal(await rec.meta('../evil'), null)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 // ── stuck-"live" hygiene: orphan sweep, stall force-close, live hydration ───────
 
 test('enable sweeps orphaned WAVs (no sidecar — a process death mid-clip) but keeps saved clips', async () => {

@@ -624,19 +624,31 @@ export class Transcriber {
     return side
   }
 
-  /** Per-clip status + importance tier for merging into recordings.list — scans the dir once.
-   * Only tier ≥1 is included (0/absent = routine, the UI default). */
-  statuses(): Record<string, { status: TranscriptStatus; importance?: ImportanceTier }> {
+  /** Per-clip status + importance tier for merging into recordings.list. With `ids` (the windowed
+   * list) only those sidecars are touched — no directory scan over the whole archive. Only tier ≥1
+   * is included (0/absent = routine, the UI default). */
+  statuses(ids?: readonly string[]): Record<string, { status: TranscriptStatus; importance?: ImportanceTier }> {
     const out: Record<string, { status: TranscriptStatus; importance?: ImportanceTier }> = {}
-    try {
-      for (const f of readdirSync(this.deps.dir)) {
-        if (!f.endsWith('.transcript.json')) continue
-        const id = f.slice(0, -'.transcript.json'.length)
+    if (ids) {
+      for (const id of ids) {
         const s = this.sidecar(id)
         if (s) out[id] = { status: s.status, ...(s.importance ? { importance: s.importance } : {}) }
       }
-    } catch { /* dir unreadable → statuses from queue only */ }
-    for (const [id, item] of this.queue) out[id] = { status: item.deferred && this.now() < this.resumeAt ? 'deferred' : 'queued' }
+    } else {
+      try {
+        for (const f of readdirSync(this.deps.dir)) {
+          if (!f.endsWith('.transcript.json')) continue
+          const id = f.slice(0, -'.transcript.json'.length)
+          const s = this.sidecar(id)
+          if (s) out[id] = { status: s.status, ...(s.importance ? { importance: s.importance } : {}) }
+        }
+      } catch { /* dir unreadable → statuses from queue only */ }
+    }
+    const wanted = ids ? new Set(ids) : null
+    for (const [id, item] of this.queue) {
+      if (wanted && !wanted.has(id)) continue
+      out[id] = { status: item.deferred && this.now() < this.resumeAt ? 'deferred' : 'queued' }
+    }
     return out
   }
 

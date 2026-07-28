@@ -435,13 +435,18 @@ async function remove(id: string): Promise<void> {
 // selected, and the FIRST tap/click anywhere counts as the gesture and starts it.
 const panelRef = ref<HTMLElement | null>(null)
 let deepLinkResume: (() => void) | null = null
-function handleDeepLink(): void {
+async function handleDeepLink(): Promise<void> {
   const params = new URLSearchParams(location.search)
   const deepId = params.get('clip')
   if (!deepId) return
   params.delete('clip')
   history.replaceState(null, '', `${location.pathname}${params.size ? `?${params}` : ''}${location.hash}`)
-  const clip = recordings.value.find((c) => c.id === deepId)
+  let clip = recordings.value.find((c) => c.id === deepId)
+  if (!clip) {
+    // Older than the hydrate window — pull the full history once, then look again.
+    await radio.extendRecordings(0)
+    clip = recordings.value.find((c) => c.id === deepId)
+  }
   if (!clip) {
     error.value = 'Linked clip not found (deleted or pruned)'
     return
@@ -464,12 +469,20 @@ function handleDeepLink(): void {
   window.addEventListener('pointerdown', deepLinkResume)
 }
 
+// Lazy history: hydration covers the recent slice; panning/zooming the lanes view past the
+// loaded horizon fetches the older range on demand (with one extra window of headroom so each
+// pan step doesn't fire a request). While anchored live the window never reaches the horizon.
+watch(windowStart, (start) => {
+  if (effectiveView.value !== 'lanes') return
+  if (start < radio.recordingsLoadedSince.value) void radio.extendRecordings(start - windowMs.value)
+})
+
 onMounted(async () => {
   ticker = window.setInterval(() => (now.value = Date.now()), 1000)
   mq.addEventListener('change', onMq)
   try {
     await radio.loadRecordings()
-    handleDeepLink()
+    await handleDeepLink()
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e)
   }

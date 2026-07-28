@@ -267,8 +267,14 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
           if (id !== null) send(ok(id, rec.status))
         } else if (req.method === 'recordings.list') {
           if (id !== null) {
-            const clips = await rec.list()
-            const st = deps.transcriber?.statuses() ?? {}
+            // Optional window (epoch ms): the panel hydrates the recent slice and lazy-loads
+            // older history on pan — a full-archive list reads thousands of sidecars.
+            const p = z.object({ sinceMs: z.number().optional(), untilMs: z.number().optional() }).optional().parse(req.params)
+            const clips = await rec.list({
+              ...(p?.sinceMs !== undefined ? { sinceMs: p.sinceMs } : {}),
+              ...(p?.untilMs !== undefined ? { untilMs: p.untilMs } : {}),
+            })
+            const st = deps.transcriber?.statuses(clips.map((c) => c.id)) ?? {}
             send(ok(id, clips.map((c) => ({ ...c, transcript: st[c.id]?.status ?? null, importance: st[c.id]?.importance ?? null }))))
           }
         } else if (req.method === 'recordings.transcript') {
@@ -278,7 +284,7 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
           if (id !== null) send(ok(id, deps.transcriber?.transcript(p.id) ?? null))
         } else if (req.method === 'recordings.transcribeNow') {
           const p = z.object({ id: z.string() }).parse(req.params)
-          const clip = (await rec.list()).find((c) => c.id === p.id)
+          const clip = await rec.meta(p.id)
           if (!clip) throw new Error(`unknown clip: ${p.id}`)
           deps.transcriber?.transcribeNow(clip)
           if (id !== null) send(ok(id, { status: deps.transcriber?.statusOf(p.id) ?? null }))

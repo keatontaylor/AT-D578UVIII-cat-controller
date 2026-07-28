@@ -38,6 +38,14 @@ export interface ClipMeta {
 /** A clip currently being written — everything but the (unknown) duration. */
 export type LiveClip = Omit<ClipMeta, 'durationMs'>
 
+/** Start time encoded in a clip id (openClip stamps `toISOString()` with `:`/`.` → `-`), or null
+ * for names that don't match — those get read + filtered on their metadata instead. */
+export function idStartTime(id: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-(\d{3})Z/.exec(id)
+  if (!m) return null
+  return Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!, +m[7]!)
+}
+
 /** What the recorder needs from the live radio state at clip-open (for metadata). `side`/`channel`
  * must be the ACTUAL receiving side (see domain/receive.ts) — the audio-holder latch, not just
  * the selected one. `source` says HOW the side was attributed — the dual-RX split and mid-clip
@@ -393,14 +401,24 @@ export class Recorder {
     }
   }
 
-  /** List saved clips (newest first) from the sidecar JSONs. */
-  async list(): Promise<ClipMeta[]> {
+  /** List saved clips (newest first) from the sidecar JSONs. A time window skips files OUTSIDE
+   * it without reading them — the clip id IS its start timestamp (see finalize), so with days of
+   * archive and a panel that shows an hour, a windowed list touches ~1% of the sidecars. Slack
+   * covers clips that started before the cutoff but overlap it; unparseable names (foreign files)
+   * fall through to a read and the precise meta filter. */
+  async list(opts: { sinceMs?: number; untilMs?: number } = {}): Promise<ClipMeta[]> {
     const files = await fsp.readdir(this.dir).catch(() => [] as string[])
+    const since = opts.sinceMs ?? 0
+    const until = opts.untilMs ?? Number.POSITIVE_INFINITY
+    const SLACK_MS = 6 * 3600_000
     const metas: ClipMeta[] = []
     for (const f of files) {
       if (!f.endsWith('.json')) continue
+      const t = idStartTime(f.slice(0, -5))
+      if (t !== null && (t < since - SLACK_MS || t >= until)) continue
       try {
         const meta = JSON.parse(await fsp.readFile(join(this.dir, f), 'utf8')) as ClipMeta
+        if (meta.startedAt + meta.durationMs < since || meta.startedAt >= until) continue
         // sidecars written before the TX feature lack `direction` — they are all RX
         metas.push(meta.direction ? meta : { ...meta, direction: 'rx' })
       } catch {
@@ -408,6 +426,17 @@ export class Recorder {
       }
     }
     return metas.sort((a, b) => b.startedAt - a.startedAt)
+  }
+
+  /** One clip's metadata without scanning the directory (null if unknown/unsafe). */
+  async meta(id: string): Promise<ClipMeta | null> {
+    if (!/^[\w:-]+$/.test(id)) return null
+    try {
+      const m = JSON.parse(await fsp.readFile(join(this.dir, `${id}.json`), 'utf8')) as ClipMeta
+      return m.direction ? m : { ...m, direction: 'rx' }
+    } catch {
+      return null
+    }
   }
 
   /** Absolute path of a clip's WAV for HTTP serving (null if the id is unknown/unsafe). */

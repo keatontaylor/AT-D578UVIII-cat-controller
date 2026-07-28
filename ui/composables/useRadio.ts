@@ -608,17 +608,43 @@ async function getRtcStats(): Promise<RtcStats | null> {
 
 // Recordings hydrate: status + saved list + IN-PROGRESS clips (a client that connects
 // mid-recording missed the `opened` push). Called on panel mount and on every ws reconnect.
+// WINDOWED: the archive spans days (thousands of clips) but the panel shows at most 24 h — only
+// that slice hydrates; panning further back lazy-loads via extendRecordings. A re-hydrate keeps
+// whatever wider range this session already pulled in.
+const REC_HYDRATE_WINDOW_MS = 24 * 3600_000
+const recordingsLoadedSince = ref<number>(Number.POSITIVE_INFINITY)
 let recHydrated = false
 async function hydrateRecordings(): Promise<void> {
+  const since = Math.min(Date.now() - REC_HYDRATE_WINDOW_MS, recordingsLoadedSince.value)
   const [status, list, live] = await Promise.all([
     rpc<{ enabled: boolean; tailMs: number; minDurationMs: number }>('recordings.status'),
-    rpc<RecordingClip[]>('recordings.list'),
+    rpc<RecordingClip[]>('recordings.list', { sinceMs: since }),
     rpc<LiveRecording[]>('recordings.live').catch(() => [] as LiveRecording[]),
   ])
   recorderStatus.value = status
   recordings.value = [...list].sort((a, b) => b.startedAt - a.startedAt)
   liveRecordings.value = live
+  recordingsLoadedSince.value = since
   recHydrated = true
+}
+
+// Pan-into-the-past lazy load: fetch [sinceMs, loadedSince) and merge (dedupe by id).
+let extendInFlight: Promise<void> | null = null
+function extendRecordings(sinceMs: number): Promise<void> {
+  if (!recHydrated || sinceMs >= recordingsLoadedSince.value) return Promise.resolve()
+  if (extendInFlight) return extendInFlight
+  extendInFlight = (async () => {
+    try {
+      const older = await rpc<RecordingClip[]>('recordings.list', { sinceMs, untilMs: recordingsLoadedSince.value })
+      recordingsLoadedSince.value = sinceMs
+      const seen = new Set(recordings.value.map((c) => c.id))
+      const fresh = older.filter((c) => !seen.has(c.id))
+      if (fresh.length) recordings.value = [...recordings.value, ...fresh].sort((a, b) => b.startedAt - a.startedAt)
+    } finally {
+      extendInFlight = null
+    }
+  })()
+  return extendInFlight
 }
 
 // Dedupe concurrent refreshes: the header dropdown and the pairing panel both ask on mount (they
@@ -705,6 +731,8 @@ export function useRadio() {
     liveRecordings,
     recorderStatus,
     loadRecordings: hydrateRecordings,
+    extendRecordings,
+    recordingsLoadedSince,
     recordingsSetEnabled: (enabled: boolean) => rpc<{ enabled: boolean }>('recordings.setEnabled', { enabled }),
     recordingsDelete: (id: string) => rpc('recordings.delete', { id }),
     recordingsTranscript: (id: string) => rpc<ClipTranscript | null>('recordings.transcript', { id }),
