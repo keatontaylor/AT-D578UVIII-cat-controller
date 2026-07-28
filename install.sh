@@ -290,8 +290,8 @@ EOF
     cat >"$drop_tmp" <<'EOF'
 # Optional: push webhook for important/urgent clips — an ntfy topic URL or a generic JSON
 # endpoint (e.g. a Home Assistant webhook). See README "Push notifications".
-# Uncomment and fill in, then: systemctl --user restart anytone-v2
-# [Service]
+# Uncomment the Environment lines and fill in, then: systemctl --user restart anytone-v2
+[Service]
 # Environment=ANYTONE_NOTIFY_URL=https://ntfy.sh/your-topic
 # Environment=ANYTONE_NOTIFY_MIN_TIER=2
 # Environment=ANYTONE_NOTIFY_TOKEN=your-token
