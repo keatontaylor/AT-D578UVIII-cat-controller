@@ -53,7 +53,7 @@ test('trim: finds the speech span and slices it (with silence-only rejection)', 
 
 test('prompt-echo guard: catches bias-prompt parroting, passes real transcripts', () => {
   const prompt = buildPrompt('COLCON DENVER', null)
-  assert.ok(isPromptEcho('Channel COLCON DENVER.', prompt))
+  assert.ok(isPromptEcho("KE0XQV, this is W9ZL, you're 5-9 on COLCON DENVER.", prompt))
   assert.ok(isPromptEcho('COLCON DENVER', prompt))
   assert.ok(!isPromptEcho('This is the Colorado Connection net, K0BUL checking in.', prompt))
   assert.ok(!isPromptEcho('', prompt))
@@ -147,7 +147,7 @@ test('service: speech clip → done sidecar with trim-offset segments + biased p
 
 test('service: prompt echo → skipped, not shown as a transcript', async () => {
   const { svc, dir } = rig({
-    result: () => ({ text: 'Channel COLCON DENVER.', segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 100 }),
+    result: () => ({ text: "KE0XQV, this is W9ZL, you're 5-9 on COLCON DENVER.", segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 100 }),
   })
   svc.onClipSaved(clip(dir, 'echo', makeWav(0, 4, 0)))
   await svc.tick()
