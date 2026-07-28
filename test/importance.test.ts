@@ -331,3 +331,25 @@ test('transcriber: scored tier>=threshold fires the notifier with summary + clea
   assert.equal(pushed[0]!.summary, 'Evacuations ordered near Lyons.')
   assert.equal(pushed[0]!.text, 'Cleaned transcript here.', 'clean text preferred for the push body')
 })
+
+test('junk transcripts never enter a scoring batch (but keep their sidecar)', async () => {
+  const { isJunkTranscript } = await import('../src/transcribe/service')
+  // unit: field-observed junk vs short-but-real
+  for (const t of ['.', 'BELL RINGS', 'BELL ROOM FIELD.', '73.']) assert.equal(isJunkTranscript(t, []), true, t)
+  for (const t of ['KF0WWS, K0DNS operating.', 'Cephy, go ahead.', 'This is K0ML repeater.']) assert.equal(isJunkTranscript(t, []), false, t)
+  assert.equal(isJunkTranscript('short thing here', ['maybe-noise']), true, 'short + noise-flag = junk')
+  // integration: a junk transcription completes but is never scored
+  let chatCalls = 0
+  const { svc, dir, clock } = rig({ complete: async () => { chatCalls++; return reply('{"scores":[]}') } })
+  ;(svc as unknown as { doTranscribe: unknown }).doTranscribe = async () => ({
+    text: 'BELL RINGS', segments: [], avgLogprob: -0.9, maxNoSpeechProb: 0.8, apiMs: 1,
+  })
+  saveClip(svc, dir, 'j1')
+  await svc.tick()
+  assert.equal(svc.transcript('j1')!.status, 'done', 'sidecar written — UI still shows the text')
+  assert.ok(svc.transcript('j1')!.flags!.includes('junk'))
+  clock.t += 301_000
+  await svc.tick()
+  assert.equal(chatCalls, 0, 'no scoring flush for junk-only queue')
+  assert.equal(svc.transcript('j1')!.importance, undefined)
+})

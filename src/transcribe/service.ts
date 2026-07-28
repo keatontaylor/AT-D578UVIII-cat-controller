@@ -81,6 +81,19 @@ interface PersistedState {
 }
 
 const MIN_CLIP_MS = 3000 // kerchunk floor — bake-off-proven hallucination fodder, ~1% of audio
+
+/** Transcript with no scoreable content — field-measured at 30% of done clips (48h: 566/1890):
+ * bare punctuation, Whisper's ALL-CAPS sound captions on noise ("BELL RINGS" = repeater courtesy
+ * tones), tiny noise-flagged fragments. They keep their sidecar (UI shows the text) but never
+ * enter a scoring batch, where each can trigger a full preamble-priced flush in a quiet hour. */
+export function isJunkTranscript(text: string, flags: readonly string[]): boolean {
+  const t = text.trim()
+  if (t.replace(/[^a-zA-Z]/g, '').length < 8) return true // ".", "73", lone kerchunk noise
+  if (!/[a-z]/.test(t) && t.length < 60) return true // caption convention: no lowercase at all
+  if (t.length < 30 && flags.includes('maybe-noise')) return true
+  if (t.length < 15 && flags.includes('low-confidence')) return true
+  return false
+}
 const MIN_SPEECH_MS = 1000 // post-VAD: less than this much speech energy → nothing to transcribe
 const MAX_ATTEMPTS = 3
 const DEFAULTS = {
@@ -660,9 +673,14 @@ export class Transcriber {
       })
       return
     }
-    // Record for scoring context BEFORE finishing (recurrence history + score inputs).
-    this.recentDone.unshift({ id: clip.id, channel: clip.channelName ?? '', startedAt: clip.startedAt, text: result.text, ...(clip.talkgroupName ? { talkgroupName: clip.talkgroupName } : {}) })
-    if (this.recentDone.length > 500) this.recentDone.length = 500
+    const junk = isJunkTranscript(result.text, flags)
+    if (junk) flags.push('junk')
+    // Record for scoring context BEFORE finishing (recurrence history + score inputs); junk
+    // stays out of the recurrence priors too.
+    if (!junk) {
+      this.recentDone.unshift({ id: clip.id, channel: clip.channelName ?? '', startedAt: clip.startedAt, text: result.text, ...(clip.talkgroupName ? { talkgroupName: clip.talkgroupName } : {}) })
+      if (this.recentDone.length > 500) this.recentDone.length = 500
+    }
     this.finish(clip.id, {
       v: 1,
       status: 'done',
@@ -679,7 +697,7 @@ export class Transcriber {
       billedS,
       transcribedAt: new Date(this.now()).toISOString(),
     })
-    this.enqueueScore(clip.id)
+    if (!junk) this.enqueueScore(clip.id)
     this.log(`transcriber: ${clip.id} done (${billedS.toFixed(1)}s billed, ${result.apiMs}ms${flags.length ? `, ${flags.join(',')}` : ''})`)
   }
 
