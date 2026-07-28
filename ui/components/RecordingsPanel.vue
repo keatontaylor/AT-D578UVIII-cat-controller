@@ -7,7 +7,7 @@
 // growing toward "now". A CURSOR scrubs the timeline; Play runs continuously from the cursor,
 // auto-advancing to the next clip (Next jumps manually). Audio streams from the range-capable
 // /recordings/<id>.wav route. Touch: horizontal drag pans, tap seeks/plays.
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import AppSelect from './AppSelect.vue'
 import AppSlider from './AppSlider.vue'
 import { useRadio, type ClipTranscript, type LiveRecording, type RecordingClip } from '../composables/useRadio'
@@ -429,9 +429,12 @@ async function remove(id: string): Promise<void> {
 }
 
 // Deep link (?clip=<id>) — the push-notification click-through: load + play that clip as soon as
-// the panel mounts with the list hydrated. The param is stripped after handling so a manual
-// reload doesn't replay it. Autoplay may be blocked on a fresh page (no user gesture yet) —
-// playClip's catch leaves the clip loaded + selected, one tap on Play resumes.
+// the panel mounts with the list hydrated, and scroll the panel into view (it sits below the VFO
+// cards). The param is stripped after handling so a manual reload doesn't replay it. Autoplay may
+// be blocked on a fresh page (no user gesture yet) — playClip's catch leaves the clip loaded +
+// selected, and the FIRST tap/click anywhere counts as the gesture and starts it.
+const panelRef = ref<HTMLElement | null>(null)
+let deepLinkResume: (() => void) | null = null
 function handleDeepLink(): void {
   const params = new URLSearchParams(location.search)
   const deepId = params.get('clip')
@@ -447,6 +450,18 @@ function handleDeepLink(): void {
   const mid = clip.startedAt + clip.durationMs / 2
   if (mid < windowStart.value) panMs.value = mid + windowMs.value / 2 - now.value
   playClip(clip)
+  void nextTick().then(() => panelRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  // Autoplay-block rescue: if the browser refused play() (no user gesture yet), the first
+  // interaction anywhere retries it — the notification tap flows straight into audio.
+  deepLinkResume = (): void => {
+    const cb = deepLinkResume
+    deepLinkResume = null
+    if (cb) window.removeEventListener('pointerdown', cb)
+    if (!playing.value && playingId.value === clip.id && playerRef.value?.src) {
+      void playerRef.value.play().then(() => (playing.value = true)).catch(() => {})
+    }
+  }
+  window.addEventListener('pointerdown', deepLinkResume)
 }
 
 onMounted(async () => {
@@ -462,11 +477,12 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.clearInterval(ticker)
   mq.removeEventListener('change', onMq)
+  if (deepLinkResume) window.removeEventListener('pointerdown', deepLinkResume)
 })
 </script>
 
 <template>
-  <section class="status-panel rec-panel">
+  <section ref="panelRef" class="status-panel rec-panel">
     <div class="status-panel-header rec-head">
       <div class="rec-title-row">
         <span class="scope-title">Recordings</span>
