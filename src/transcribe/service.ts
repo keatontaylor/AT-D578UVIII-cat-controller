@@ -12,6 +12,8 @@
 
 import { readFileSync, writeFileSync, renameSync, existsSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { execFile } from 'node:child_process'
+import { tmpdir } from 'node:os'
 import { analyzeSpeech, parseWav, sliceWav, trimPlan } from './trim'
 import { buildPrompt, isPromptEcho, transcribe as groqTranscribe, chatComplete, GroqQuotaError, type GroqResult } from './groq'
 import { InterestLearner, type EngagementKind } from './learner'
@@ -164,11 +166,43 @@ function cerebrasKey(): string | null {
 }
 
 /** One scoring provider in the failover ladder. cleanCapable rungs may return cleanText; the
- * llamas no-op cleanup (shootout-verified) so their rung strips it and scores only. */
+ * llamas no-op cleanup (shootout-verified) so their rung strips it and scores only. quotaFree
+ * rungs (subscription-backed) don't count against the daily token budget's cleanup-strip. */
 interface ChatRung {
   readonly name: string
   readonly client: ChatClient
   readonly cleanCapable: boolean
+  readonly quotaFree?: boolean
+}
+
+// Headless Claude Code CLI as a scoring rung: ANYTONE_CLAUDE_SCORER=<model alias> (sonnet/haiku/
+// opus) makes the locally-authenticated `claude -p` the TOP rung — subscription-backed, so no
+// per-token quota; Groq rungs remain the fallback (and serve while the CLI cools off after a
+// usage-limit or auth error). Runs from tmpdir so it never picks up a repo persona/CLAUDE.md;
+// system prompt as a flag, user prompt via stdin (guidance + clips exceed argv comfort).
+const CLAUDE_SCORER = process.env['ANYTONE_CLAUDE_SCORER'] ?? null
+function claudeBin(): string {
+  const env = process.env['ANYTONE_CLAUDE_BIN']
+  if (env) return env
+  const local = join(process.env['HOME'] ?? '', '.local/bin/claude')
+  return existsSync(local) ? local : 'claude'
+}
+function makeClaudeCli(model: string): ChatClient {
+  return {
+    complete: (system, user) =>
+      new Promise((resolve, reject) => {
+        const child = execFile(
+          claudeBin(),
+          ['-p', '--model', model, '--output-format', 'text', '--system-prompt', system],
+          { timeout: 180_000, maxBuffer: 8 * 1024 * 1024, cwd: tmpdir() },
+          (err, stdout, stderr) => {
+            if (err) reject(new Error(`claude cli: ${(stderr || err.message).toString().slice(0, 200)}`))
+            else resolve({ content: stdout.toString().trim(), totalTokens: null, remainingTokens: null })
+          },
+        )
+        child.stdin?.end(user)
+      }),
+  }
 }
 
 const GUIDANCE_PATH = new URL('../../data/importance-guidance.md', import.meta.url)
@@ -262,6 +296,7 @@ export class Transcriber {
       ]
     }
     const rungs: ChatRung[] = []
+    if (CLAUDE_SCORER) rungs.push({ name: `claude/${CLAUDE_SCORER}`, client: makeClaudeCli(CLAUDE_SCORER), cleanCapable: true, quotaFree: true })
     if (cerebrasKey()) rungs.push({ name: `cerebras/${CEREBRAS_MODEL}`, client: this.makeChat(CEREBRAS_MODEL, { endpoint: CEREBRAS_ENDPOINT, keyFn: cerebrasKey }), cleanCapable: true })
     rungs.push({ name: IMPORTANCE.model, client: this.makeGroqChat(IMPORTANCE.model), cleanCapable: true })
     rungs.push({ name: IMPORTANCE.fallbackModel, client: this.makeGroqChat(IMPORTANCE.fallbackModel), cleanCapable: false })
@@ -443,7 +478,9 @@ export class Transcriber {
     // chat-token spend is over the cap, strip cleanup — scoring output is tiny and always fits.
     const estTokens = Math.ceil((this.guidanceFn().length + inputs.reduce((a, i) => a + i.text.length * (i.clean ? 2 : 1), 0)) / 4) + 500 + inputs.length * 25 /* summaries */
     this.rollChat()
-    if ((this.state.chatTokens ?? 0) + estTokens > IMPORTANCE.dailyTokenCap && inputs.some((i) => i.clean)) {
+    const rungs = this.ladder()
+    const first = rungs.find((r) => this.now() >= (this.starved.get(r.name) ?? 0))
+    if (!first?.quotaFree && (this.state.chatTokens ?? 0) + estTokens > IMPORTANCE.dailyTokenCap && inputs.some((i) => i.clean)) {
       inputs = inputs.map((i) => ({ ...i, clean: false }))
       this.log('transcriber: chat token budget low — scoring without cleanup this batch')
     }
@@ -454,7 +491,7 @@ export class Transcriber {
     let result = null
     let allQuota = true
     let minRetryS = 300
-    for (const rung of this.ladder()) {
+    for (const rung of rungs) {
       if (this.now() < (this.starved.get(rung.name) ?? 0)) continue
       try {
         result = await scoreBatch(rung.client, this.guidanceFn(), rung.cleanCapable ? inputs : inputs.map((i) => ({ ...i, clean: false })))
