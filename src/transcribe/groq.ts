@@ -57,6 +57,42 @@ export function buildPrompt(channelName: string | null, talkgroupName: string | 
   return ctx ? `KE0XQV, this is W9ZL, you're 5-9 ${ctx}. QSL, running 5 watts mobile. AC7QT back to N0VXR, 73, KE0XQV clear.` : PROMPT_BASE
 }
 
+/** Excise verbatim prompt bleed: any run of >=4 consecutive (normalized) words of the per-clip
+ * bias prompt appearing inside a transcript — Whisper fills noisy gaps with primer phrases
+ * (field: 147 archive sidecars). Deterministic; matched against the FULL built prompt because
+ * the channel name is woven in and bleeds with it ("5-9 on COLCON DENVER"). */
+export function scrubPromptBleed(text: string, prompt: string): { text: string; hits: number } {
+  const words = (s: string): string[] => s.toLowerCase().replace(/[^a-z0-9']+/g, ' ').trim().split(/\s+/).filter(Boolean)
+  const P = words(prompt)
+  const toks: { w: string; start: number; end: number }[] = []
+  const re = /[a-zA-Z0-9']+/g
+  let m
+  while ((m = re.exec(text))) toks.push({ w: m[0].toLowerCase(), start: m.index, end: m.index + m[0].length })
+  const spans: { from: number; to: number }[] = []
+  for (let i = 0; i < toks.length; i++) {
+    let best = 0
+    for (let p = 0; p < P.length; p++) {
+      let k = 0
+      while (p + k < P.length && i + k < toks.length && toks[i + k]!.w === P[p + k]) k++
+      if (k > best) best = k
+    }
+    if (best >= 4) {
+      spans.push({ from: toks[i]!.start, to: toks[i + best - 1]!.end })
+      i += best - 1
+    }
+  }
+  if (!spans.length) return { text, hits: 0 }
+  let out = ''
+  let pos = 0
+  for (const s of spans) {
+    out += text.slice(pos, s.from)
+    pos = s.to
+    while (pos < text.length && /[ ,.—-]/.test(text[pos]!)) pos++
+  }
+  out += text.slice(pos)
+  return { text: out.replace(/[ \t]{2,}/g, ' ').replace(/ ([,.])/g, '$1').trim(), hits: spans.length }
+}
+
 /** True when the transcript is (mostly) the bias prompt echoed back — a no-speech hallucination,
  * not a transcription. Compared on lowercased alphanumerics so punctuation differences don't hide
  * the echo. */

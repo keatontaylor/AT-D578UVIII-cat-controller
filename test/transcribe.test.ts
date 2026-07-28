@@ -152,7 +152,9 @@ test('service: prompt echo → skipped, not shown as a transcript', async () => 
   svc.onClipSaved(clip(dir, 'echo', makeWav(0, 4, 0)))
   await svc.tick()
   assert.equal(svc.statusOf('echo'), 'skipped')
-  assert.equal(svc.transcript('echo')!.reason, 'prompt-echo')
+  // the runtime bleed scrubber empties a pure-echo transcript before the echo check — either
+  // reason means the same thing: nothing real was said
+  assert.ok(['prompt-echo', 'empty'].includes(svc.transcript('echo')!.reason!))
 })
 
 test('service: forced clips jump the queue; force teaches the learner', async () => {
@@ -197,4 +199,17 @@ test('service: rescan re-queues unsidecared clips after the enable marker', asyn
   assert.equal(svc2.statusOf('seen'), 'done', 'sidecared clip not re-queued')
   assert.equal(svc2.statusOf('missed'), 'queued', 'missed clip recovered')
   assert.ok(existsSync(join(dir, 'transcribe-state.json')))
+})
+
+test('scrubPromptBleed: excises >=4-word primer runs incl. channel-woven fragments', async () => {
+  const { scrubPromptBleed } = await import('../src/transcribe/groq')
+  const prompt = buildPrompt('COLCON DENVER', null)
+  const bled = "catch you later on. KL7GLK. QSL, running 5 watts. Good night. I sure QSL. Running 5-9 on COLCON DENVER."
+  const { text, hits } = scrubPromptBleed(bled, prompt)
+  assert.ok(hits >= 1)
+  assert.ok(!text.includes('running 5 watts'), 'primer fragment removed')
+  assert.ok(!text.includes('5-9 on COLCON DENVER'), 'channel-woven fragment removed')
+  assert.ok(text.includes('KL7GLK'), 'real content kept')
+  const real = 'This is KE0ABC, I am running 5 watts from a handheld today.'
+  assert.equal(scrubPromptBleed(real, prompt).hits, 0, 'ordinary speech with overlapping words survives')
 })

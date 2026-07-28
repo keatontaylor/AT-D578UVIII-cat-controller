@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { execFile } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { analyzeSpeech, parseWav, sliceWav, trimPlan } from './trim'
-import { buildPrompt, isPromptEcho, transcribe as groqTranscribe, chatComplete, GroqQuotaError, type GroqResult } from './groq'
+import { buildPrompt, isPromptEcho, scrubPromptBleed, transcribe as groqTranscribe, chatComplete, GroqQuotaError, type GroqResult } from './groq'
 import { InterestLearner, type EngagementKind } from './learner'
 import { recurrenceScore, scoreBatch, type ChatClient, type ImportanceTier, type ScoreInput } from './importance'
 import type { Notifier } from './notify'
@@ -670,34 +670,39 @@ export class Transcriber {
     }
     this.spend(billedS)
     const prompt = buildPrompt(clip.channelName || null, clip.talkgroupName ?? null)
+    // Runtime bleed scrub: primer fragments excised BEFORE anything downstream (junk gate,
+    // recurrence history, cleanup, scoring) can absorb them.
+    const scrub = scrubPromptBleed(result.text, prompt)
+    const rawText = scrub.text
     const flags: string[] = []
+    if (scrub.hits) flags.push('prompt-bleed')
     if (result.avgLogprob !== null && result.avgLogprob < -0.7) flags.push('low-confidence')
     if (result.maxNoSpeechProb !== null && result.maxNoSpeechProb > 0.5) flags.push('maybe-noise')
-    if (!result.text || isPromptEcho(result.text, prompt)) {
+    if (!rawText || isPromptEcho(rawText, prompt)) {
       this.finish(clip.id, {
-        v: 1, status: 'skipped', reason: result.text ? 'prompt-echo' : 'empty',
+        v: 1, status: 'skipped', reason: rawText ? 'prompt-echo' : 'empty',
         model: this.model, billedS,
         trim: { startMs: plan.startMs, endMs: plan.endMs, speechMs: profile.speechMs },
       })
       return
     }
-    const junk = isJunkTranscript(result.text, flags)
+    const junk = isJunkTranscript(rawText, flags)
     if (junk) flags.push('junk')
     // Record for scoring context BEFORE finishing (recurrence history + score inputs); junk
     // stays out of the recurrence priors too.
     if (!junk) {
-      this.recentDone.unshift({ id: clip.id, channel: clip.channelName ?? '', startedAt: clip.startedAt, text: result.text, ...(clip.talkgroupName ? { talkgroupName: clip.talkgroupName } : {}) })
+      this.recentDone.unshift({ id: clip.id, channel: clip.channelName ?? '', startedAt: clip.startedAt, text: rawText, ...(clip.talkgroupName ? { talkgroupName: clip.talkgroupName } : {}) })
       if (this.recentDone.length > 500) this.recentDone.length = 500
     }
     this.finish(clip.id, {
       v: 1,
       status: 'done',
       model: this.model,
-      text: result.text,
+      text: rawText,
       segments: result.segments.map((s) => ({
         startMs: Math.round(plan.startMs + s.startS * 1000),
         endMs: Math.round(plan.startMs + s.endS * 1000),
-        text: s.text,
+        text: scrubPromptBleed(s.text, prompt).text,
       })),
       flags,
       avgLogprob: result.avgLogprob,

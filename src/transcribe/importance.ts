@@ -99,7 +99,12 @@ export const SYSTEM_PROMPT =
   'one line per transmission with a blank line between turns, and prefix each turn with the ' +
   "speaker's callsign or unit number and a colon when it is identifiable from the words themselves " +
   '("K0NR: ...", "Lincoln 58: ..."); leave the prefix off when the speaker is unclear — never ' +
-  'guess an identity. Be CONSERVATIVE: never invent or reword ' +
+  'guess an identity. Attribution conventions: a callsign at the END of a transmission is the ' +
+  "SPEAKER's own signature (hams sign their own call last; an addressee is named first, as in " +
+  '"W1AB this is K2CD" = K2CD speaking TO W1AB) — use signatures to assign turns. Speaker labels ' +
+  'must be CALLSIGNS or unit numbers only, never first names — names stay inside the text. ' +
+  'cleanText must span the ENTIRE transcript from its first word to its last: never drop, ' +
+  'summarize, or truncate any passage. Be CONSERVATIVE: never invent or reword ' +
   'content, never turn garbled fragments into fluent sentences — leave unclear stretches as-is or ' +
   'mark them [unclear]. Preserve every factual detail verbatim. ' +
   'Respond ONLY with a JSON object {"scores":[{"id","tier","reason","summary","cleanText"?}...]} covering every clip id.'
