@@ -37,6 +37,8 @@
 #   ANYTONE_NGINX_SERVER_NAME  server_name value  (default: _)
 #   ANYTONE_NGINX_TLS=0        nginx plain HTTP    (default: nginx TLS on, self-signed)
 #   ANYTONE_NGINX_TLS_DAYS     self-signed validity in days (default: 3650)
+#   ANYTONE_GROQ_KEY           Groq API key → enables AI transcription non-interactively
+#   ANYTONE_NO_TRANSCRIBE=1    skip the transcription-setup prompt entirely
 #
 set -eu
 # pipefail is bash/ksh only — enable it where available, but stay POSIX so `curl … | sh`
@@ -332,6 +334,63 @@ EOF
   as_root ln -sf /etc/nginx/sites-available/anytone /etc/nginx/sites-enabled/anytone
   as_root nginx -t
   as_root systemctl reload nginx
+fi
+
+# ── Optional: AI transcription features (Groq) ──────────────────────────────
+# The app can transcribe every received clip (Whisper), attach a one-line summary, flag
+# important/urgent traffic, and tidy callsigns/lingo — all on Groq's FREE tier. It activates
+# automatically whenever recording is on AND ~/.groq_key exists; no key = features quietly off.
+# The key is read live, so dropping the file in later enables it without a restart.
+GROQ_KEY_FILE="$USER_HOME/.groq_key"
+write_groq_key() {
+  # write as the run user, mode 600
+  printf '%s\n' "$1" | as_user tee "$GROQ_KEY_FILE" >/dev/null
+  as_user chmod 600 "$GROQ_KEY_FILE"
+  info "Key saved to $GROQ_KEY_FILE (mode 600). Transcription will start with the next recorded clip."
+}
+validate_groq_key() {
+  # best-effort sanity check; network trouble is a warning, not a failure
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' -m 8 -H "Authorization: Bearer $1" https://api.groq.com/openai/v1/models 2>/dev/null || printf '000')"
+  case "$CODE" in
+    200) info "Key verified with Groq." ;;
+    401|403) warn "Groq rejected that key (HTTP $CODE) — saved anyway; replace $GROQ_KEY_FILE if transcription doesn't start." ;;
+    *) warn "Could not verify the key right now (HTTP $CODE) — saved; it will be used as-is." ;;
+  esac
+}
+if [ -n "${ANYTONE_GROQ_KEY:-}" ]; then
+  step "AI transcription: installing provided Groq key"
+  write_groq_key "$ANYTONE_GROQ_KEY"
+  validate_groq_key "$ANYTONE_GROQ_KEY"
+elif [ -s "$GROQ_KEY_FILE" ]; then
+  step "AI transcription: already set up"
+  info "Using the existing key at $GROQ_KEY_FILE (delete it to disable, replace it to change)."
+elif [ "${ANYTONE_NO_TRANSCRIBE:-0}" = "1" ]; then
+  info "Skipping transcription setup (ANYTONE_NO_TRANSCRIBE=1)."
+elif ( : </dev/tty ) 2>/dev/null; then  # a REAL controlling tty (piped installs still prompt; headless skips)
+  step "Optional: AI transcription features"
+  info "The app can transcribe received audio, summarize each clip, and flag important traffic"
+  info "(wildfire/emergency/net activations) using Groq's FREE API tier — no card required."
+  info "Get a free key at: https://console.groq.com  (API Keys → Create)"
+  printf '    Set up transcription now? [y/N] ' > /dev/tty
+  REPLY=""; read -r REPLY < /dev/tty || true
+  case "$REPLY" in
+    y|Y|yes|YES)
+      printf '    Paste your Groq API key (gsk_...): ' > /dev/tty
+      GROQ_KEY=""; read -r GROQ_KEY < /dev/tty || true
+      if [ -n "$GROQ_KEY" ]; then
+        write_groq_key "$GROQ_KEY"
+        validate_groq_key "$GROQ_KEY"
+      else
+        warn "No key entered — skipped. Enable later with:  echo 'gsk_yourkey' > $GROQ_KEY_FILE && chmod 600 $GROQ_KEY_FILE"
+      fi
+      ;;
+    *)
+      info "Skipped. Enable any time:  echo 'gsk_yourkey' > $GROQ_KEY_FILE && chmod 600 $GROQ_KEY_FILE"
+      ;;
+  esac
+else
+  info "Non-interactive install — transcription not configured."
+  info "Enable any time:  echo 'gsk_yourkey' > $GROQ_KEY_FILE && chmod 600 $GROQ_KEY_FILE  (or re-run with ANYTONE_GROQ_KEY=...)"
 fi
 
 step "Done"

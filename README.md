@@ -70,6 +70,28 @@ enabled (Menu → Bluetooth → on), then scan, pair, connect.
 > (single receiver). On connect the app offers a one-click switch; dual-watch still
 > works, just best-effort on side attribution.
 
+## AI transcription (optional, free)
+
+With a free [Groq](https://console.groq.com) API key, the app transcribes every received clip
+(Whisper), attaches a one-line summary, tidies callsigns/ham lingo, and flags important or urgent
+traffic (wildfire, emergencies, net activations — amber/red on the timeline). All of it runs on
+Groq's free tier; typical daily monitoring stays comfortably within it.
+
+- The installer offers to set this up (or pass `ANYTONE_GROQ_KEY=gsk_...` for non-interactive
+  installs). To enable later:
+
+  ```sh
+  echo 'gsk_yourkey' > ~/.groq_key && chmod 600 ~/.groq_key
+  ```
+
+  No restart needed — it activates with the next recorded clip. Delete the file to turn it off.
+- What counts as "important" is plain prose you can edit: `data/importance-guidance.md`
+  (re-read continuously; tune it to your channels and area).
+- Transcripts appear under the player in the recordings panel; raw Whisper output is always
+  preserved alongside the cleaned text.
+- Privacy note: received RX audio is sent to Groq for transcription. It's public-airwaves
+  traffic, but if that's not for you, simply don't add a key — everything else works identically.
+
 ## Manual run (development)
 
 ```sh
@@ -92,6 +114,9 @@ Everything is optional; defaults suit a Pi with one radio.
 | `ANYTONE_BLUEALSA_DBUS` | `anytone` | Isolated BlueALSA D-Bus suffix |
 | `ANYTONE_RADIOID_CSV` | `<repo>/data/radioid_user.csv` | RadioID.net user DB for DMR caller ID |
 | `ANYTONE_RECORDER_AUTOSTART` | on | Squelch/TX recorders arm on connect (`0` opts out) |
+| `GROQ_API_KEY` / `~/.groq_key` | unset | Enables AI transcription + importance scoring (see above); absent = features off |
+| `ANYTONE_TRANSCRIBE` | on | `0` disables transcription even with a key |
+| `ANYTONE_IMPORTANCE_MODEL` | `openai/gpt-oss-120b` | Chat model for importance/summaries/cleanup (fallback `llama-3.1-8b-instant`) |
 | `ANYTONE_AUDIO_TX_GAIN` | `0.6` | Mic → radio gain |
 | `ANYTONE_CF_TURN_KEY_ID` / `ANYTONE_CF_TURN_API_TOKEN` | unset | Mint Cloudflare TURN credentials for WebRTC relay — put these in a mode-600 systemd drop-in, **never** in the repo |
 | `ANYTONE_ICE_SERVERS` | unset | Static ICE server JSON (alternative to Cloudflare TURN) |
