@@ -34,27 +34,16 @@ export interface GroqOptions {
   readonly endpoint?: string
 }
 
-// Whisper treats the prompt as PRECEDING TRANSCRIPT, not instructions — it mimics what it sees.
-// So this is a fake exchange written in the exact style we want out: callsign shapes (K0/W0/KF0
-// prefixes), ham lingo as numerals ("73", "5-9"), local proper nouns, punctuation. ~60 tokens,
-// leaving prompt budget for the per-clip channel/talkgroup context line.
-// Transcript-style bias primer (Whisper mimics preceding-transcript STYLE, not instructions).
-// Field lesson (62 bled transcripts): on long clips with noisy gaps Whisper FILLS uncertain audio
-// with primer phrases verbatim — so the primer must be (a) SHORT, (b) free of real/prominent
-// callsigns (v1 used K0NR — a well-known Colorado ham — making bleed indistinguishable from the
-// actual person), (c) built from valid-SHAPE but obscure-suffix calls (diverse shapes: 2x3, 1x2,
-// 2x2, 1x3, /M — the callsign-grammar bias) and phrasing distinctive enough to recognize as
-// bleed. Channel/talkgroup names are woven INTO the fake exchange (the old bare "Channel X."
-// suffix echoed verbatim into 20 transcripts).
-export const PROMPT_BASE =
-  "KE0XQV, this is W9ZL, you're 5-9. QSL, running 5 watts mobile. AC7QT back to N0VXR, 73, KE0XQV clear."
+// NO PRIMER — bake-off 2 verdict (2026-07-28, 5 clip types + 6 prompt candidates vs ground
+// truth): the empty prompt beat every primer and every glossary/header/roster candidate on
+// content fidelity and confidence, and primers actively INJECTED their fake callsigns into real
+// transcripts on long noisy clips. Callsign formatting (KL-7GLK -> KL7GLK) is the cleanup
+// stage's job. buildPrompt/scrub/echo plumbing stays so a primer can be re-tried cheaply — with
+// an empty prompt the scrubber and echo guard are dormant no-ops.
+export const PROMPT_BASE = ''
 
-export function buildPrompt(channelName: string | null, talkgroupName: string | null): string {
-  const ctx = [
-    channelName ? `on ${channelName}` : null,
-    talkgroupName && talkgroupName !== 'None' ? `talkgroup ${talkgroupName}` : null,
-  ].filter(Boolean).join(', ')
-  return ctx ? `KE0XQV, this is W9ZL, you're 5-9 ${ctx}. QSL, running 5 watts mobile. AC7QT back to N0VXR, 73, KE0XQV clear.` : PROMPT_BASE
+export function buildPrompt(_channelName: string | null, _talkgroupName: string | null): string {
+  return PROMPT_BASE
 }
 
 /** Excise verbatim prompt bleed: any run of >=4 consecutive (normalized) words of the per-clip

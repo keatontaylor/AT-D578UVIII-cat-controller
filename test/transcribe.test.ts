@@ -51,12 +51,15 @@ test('trim: finds the speech span and slices it (with silence-only rejection)', 
   assert.equal(trimPlan(quiet), null)
 })
 
-test('prompt-echo guard: catches bias-prompt parroting, passes real transcripts', () => {
-  const prompt = buildPrompt('COLCON DENVER', null)
-  assert.ok(isPromptEcho("KE0XQV, this is W9ZL, you're 5-9 on COLCON DENVER.", prompt))
-  assert.ok(isPromptEcho('COLCON DENVER', prompt))
-  assert.ok(!isPromptEcho('This is the Colorado Connection net, K0BUL checking in.', prompt))
-  assert.ok(!isPromptEcho('', prompt))
+test('prompt-echo guard: dormant with the empty prompt, still works against an explicit primer', () => {
+  // production runs NO primer (bake-off 2) — nothing can echo
+  assert.equal(buildPrompt('COLCON DENVER', null), '')
+  assert.ok(!isPromptEcho('COLCON DENVER', buildPrompt('COLCON DENVER', null)))
+  // the guard itself still functions if a primer is ever reintroduced
+  const primer = "KE0XQV, this is W9ZL, you're 5-9 on COLCON DENVER."
+  assert.ok(isPromptEcho("KE0XQV, this is W9ZL, you're 5-9 on COLCON DENVER.", primer))
+  assert.ok(!isPromptEcho('This is the Colorado Connection net, K0BUL checking in.', primer))
+  assert.ok(!isPromptEcho('', primer))
 })
 
 test('learner: engagement weights, decay, and persistence', () => {
@@ -131,12 +134,12 @@ test('service: no-speech clip → skipped sidecar, no API call', async () => {
   assert.equal(side.reason, 'no-speech')
 })
 
-test('service: speech clip → done sidecar with trim-offset segments + biased prompt', async () => {
+test('service: speech clip → done sidecar with trim-offset segments (empty prompt by design)', async () => {
   const { svc, dir, calls } = rig()
   svc.onClipSaved(clip(dir, 'good', makeWav(2, 4, 1), { talkgroupName: 'NXDN JOE' }))
   await svc.tick()
   assert.equal(svc.statusOf('good'), 'done')
-  assert.ok(calls[0]!.prompt.includes('COLCON DENVER') && calls[0]!.prompt.includes('NXDN JOE'))
+  assert.equal(calls[0]!.prompt, '', 'no primer — bake-off 2 verdict')
   const side = svc.transcript('good')!
   assert.equal(side.status, 'done')
   assert.ok(side.text!.includes('K0BUL'))
@@ -145,16 +148,14 @@ test('service: speech clip → done sidecar with trim-offset segments + biased p
   assert.ok(side.billedS! < 6, 'billed the trimmed length, not the full clip')
 })
 
-test('service: prompt echo → skipped, not shown as a transcript', async () => {
+test('service: empty transcript → skipped (echo guard dormant with no primer)', async () => {
   const { svc, dir } = rig({
-    result: () => ({ text: "KE0XQV, this is W9ZL, you're 5-9 on COLCON DENVER.", segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 100 }),
+    result: () => ({ text: '', segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 100 }),
   })
   svc.onClipSaved(clip(dir, 'echo', makeWav(0, 4, 0)))
   await svc.tick()
   assert.equal(svc.statusOf('echo'), 'skipped')
-  // the runtime bleed scrubber empties a pure-echo transcript before the echo check — either
-  // reason means the same thing: nothing real was said
-  assert.ok(['prompt-echo', 'empty'].includes(svc.transcript('echo')!.reason!))
+  assert.equal(svc.transcript('echo')!.reason, 'empty')
 })
 
 test('service: forced clips jump the queue; force teaches the learner', async () => {
@@ -203,7 +204,8 @@ test('service: rescan re-queues unsidecared clips after the enable marker', asyn
 
 test('scrubPromptBleed: excises >=4-word primer runs incl. channel-woven fragments', async () => {
   const { scrubPromptBleed } = await import('../src/transcribe/groq')
-  const prompt = buildPrompt('COLCON DENVER', null)
+  // explicit primer — production prompt is empty (scrubber dormant), but the tool must keep working
+  const prompt = "KE0XQV, this is W9ZL, you're 5-9 on COLCON DENVER. QSL, running 5 watts mobile. AC7QT back to N0VXR, 73, KE0XQV clear."
   const bled = "catch you later on. KL7GLK. QSL, running 5 watts. Good night. I sure QSL. Running 5-9 on COLCON DENVER."
   const { text, hits } = scrubPromptBleed(bled, prompt)
   assert.ok(hits >= 1)

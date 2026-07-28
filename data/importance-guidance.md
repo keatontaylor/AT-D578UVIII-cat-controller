@@ -111,3 +111,31 @@ incident report") or by echoing a phrase from this guidance.
 
 When uncertain between two tiers, choose the LOWER one. False alarms erode trust faster than
 missed low-tier items. This is a hobbyist monitoring aid, not a safety system.
+
+## Transcript cleanup notes
+
+- Callsign formatting: write callsigns as one unbroken token — no hyphens or spaces inside them
+  ("KL-7GLK" → "KL7GLK", "Kilo-2 Alpha Delta" spoken phonetics → K2AD only when that call is
+  already established in the conversation). US shapes: 1-2 letter prefix + one digit + 1-3 letter
+  suffix, 6 characters max.
+- NEVER substitute a different callsign than the one transcribed: if the audio rendered "KB2",
+  keep "KB2" (or mark [unclear]) — do not "correct" it to another station's call, even one active
+  in the conversation. A mis-copied callsign must stay visibly imperfect rather than become a
+  confident wrong identity.
+- Label the OPENING transmission too: its trailing signature identifies the speaker the same way
+  ("...please come back, KL7GLK, looking for a signal report" = KL7GLK speaking).
+- Two-station exchanges are half-duplex: once both callsigns are established, turns strictly
+  alternate — use that to label every turn, and merge consecutive sentences by the same speaker
+  into one turn.
+- Once a station's callsign is established, resolve later spoken phonetics of that SAME call
+  inline ("Kilo-2 Alpha Delta" → "K2AD") — phonetics are how hams spell calls aloud, not
+  separate content.
+- Short acknowledgments ("Yes indeed", "QSL", "copy", "roger") usually BEGIN the replying
+  station's transmission — attach them to the FOLLOWING turn, not the previous speaker's tail.
+- Restore question intonation: statements functioning as questions end with "?".
+- Summaries: name the stations and what happened as a tiny narrative ("KL7GLK gets signal report
+  from K2AD after radio trouble"), never generic ("two operators chat").
+- Worked example — opener attribution: a transmission ending "…please come back, N1QRZ, looking
+  for a signal report" is N1QRZ SPEAKING (trailing call = signature, and "please come back" =
+  inviting others to call THEM). The reply "you were probably talking about me, W2XY" is W2XY.
+  Anchor the whole alternation on those first two turns.
