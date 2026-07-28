@@ -467,7 +467,10 @@ export class Transcriber {
           this.log(`transcriber: ${rung.name} quota (retry-after ${e.retryAfterS}s) — trying next rung`)
         } else {
           allQuota = false
-          this.log(`transcriber: scoring failed on ${rung.name}: ${(e as Error).message} — trying next rung`)
+          // Non-quota failure (bad key, 402 unpaid plan, outage): cool the rung off so every
+          // flush doesn't re-attempt a broken provider; it re-proves itself every 10 min.
+          this.starved.set(rung.name, this.now() + 600_000)
+          this.log(`transcriber: scoring failed on ${rung.name}: ${(e as Error).message} — trying next rung (cooling 10m)`)
         }
       }
     }
