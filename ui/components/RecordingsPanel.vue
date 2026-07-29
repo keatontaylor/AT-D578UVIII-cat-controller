@@ -192,33 +192,68 @@ const liveSelected = computed<RecordingClip | null>(() => {
 const playingLive = ref(false) // the loaded src is a live snapshot (vs canonical file)
 const waiting = ref(false) // caught up to the live edge — auto-resume on new traffic
 let liveRefreshTimer: number | undefined
+let lastLiveLoad = 0
+// Trail the air by this much when entering at the live edge: the snapshot loop's runway between
+// refreshes equals your lag, so too little lag = constant stalls at the edge.
+const LIVE_LAG_S = 8
+// Continuous playback (auto-advance to the next clip / wait at the live edge) vs single-clip.
+const CONT_KEY = 'anytone.rec.continuous'
+const continuous = ref(localStorage.getItem(CONT_KEY) !== '0')
+function toggleContinuous(): void {
+  continuous.value = !continuous.value
+  localStorage.setItem(CONT_KEY, continuous.value ? '1' : '0')
+  if (!continuous.value) waiting.value = false
+}
 const liveUrl = (id: string): string => `${import.meta.env.BASE_URL}recordings/${id}/live.wav?t=${Date.now()}`
 
-function playLive(clip: LiveRecording, offsetSec = 0): void {
+function playLive(clip: LiveRecording, offsetSec?: number): void {
   const audio = playerRef.value
   if (!audio) return
+  // default entry point trails the live edge by LIVE_LAG_S for refresh runway
+  const offset = offsetSec ?? Math.max(0, (now.value - clip.startedAt) / 1000 - LIVE_LAG_S)
   waiting.value = false
   playingLive.value = true
   playingId.value = clip.id
   selectedId.value = clip.id
   notePlayed(clip as unknown as RecordingClip)
-  posSec.value = offsetSec
-  cursorTime.value = clip.startedAt + offsetSec * 1000
+  posSec.value = offset
+  cursorTime.value = clip.startedAt + offset * 1000
+  lastLiveLoad = Date.now()
   audio.src = liveUrl(clip.id)
   audio.load()
+  const seekTo = Math.max(0, offset)
   const begin = (): void => {
     audio.removeEventListener('loadedmetadata', begin)
-    try {
-      audio.currentTime = Math.max(0, offsetSec)
-    } catch { /* pre-metadata seek */ }
+    try { audio.currentTime = seekTo } catch { /* pre-metadata seek */ }
     audio.play().then(() => (playing.value = true)).catch(() => (playing.value = false))
   }
+  // Seek VERIFICATION: browsers sometimes drop a seek issued before data at that offset is
+  // buffered and restart at 0 — re-issue once playable if we landed short.
+  const verify = (): void => {
+    audio.removeEventListener('canplay', verify)
+    if (seekTo > 1 && audio.currentTime < seekTo - 1) {
+      try { audio.currentTime = seekTo } catch { /* give up — plays from where it landed */ }
+    }
+  }
+  audio.addEventListener('canplay', verify)
   if (audio.readyState >= 1) begin()
   else audio.addEventListener('loadedmetadata', begin)
 }
 function jumpToLive(): void {
   const c = liveRecordings.value.find((x) => x.id === selectedId.value) ?? liveRecordings.value.find((x) => passesFilters(x as unknown as RecordingClip))
-  if (c) playLive(c, Math.max(0, (now.value - c.startedAt) / 1000 - 2))
+  if (c) playLive(c)
+}
+/** Near the end of the current snapshot with the clip still recording → refresh EARLY (from
+ * timeupdate, not ended) so the reload+seek happens while audio still plays: no hard stall. */
+function maybeRefreshLive(): void {
+  const audio = playerRef.value
+  const id = playingId.value
+  if (!audio || !playingLive.value || !id || !isLiveId(id) || !playing.value) return
+  if (!Number.isFinite(audio.duration) || audio.duration <= 0) return
+  if (audio.duration - audio.currentTime < 2.5 && Date.now() - lastLiveLoad > 4000) {
+    const c = liveRecordings.value.find((x) => x.id === id)
+    if (c) playLive(c, audio.currentTime)
+  }
 }
 
 function playClip(clip: RecordingClip, offsetSec = 0): void {
@@ -274,31 +309,47 @@ function playNext(): void {
   // …otherwise WAIT at the live edge: the resume watcher takes it from here.
   pause()
   playingId.value = null
-  waiting.value = true
+  waiting.value = continuous.value
 }
 function onEnded(): void {
   const id = playingId.value
   if (playingLive.value && id) {
+    const at = playerRef.value?.currentTime ?? posSec.value
     if (isLiveId(id)) {
-      // still recording — refresh the snapshot and resume where we left off (throttled)
-      const at = posSec.value
+      // still recording but we outran the snapshot — brief pause, then resume at the same spot
       const c = liveRecordings.value.find((x) => x.id === id)
       window.clearTimeout(liveRefreshTimer)
       liveRefreshTimer = window.setTimeout(() => {
         if (c && isLiveId(id) && playingId.value === id) playLive(c, at)
         else onEnded()
-      }, 2500)
+      }, 1500)
       return
     }
     const saved = recordings.value.find((c) => c.id === id)
     if (saved) {
       // clip finalized — swap to the canonical file for the tail we haven't heard yet
       playingLive.value = false
-      return playClip(saved, posSec.value)
+      return playClip(saved, at)
     }
+    // finalize push hasn't landed yet — retry shortly instead of falling into playNext
+    window.clearTimeout(liveRefreshTimer)
+    liveRefreshTimer = window.setTimeout(onEnded, 300)
+    return
   }
+  if (!continuous.value) { pause(); return } // single-clip mode: stop at the end
   playNext() // continuous: roll into the next clip
 }
+// Prompt canonical swap on finalize: don't wait for the snapshot to run out — the moment the
+// saved push lands for the clip we're live-playing, switch to the full file at the same spot.
+watch(recordings, () => {
+  const id = playingId.value
+  if (!playingLive.value || !id || isLiveId(id)) return
+  const saved = recordings.value.find((c) => c.id === id)
+  if (saved) {
+    playingLive.value = false
+    playClip(saved, playerRef.value?.currentTime ?? posSec.value)
+  }
+})
 // The wait-at-edge resume: any new live clip or saved clip that passes the filters restarts the
 // DVR chain exactly where it left off (the cursor's forward position).
 watch([liveRecordings, recordings], () => {
@@ -310,6 +361,7 @@ watch([liveRecordings, recordings], () => {
   if (next && clipEnd(next) > after) playClip(next, Math.max(0, (after - next.startedAt) / 1000))
 })
 function onTimeupdate(): void {
+  maybeRefreshLive()
   const audio = playerRef.value
   const clip = recordings.value.find((c) => c.id === playingId.value) ?? liveRecordings.value.find((c) => c.id === playingId.value)
   if (audio && clip) {
@@ -853,6 +905,14 @@ onBeforeUnmount(() => {
           <button class="btn btn-ghost btn-sm" :disabled="!playable.length" title="Next clip" @click="playNext">
             <svg class="rec-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l8.5 6L6 18V6zM16 6h2v12h-2z" /></svg>
           </button>
+          <button
+            class="btn btn-ghost btn-sm rec-cont"
+            :class="{ 'rec-cont--on': continuous }"
+            :title="continuous ? 'Continuous: auto-advance through clips and wait for new traffic (click for single-clip)' : 'Single clip: stop when the selected clip ends (click for continuous)'"
+            @click="toggleContinuous"
+          >
+            <svg class="rec-icon rec-icon--stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3l4 4-4 4M21 7H8a5 5 0 00-5 5M7 21l-4-4 4-4M3 17h13a5 5 0 005-5" /></svg>
+          </button>
         </span>
         <div class="rec-player-info">
           <template v-if="selected">
@@ -1076,6 +1136,8 @@ onBeforeUnmount(() => {
 /* ── TRANSCRIPT — below the scrubber; long net transcripts scroll inside the block ── */
 .rec-transcript { border-top: 1px solid var(--border, #30363d); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
 .rec-pill--live { background: #da3633; color: #fff; animation: rec-pulse 1.6s ease-in-out infinite; }
+.rec-cont { opacity: 0.45; }
+.rec-cont--on { opacity: 1; color: var(--accent, #58a6ff); }
 .rec-block--rec, .rec-feed-live { cursor: pointer; }
 .rec-player-waiting { animation: rec-pulse 1.6s ease-in-out infinite; }
 .rec-live-jump { color: #f85149; }
