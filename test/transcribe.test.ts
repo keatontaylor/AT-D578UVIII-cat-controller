@@ -215,3 +215,32 @@ test('scrubPromptBleed: excises >=4-word primer runs incl. channel-woven fragmen
   const real = 'This is KE0ABC, I am running 5 watts from a handheld today.'
   assert.equal(scrubPromptBleed(real, prompt).hits, 0, 'ordinary speech with overlapping words survives')
 })
+
+test('budget reserve: the last slice of the day serves learner-ranked channels only', async () => {
+  const { svc, dir, calls, clock } = rig()
+  // burn the day down into the reserve (cap 28_600 → reserve starts at 24_310)
+  ;(svc as unknown as { state: { day?: string; daySec?: number; hour?: string; hourSec?: number } }).state = {
+    day: new Date(clock.t).toISOString().slice(0, 10),
+    daySec: 24_500,
+    hour: new Date(clock.t).toISOString().slice(0, 13),
+    hourSec: 0,
+  }
+  const unranked = clip(dir, 'scanner', makeWav(0, 4, 0), { channelName: 'RANDOM SCAN' })
+  svc.onClipSaved(unranked)
+  await svc.tick()
+  assert.equal(calls.length, 0, 'unranked channel held out of the reserve')
+  assert.equal(svc.statusOf('scanner'), 'deferred')
+
+  // a channel the operator engages with still gets through
+  svc.noteEngagement('ptt', 'COLCON DENVER')
+  const ranked = clip(dir, 'ranked', makeWav(0, 4, 0), { channelName: 'COLCON DENVER' })
+  svc.onClipSaved(ranked)
+  await svc.tick()
+  assert.equal(calls.length, 1, 'learner-ranked channel spends the reserve')
+  assert.equal(svc.statusOf('ranked'), 'done')
+
+  // and an explicit force always wins
+  svc.transcribeNow(unranked)
+  await svc.tick()
+  assert.equal(calls.length, 2, 'forced clip ignores the reserve')
+})

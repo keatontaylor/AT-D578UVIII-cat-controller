@@ -66,6 +66,9 @@ interface QueueItem {
   forced: boolean
   attempts: number
   deferred: boolean
+  /** Per-item hold (reserve deferral) — unlike the shared resumeAt this must NOT gate the rest of
+   * the queue: the whole point is that priority traffic keeps flowing. */
+  holdUntil?: number
 }
 
 interface PersistedState {
@@ -94,12 +97,17 @@ export function isJunkTranscript(text: string, flags: readonly string[]): boolea
   if (t.length < 15 && flags.includes('low-confidence')) return true
   return false
 }
+const RESERVE_FRAC = Number(process.env['ANYTONE_TRANSCRIBE_RESERVE'] ?? 0.15) // last 15% = learner-ranked channels only
 const MIN_SPEECH_MS = 1000 // post-VAD: less than this much speech energy → nothing to transcribe
 const MAX_ATTEMPTS = 3
 const DEFAULTS = {
   model: 'whisper-large-v3-turbo',
-  dailySecCap: Number(process.env['ANYTONE_TRANSCRIBE_DAILY_S'] ?? 27_000), // free tier 28.8k − margin
-  hourlySecCap: Number(process.env['ANYTONE_TRANSCRIBE_HOURLY_S'] ?? 6_800), // free tier 7.2k − margin
+  // Caps sit just under Groq's real free-tier ceilings (28.8k audio-s/day, 7.2k/hour). The old
+  // 27k/6.8k margins benched the pipeline with ~31 min of quota unused (field: stopped at 26,958 s
+  // with ZERO 429s all day) — pointless, since a real 429 defers exactly like a local cap does.
+  // Let Groq's own refusal be the stop signal.
+  dailySecCap: Number(process.env['ANYTONE_TRANSCRIBE_DAILY_S'] ?? 28_600),
+  hourlySecCap: Number(process.env['ANYTONE_TRANSCRIBE_HOURLY_S'] ?? 7_100),
   dailyReqCap: Number(process.env['ANYTONE_TRANSCRIBE_DAILY_REQ'] ?? 1_800),
   tickMs: 4_000,
 }
@@ -362,7 +370,10 @@ export class Transcriber {
 
   statusOf(id: string): TranscriptStatus | null {
     const q = this.queue.get(id)
-    if (q) return q.deferred && this.now() < this.resumeAt ? 'deferred' : 'queued'
+    if (q) {
+      const held = (q.holdUntil !== undefined && this.now() < q.holdUntil) || (q.deferred && this.now() < this.resumeAt)
+      return held ? 'deferred' : 'queued'
+    }
     const side = this.sidecar(id)
     return side ? side.status : null
   }
@@ -596,7 +607,8 @@ export class Transcriber {
     let best: QueueItem | null = null
     let bestKey: [number, number, number] | null = null
     for (const item of this.queue.values()) {
-      if (item.deferred && this.now() < this.resumeAt) continue
+      if (item.holdUntil !== undefined && this.now() < item.holdUntil) continue
+      if (item.deferred && item.holdUntil === undefined && this.now() < this.resumeAt) continue
       const key: [number, number, number] = [
         item.forced ? 1 : 0,
         this.learner.scoreOf(item.clip.channelName ?? ''),
@@ -635,6 +647,19 @@ export class Transcriber {
     }
     const plan = trimPlan(profile) ?? { startMs: 0, endMs: profile.durationMs }
     const billedS = (plan.endMs - plan.startMs) / 1000
+    // RESERVE: the last slice of the daily budget is spent only on channels the learner actually
+    // ranks (or forced clips) — otherwise a busy scanner morning eats the tank first-come and the
+    // channels you engage with go untranscribed all evening. Deferred, not dropped: low-priority
+    // clips drain after the UTC reset like any other backlog.
+    if (!item.forced && this.inReserve(billedS) && this.learner.scoreOf(clip.channelName ?? '') <= 0) {
+      if (!item.deferred) {
+        item.deferred = true
+        this.emit({ id: clip.id, status: 'deferred' })
+        this.log(`transcriber: budget reserve — holding unranked ${clip.channelName ?? '?'} clip for priority traffic`)
+      }
+      item.holdUntil = this.nextHourStart() // per-item: priority clips still flow
+      return
+    }
     if (!this.budgetAllows(billedS)) {
       if (!item.deferred) {
         item.deferred = true
@@ -766,7 +791,8 @@ export class Transcriber {
     const wanted = ids ? new Set(ids) : null
     for (const [id, item] of this.queue) {
       if (wanted && !wanted.has(id)) continue
-      out[id] = { status: item.deferred && this.now() < this.resumeAt ? 'deferred' : 'queued' }
+      const held = (item.holdUntil !== undefined && this.now() < item.holdUntil) || (item.deferred && this.now() < this.resumeAt)
+      out[id] = { status: held ? 'deferred' : 'queued' }
     }
     return out
   }
@@ -792,6 +818,12 @@ export class Transcriber {
       this.state.hour = this.hourKey()
       this.state.hourSec = 0
     }
+  }
+  /** True when spending `sec` would dip into the day's priority reserve (last RESERVE_FRAC). */
+  private inReserve(sec: number): boolean {
+    this.roll()
+    const cap = DEFAULTS.dailySecCap
+    return (this.state.daySec ?? 0) + sec > cap * (1 - RESERVE_FRAC)
   }
   private budgetAllows(sec: number): boolean {
     this.roll()
