@@ -428,6 +428,25 @@ async function remove(id: string): Promise<void> {
   }
 }
 
+// Transcript callsign linkify: US-format calls (1-2 letter prefix starting A/K/N/W + digit +
+// 1-3 letter suffix — the callsign grammar) become QRZ.com lookups. Split into text/link
+// segments and render as elements — never v-html (transcripts are model output).
+const CALLSIGN_RE = /\b[AKNW][A-Z]?\d[A-Z]{1,3}\b/g
+const transcriptSegs = computed<{ text: string; call?: string }[]>(() => {
+  const t = transcript.value
+  if (!t) return []
+  const text = (showRaw.value ? t.text : (t.cleanText || t.text)) ?? ''
+  const segs: { text: string; call?: string }[] = []
+  let pos = 0
+  for (const m of text.matchAll(CALLSIGN_RE)) {
+    if (m.index! > pos) segs.push({ text: text.slice(pos, m.index) })
+    segs.push({ text: m[0], call: m[0] })
+    pos = m.index! + m[0].length
+  }
+  if (pos < text.length) segs.push({ text: text.slice(pos) })
+  return segs
+})
+
 // Deep link (?clip=<id>) — the push-notification click-through: load + play that clip as soon as
 // the panel mounts with the list hydrated, and scroll the panel into view (it sits below the VFO
 // cards). The param is stripped after handling so a manual reload doesn't replay it. Autoplay may
@@ -694,7 +713,14 @@ onBeforeUnmount(() => {
         </div>
         <div v-else-if="transcript?.summary" class="rec-summary">{{ transcript.summary }}</div>
         <template v-if="transcript?.status === 'done' && transcript.text">
-          <p class="rec-transcript-text">{{ showRaw ? transcript.text : (transcript.cleanText || transcript.text) }}</p>
+          <p class="rec-transcript-text"><template v-for="(seg, i) in transcriptSegs" :key="i"><a
+            v-if="seg.call"
+            class="rec-callsign"
+            :href="`https://www.qrz.com/db/${seg.call}`"
+            target="_blank"
+            rel="noopener noreferrer"
+            :title="`${seg.call} on QRZ`"
+          >{{ seg.text }}</a><span v-else>{{ seg.text }}</span></template></p>
           <div class="rec-transcript-foot">
             <span v-if="transcript.flags?.length" class="rec-transcript-flags" :title="'Transcription confidence flags: ' + transcript.flags.join(', ')">{{ transcript.flags.join(' · ') }}</span>
             <button v-if="transcript.cleanText" class="rec-transcript-raw" :title="showRaw ? 'Show the cleaned transcript' : 'Show the raw Whisper transcript'" @click="showRaw = !showRaw">{{ showRaw ? 'cleaned' : 'raw' }}</button>
@@ -832,6 +858,10 @@ onBeforeUnmount(() => {
 
 /* ── TRANSCRIPT — below the scrubber; long net transcripts scroll inside the block ── */
 .rec-transcript { border-top: 1px solid var(--border, #30363d); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.rec-callsign {
+  color: var(--accent, #58a6ff); text-decoration: none; border-bottom: 1px dotted currentColor;
+}
+.rec-callsign:hover { text-decoration: none; border-bottom-style: solid; }
 .rec-transcript-text {
   margin: 0; font-size: 0.85rem; line-height: 1.45; color: var(--text, #e6edf3);
   white-space: pre-wrap; user-select: text; max-height: 9.5em; overflow-y: auto;
