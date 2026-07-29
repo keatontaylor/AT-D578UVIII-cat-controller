@@ -102,7 +102,7 @@ function rig(opts: { result?: () => GroqResult; failWith?: Error } = {}): Rig {
         segments: [{ startS: 0.5, endS: 2.5, text: 'This is K0BUL, Tom in Colorado Springs.' }],
         avgLogprob: -0.2,
         maxNoSpeechProb: 0.05,
-        apiMs: 300,
+        apiMs: 300, limits: { remainingS: null, limitS: null, resetS: null, remainingReq: null },
       }
     },
   })
@@ -150,7 +150,7 @@ test('service: speech clip → done sidecar with trim-offset segments (empty pro
 
 test('service: empty transcript → skipped (echo guard dormant with no primer)', async () => {
   const { svc, dir } = rig({
-    result: () => ({ text: '', segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 100 }),
+    result: () => ({ text: '', segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 100 , limits: { remainingS: null, limitS: null, resetS: null, remainingReq: null },}),
   })
   svc.onClipSaved(clip(dir, 'echo', makeWav(0, 4, 0)))
   await svc.tick()
@@ -194,7 +194,7 @@ test('service: rescan re-queues unsidecared clips after the enable marker', asyn
   const c2 = clip(dir, 'missed', makeWav(0, 4, 0), { startedAt: Date.UTC(2026, 6, 26, 12, 30) })
   const svc2 = new Transcriber({
     dir, recorderEnabled: () => true, now: () => Date.UTC(2026, 6, 26, 13, 0), keyFn: () => 'k',
-    startTimer: false, transcribeFn: async () => ({ text: 'x', segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 1 }),
+    startTimer: false, transcribeFn: async () => ({ text: 'x', segments: [], avgLogprob: null, maxNoSpeechProb: null, apiMs: 1 , limits: { remainingS: null, limitS: null, resetS: null, remainingReq: null },}),
   })
   svc2.rescan([c1, c2])
   assert.equal(svc2.statusOf('seen'), 'done', 'sidecared clip not re-queued')
@@ -243,4 +243,30 @@ test('budget reserve: the last slice of the day serves learner-ranked channels o
   svc.transcribeNow(unranked)
   await svc.tick()
   assert.equal(calls.length, 2, 'forced clip ignores the reserve')
+})
+
+test('audio budget follows Groq headers: bucket gates spending and sets a short resume', async () => {
+  const { svc, dir, calls, clock } = rig({
+    result: () => ({
+      text: 'a real transcript of some radio traffic here',
+      segments: [], avgLogprob: -0.2, maxNoSpeechProb: 0.05, apiMs: 10,
+      // Groq reports a nearly-dry audio bucket (leaky, ~7200 ceiling)
+      limits: { remainingS: 121, limitS: 7200, resetS: 30, remainingReq: 1500 }, // floor is 120s
+    }),
+  })
+  svc.noteEngagement('ptt', 'COLCON DENVER') // rank it so the priority reserve isn't the gate here
+  svc.onClipSaved(clip(dir, 'first', makeWav(0, 4, 0), { channelName: 'COLCON DENVER' }))
+  await svc.tick()
+  assert.equal(calls.length, 1, 'first clip runs (no reading yet — local caps apply)')
+
+  // now the tracker knows the bucket is ~130s: the next clip must not spend it (floor 120s)
+  svc.onClipSaved(clip(dir, 'second', makeWav(0, 4, 0), { channelName: 'COLCON DENVER' }))
+  await svc.tick()
+  assert.equal(calls.length, 1, 'held: the reported bucket cannot cover the clip above the floor')
+  assert.equal(svc.statusOf('second'), 'deferred')
+
+  // the leaky bucket refills ~2 audio-s per wall-clock second → a SHORT wait, not the next hour
+  clock.t += 120_000
+  await svc.tick()
+  assert.equal(calls.length, 2, 'resumed after the bucket refilled (minutes, not an hour)')
 })

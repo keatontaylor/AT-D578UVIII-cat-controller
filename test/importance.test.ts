@@ -85,7 +85,7 @@ function rig(chat: ChatClient, extra: { notifier?: { notify(n: unknown): void };
     transcribeFn: async () => ({
       text: 'This is K0BUL with a funnel cloud report near Longmont, wall cloud rotating to the northeast, requesting SKYWARN net control acknowledge.',
       segments: [{ startS: 0.2, endS: 3, text: 'This is K0BUL with a funnel cloud report near Longmont.' }],
-      avgLogprob: -0.2, maxNoSpeechProb: 0.05, apiMs: 100,
+      avgLogprob: -0.2, maxNoSpeechProb: 0.05, apiMs: 100, limits: { remainingS: null, limitS: null, resetS: null, remainingReq: null },
     }),
   })
   svc.subscribe((e) => events.push(e))
@@ -236,7 +236,7 @@ test('transcriber: minute token budget splits oversized batches across windows (
   })
   // override the fake transcription to return an enormous text
   ;(svc as unknown as { doTranscribe: unknown }).doTranscribe = async () => ({
-    text: big, segments: [], avgLogprob: -0.1, maxNoSpeechProb: 0.01, apiMs: 1,
+    text: big, segments: [], avgLogprob: -0.1, maxNoSpeechProb: 0.01, apiMs: 1, limits: { remainingS: null, limitS: null, resetS: null, remainingReq: null },
   })
   saveClip(svc, dir, 'big1', 10)
   await svc.tick()
@@ -342,7 +342,7 @@ test('junk transcripts never enter a scoring batch (but keep their sidecar)', as
   let chatCalls = 0
   const { svc, dir, clock } = rig({ complete: async () => { chatCalls++; return reply('{"scores":[]}') } })
   ;(svc as unknown as { doTranscribe: unknown }).doTranscribe = async () => ({
-    text: 'BELL RINGS', segments: [], avgLogprob: -0.9, maxNoSpeechProb: 0.8, apiMs: 1,
+    text: 'BELL RINGS', segments: [], avgLogprob: -0.9, maxNoSpeechProb: 0.8, apiMs: 1, limits: { remainingS: null, limitS: null, resetS: null, remainingReq: null },
   })
   saveClip(svc, dir, 'j1')
   await svc.tick()

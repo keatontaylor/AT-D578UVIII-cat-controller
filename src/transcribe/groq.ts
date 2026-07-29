@@ -16,6 +16,10 @@ export interface GroqResult {
   readonly avgLogprob: number | null
   readonly maxNoSpeechProb: number | null
   readonly apiMs: number
+  /** Groq's OWN view of the audio-seconds bucket after this request (x-ratelimit-* headers) —
+   * authoritative, so the caller paces on this instead of guessing. Measured shape: a ~7200 s
+   * LEAKY bucket refilling ≈2 audio-s per wall-clock second (no daily audio header exists). */
+  readonly limits: { remainingS: number | null; limitS: number | null; resetS: number | null; remainingReq: number | null }
 }
 
 /** Thrown on 429 / daily-quota exhaustion — the caller defers rather than fails. */
@@ -129,7 +133,25 @@ export async function transcribe(wav: Buffer, opts: GroqOptions): Promise<GroqRe
     avgLogprob: segs.length ? segs.reduce((a, s) => a + s.avg_logprob, 0) / segs.length : null,
     maxNoSpeechProb: segs.length ? Math.max(...segs.map((s) => s.no_speech_prob)) : null,
     apiMs: Date.now() - t0,
+    limits: {
+      remainingS: numHeader(res.headers.get('x-ratelimit-remaining-audio-seconds')),
+      limitS: numHeader(res.headers.get('x-ratelimit-limit-audio-seconds')),
+      resetS: durHeader(res.headers.get('x-ratelimit-reset-audio-seconds')),
+      remainingReq: numHeader(res.headers.get('x-ratelimit-remaining-requests')),
+    },
   }
+}
+
+function numHeader(v: string | null): number | null {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+/** Groq reset headers are durations like "10.5s", "2m59.56s", "1h". */
+function durHeader(v: string | null): number | null {
+  if (!v) return null
+  const m = /^(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?$/.exec(v.trim())
+  if (!m || (!m[1] && !m[2] && !m[3])) return numHeader(v)
+  return (Number(m[1] ?? 0) * 3600) + (Number(m[2] ?? 0) * 60) + Number(m[3] ?? 0)
 }
 
 // ── Chat completion (importance scoring) — same key/base, separate chat quota. ────────────────

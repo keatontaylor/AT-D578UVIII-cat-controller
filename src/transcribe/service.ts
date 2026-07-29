@@ -97,6 +97,8 @@ export function isJunkTranscript(text: string, flags: readonly string[]): boolea
   if (t.length < 15 && flags.includes('low-confidence')) return true
   return false
 }
+const BUCKET_REFILL_RATE = 2 // audio-seconds refilled per wall-clock second (measured)
+const BUCKET_FLOOR_S = 120 // keep a little headroom so a forced clip can always squeeze in
 const RESERVE_FRAC = Number(process.env['ANYTONE_TRANSCRIBE_RESERVE'] ?? 0.15) // last 15% = learner-ranked channels only
 const MIN_SPEECH_MS = 1000 // post-VAD: less than this much speech energy → nothing to transcribe
 const MAX_ATTEMPTS = 3
@@ -251,6 +253,12 @@ export class Transcriber {
   private state: PersistedState = {}
   private busy = false
   private resumeAt = 0
+  /** Groq's OWN audio-bucket reading from the last response (authoritative). The bucket is leaky
+   * (~2 audio-s refilled per wall-clock second, ~7200 s ceiling), so we track the reported
+   * remainder and decay it forward rather than maintaining a fictional daily tank. */
+  private bucketS: number | null = null
+  private bucketAt = 0
+  private bucketLimitS: number | null = null
   private timer: ReturnType<typeof setInterval> | null = null
   private readonly now: () => number
   private readonly log: (m: string) => void
@@ -664,9 +672,16 @@ export class Transcriber {
       if (!item.deferred) {
         item.deferred = true
         this.emit({ id: clip.id, status: 'deferred' })
-        // one shared resume point: the next UTC hour (hourly window) — the tick re-evaluates
-        this.resumeAt = this.nextHourStart()
-        this.log(`transcriber: budget exhausted — deferring (resume ${new Date(this.resumeAt).toISOString()})`)
+        // With a real bucket reading, wait only long enough for it to refill this clip (leaky
+        // bucket, ~2 audio-s/s) — minutes, not the next UTC hour. No reading yet → hour boundary.
+        const bucket = this.bucketNow()
+        if (bucket !== null) {
+          const needS = Math.max(0, billedS + BUCKET_FLOOR_S - bucket) / BUCKET_REFILL_RATE
+          this.resumeAt = this.now() + Math.min(Math.max(15, Math.ceil(needS)), 900) * 1000
+        } else {
+          this.resumeAt = this.nextHourStart()
+        }
+        this.log(`transcriber: audio budget low${bucket !== null ? ` (${Math.round(bucket)}s left of ${this.bucketLimitS ?? '?'})` : ''} — deferring (resume ${new Date(this.resumeAt).toISOString()})`)
       }
       return
     }
@@ -694,6 +709,7 @@ export class Transcriber {
       return
     }
     this.spend(billedS)
+    this.noteLimits(result.limits)
     const prompt = buildPrompt(clip.channelName || null, clip.talkgroupName ?? null)
     // Runtime bleed scrub: primer fragments excised BEFORE anything downstream (junk gate,
     // recurrence history, cleanup, scoring) can absorb them.
@@ -822,11 +838,35 @@ export class Transcriber {
   /** True when spending `sec` would dip into the day's priority reserve (last RESERVE_FRAC). */
   private inReserve(sec: number): boolean {
     this.roll()
-    const cap = DEFAULTS.dailySecCap
-    return (this.state.daySec ?? 0) + sec > cap * (1 - RESERVE_FRAC)
+    const bucket = this.bucketNow()
+    if (bucket !== null && this.bucketLimitS !== null) {
+      return bucket - sec < this.bucketLimitS * RESERVE_FRAC // low on real capacity
+    }
+    return (this.state.daySec ?? 0) + sec > DEFAULTS.dailySecCap * (1 - RESERVE_FRAC)
+  }
+  /** Bucket estimate NOW: last reported remainder + leaky refill since, clamped to the ceiling. */
+  private bucketNow(): number | null {
+    if (this.bucketS === null) return null
+    const refill = ((this.now() - this.bucketAt) / 1000) * BUCKET_REFILL_RATE
+    const est = this.bucketS + refill
+    return this.bucketLimitS !== null ? Math.min(est, this.bucketLimitS) : est
+  }
+  /** Fold a response's rate-limit headers into the tracker. */
+  private noteLimits(l: GroqResult['limits']): void {
+    if (l.remainingS === null) return
+    this.bucketS = l.remainingS
+    this.bucketAt = this.now()
+    if (l.limitS !== null) this.bucketLimitS = l.limitS
   }
   private budgetAllows(sec: number): boolean {
     this.roll()
+    const bucket = this.bucketNow()
+    if (bucket !== null) {
+      // AUTHORITATIVE path: Groq reports the audio-seconds bucket on every response. Spend while
+      // the clip fits with a small floor; a real 429 (handled in process()) remains the backstop.
+      // The invented daily/hourly caps only apply until the first response teaches us the truth.
+      return bucket - sec >= BUCKET_FLOOR_S && (this.state.dayReq ?? 0) + 1 <= DEFAULTS.dailyReqCap
+    }
     return (
       (this.state.daySec ?? 0) + sec <= DEFAULTS.dailySecCap &&
       (this.state.hourSec ?? 0) + sec <= DEFAULTS.hourlySecCap &&
