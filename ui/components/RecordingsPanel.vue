@@ -447,6 +447,99 @@ const transcriptSegs = computed<{ text: string; call?: string }[]>(() => {
   return segs
 })
 
+// ── Callsign info card: CORS fetch straight from the BROWSER to callook.info (free FCC mirror,
+// Access-Control-Allow-Origin:*) — the Pi never proxies or stores anything. Plain click/tap =
+// card (href stays qrz.com so cmd/middle-click and iOS long-press keep a native fast path);
+// hover-capable devices also get a transient preview. Wide = anchored popover, narrow = bottom
+// sheet. localStorage cache 30d incl. negative results — one lookup per call per browser.
+interface CallInfo { name?: string; opClass?: string; city?: string; grid?: string; prev?: string; found: boolean }
+const CALL_CACHE_TTL = 30 * 24 * 3600_000
+const callCard = ref<{ call: string; pinned: boolean; data: CallInfo | null; loading: boolean } | null>(null)
+const callCardStyle = ref<Record<string, string>>({})
+const canHover = window.matchMedia('(hover: hover)').matches
+const inflight = new Map<string, Promise<CallInfo>>()
+let hoverTimer: number | undefined
+
+const titleCase = (s: string): string => s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase())
+function parseCallook(j: Record<string, any>): CallInfo {
+  if (j['status'] !== 'VALID') return { found: false }
+  const line2: string = j['address']?.line2 ?? ''
+  const m = /^(.*?),?\s+([A-Z]{2})\s+\d{5}/.exec(line2)
+  return {
+    found: true,
+    name: j['name'] ? titleCase(j['name']) : undefined,
+    opClass: j['current']?.operClass ? titleCase(j['current'].operClass) : undefined,
+    city: m ? `${titleCase(m[1]!)}, ${m[2]}` : undefined,
+    grid: j['location']?.gridsquare || undefined,
+    prev: j['previous']?.callsign || undefined,
+  }
+}
+function lookupCall(call: string): Promise<CallInfo> {
+  const key = `anytone.call.v1.${call}`
+  try {
+    const c = JSON.parse(localStorage.getItem(key) ?? 'null')
+    if (c && Date.now() - c.t < CALL_CACHE_TTL) return Promise.resolve(c.d as CallInfo)
+  } catch { /* corrupt cache entry — refetch */ }
+  const inf = inflight.get(call)
+  if (inf) return inf
+  const p = fetch(`https://callook.info/${encodeURIComponent(call)}/json`, { signal: AbortSignal.timeout(8000) })
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+    .then((j) => {
+      const d = parseCallook(j)
+      try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), d })) } catch { /* storage full */ }
+      return d
+    })
+    .finally(() => inflight.delete(call))
+  inflight.set(call, p)
+  return p
+}
+function placeCard(target: HTMLElement): void {
+  if (narrow.value) { callCardStyle.value = {}; return } // bottom sheet positions via CSS
+  const r = target.getBoundingClientRect()
+  const below = r.bottom + 190 < window.innerHeight
+  callCardStyle.value = {
+    left: `${Math.max(8, Math.min(r.left, window.innerWidth - 288))}px`,
+    ...(below ? { top: `${r.bottom + 6}px` } : { bottom: `${window.innerHeight - r.top + 6}px` }),
+  }
+}
+function openCard(call: string, target: HTMLElement, pinned: boolean): void {
+  window.clearTimeout(hoverTimer)
+  placeCard(target)
+  const cur = callCard.value
+  if (cur?.call === call) { cur.pinned = cur.pinned || pinned; return }
+  callCard.value = { call, pinned, data: null, loading: true }
+  void lookupCall(call).then((d) => {
+    if (callCard.value?.call === call) { callCard.value.data = d; callCard.value.loading = false }
+  }).catch(() => {
+    if (callCard.value?.call === call) callCard.value.loading = false // card degrades to call + QRZ
+  })
+}
+function closeCard(force = false): void {
+  if (callCard.value && (force || !callCard.value.pinned)) callCard.value = null
+}
+function onCallClick(e: MouseEvent, call: string): void {
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return // native QRZ path
+  e.preventDefault()
+  openCard(call, e.currentTarget as HTMLElement, true)
+}
+function onCallEnter(e: MouseEvent, call: string): void {
+  if (!canHover) return
+  const target = e.currentTarget as HTMLElement
+  window.clearTimeout(hoverTimer)
+  hoverTimer = window.setTimeout(() => openCard(call, target, false), 250)
+}
+function onCallLeave(): void {
+  window.clearTimeout(hoverTimer)
+  window.setTimeout(() => closeCard(), 300) // grace to move the pointer into the card
+}
+function onDocDown(e: Event): void {
+  const t = e.target as HTMLElement
+  if (!t.closest('.rec-callcard') && !t.closest('.rec-callsign')) closeCard(true)
+}
+function onDocKey(e: KeyboardEvent): void {
+  if (e.key === 'Escape') closeCard(true)
+}
+
 // Deep link (?clip=<id>) — the push-notification click-through: load + play that clip as soon as
 // the panel mounts with the list hydrated, and scroll the panel into view (it sits below the VFO
 // cards). The param is stripped after handling so a manual reload doesn't replay it. Autoplay may
@@ -487,6 +580,8 @@ watch(windowStart, (start) => {
 onMounted(async () => {
   ticker = window.setInterval(() => (now.value = Date.now()), 1000)
   mq.addEventListener('change', onMq)
+  document.addEventListener('pointerdown', onDocDown)
+  document.addEventListener('keydown', onDocKey)
   try {
     await radio.loadRecordings()
     await handleDeepLink()
@@ -497,6 +592,9 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.clearInterval(ticker)
   mq.removeEventListener('change', onMq)
+  document.removeEventListener('pointerdown', onDocDown)
+  document.removeEventListener('keydown', onDocKey)
+  window.clearTimeout(hoverTimer)
 })
 </script>
 
@@ -719,7 +817,10 @@ onBeforeUnmount(() => {
             :href="`https://www.qrz.com/db/${seg.call}`"
             target="_blank"
             rel="noopener noreferrer"
-            :title="`${seg.call} on QRZ`"
+            :title="`${seg.call}`"
+            @click="onCallClick($event, seg.call)"
+            @mouseenter="onCallEnter($event, seg.call)"
+            @mouseleave="onCallLeave"
           >{{ seg.text }}</a><span v-else>{{ seg.text }}</span></template></p>
           <div class="rec-transcript-foot">
             <span v-if="transcript.flags?.length" class="rec-transcript-flags" :title="'Transcription confidence flags: ' + transcript.flags.join(', ')">{{ transcript.flags.join(' · ') }}</span>
@@ -740,6 +841,35 @@ onBeforeUnmount(() => {
 
     <!-- Single hidden player drives continuous timeline playback (auto-advances via @ended). -->
     <audio ref="playerRef" class="rec-audio-hidden" preload="metadata" @timeupdate="onTimeupdate" @ended="onEnded" @pause="playing = false" @play="playing = true" />
+    <!-- Callsign info card: popover (desktop) / bottom sheet (narrow). Data fetched by the
+         BROWSER from callook.info (public FCC mirror) — see the script block. -->
+    <div
+      v-if="callCard"
+      class="rec-callcard"
+      :class="{ 'rec-callcard--sheet': narrow }"
+      :style="callCardStyle"
+      @mouseenter="callCard && (callCard.pinned = true)"
+    >
+      <div class="rec-callcard-head">
+        <a class="rec-callcard-call" :href="`https://www.qrz.com/db/${callCard.call}`" target="_blank" rel="noopener noreferrer">{{ callCard.call }}</a>
+        <button class="rec-callcard-close" aria-label="Close" @click="closeCard(true)">×</button>
+      </div>
+      <div v-if="callCard.loading" class="rec-callcard-body rec-callcard-dim">looking up…</div>
+      <div v-else-if="callCard.data?.found" class="rec-callcard-body">
+        <div v-if="callCard.data.name" class="rec-callcard-name">{{ callCard.data.name }}</div>
+        <div class="rec-callcard-meta">
+          <span v-if="callCard.data.opClass">{{ callCard.data.opClass }}</span>
+          <span v-if="callCard.data.city">{{ callCard.data.city }}</span>
+          <span v-if="callCard.data.grid">{{ callCard.data.grid }}</span>
+        </div>
+        <div v-if="callCard.data.prev" class="rec-callcard-dim">previously {{ callCard.data.prev }}</div>
+      </div>
+      <div v-else class="rec-callcard-body rec-callcard-dim">{{ callCard.data ? 'not in the FCC database' : 'lookup unavailable' }}</div>
+      <div class="rec-callcard-foot">
+        <a class="btn btn-sm btn-ghost" :href="`https://www.qrz.com/db/${callCard.call}`" target="_blank" rel="noopener noreferrer">Open QRZ ↗</a>
+        <span class="rec-callcard-attr">FCC data via callook.info</span>
+      </div>
+    </div>
   </section>
 </template>
 
@@ -862,6 +992,23 @@ onBeforeUnmount(() => {
   color: var(--accent, #58a6ff); text-decoration: none; border-bottom: 1px dotted currentColor;
 }
 .rec-callsign:hover { text-decoration: none; border-bottom-style: solid; }
+.rec-callcard {
+  position: fixed; z-index: 60; width: 272px; padding: 10px 12px;
+  background: var(--bg-elevated, #1c2128); border: 1px solid var(--border, #30363d);
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); font-size: 0.82rem;
+}
+.rec-callcard--sheet {
+  left: 0 !important; right: 0 !important; bottom: 0 !important; top: auto !important;
+  width: auto; border-radius: 12px 12px 0 0; padding-bottom: calc(12px + env(safe-area-inset-bottom));
+}
+.rec-callcard-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.rec-callcard-call { font-family: var(--font-mono); font-weight: 700; font-size: 0.95rem; color: var(--accent, #58a6ff); text-decoration: none; }
+.rec-callcard-close { background: none; border: none; color: var(--text-muted, #8b949e); font-size: 1.2rem; line-height: 1; cursor: pointer; padding: 2px 6px; }
+.rec-callcard-name { font-weight: 600; }
+.rec-callcard-meta { display: flex; gap: 10px; flex-wrap: wrap; color: var(--text-muted, #8b949e); margin-top: 2px; }
+.rec-callcard-dim { color: var(--text-muted, #8b949e); }
+.rec-callcard-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; gap: 8px; }
+.rec-callcard-attr { font-size: 0.68rem; color: var(--text-muted, #8b949e); }
 .rec-transcript-text {
   margin: 0; font-size: 0.85rem; line-height: 1.45; color: var(--text, #e6edf3);
   white-space: pre-wrap; user-select: text; max-height: 9.5em; overflow-y: auto;
