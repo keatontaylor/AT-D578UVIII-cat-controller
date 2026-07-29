@@ -185,6 +185,12 @@ const clipAtOrAfter = (time: number): RecordingClip | null => playable.value.fin
 // the normal auto-advance. With nothing left to play, the player WAITS for traffic instead of
 // stopping, and resumes the moment a filter-passing clip opens or saves.
 const isLiveId = (id: string | null): boolean => id != null && liveRecordings.value.some((c) => c.id === id)
+/** Filter test for an IN-PROGRESS clip: it has no durationMs yet (so passesFilters would always
+ * reject it — the auto-advance bug), and its elapsed length is what matters for the min-duration
+ * filter anyway. */
+const passesFiltersLive = (c: LiveRecording): boolean =>
+  Math.max(0, now.value - c.startedAt) >= minDurationSec.value * 1000 &&
+  (channelFilter.value === 'all' || laneKey(c) === channelFilter.value)
 const liveSelected = computed<RecordingClip | null>(() => {
   const c = liveRecordings.value.find((x) => x.id === selectedId.value)
   return c ? { ...c, durationMs: Math.max(1000, now.value - c.startedAt) } as RecordingClip : null
@@ -240,7 +246,7 @@ function playLive(clip: LiveRecording, offsetSec?: number): void {
   else audio.addEventListener('loadedmetadata', begin)
 }
 function jumpToLive(): void {
-  const c = liveRecordings.value.find((x) => x.id === selectedId.value) ?? liveRecordings.value.find((x) => passesFilters(x as unknown as RecordingClip))
+  const c = liveRecordings.value.find((x) => x.id === selectedId.value) ?? liveRecordings.value.find((x) => passesFiltersLive(x))
   if (c) playLive(c)
 }
 /** Near the end of the current snapshot with the clip still recording → refresh EARLY (from
@@ -304,7 +310,7 @@ function playNext(): void {
   const next = clipAtOrAfter(after)
   if (next) return playClip(next, 0)
   // Nothing saved ahead — roll into an in-progress clip if one passes the filters…
-  const liveNext = liveRecordings.value.find((c) => c.startedAt + 1 >= after - 1000 && passesFilters(c as unknown as RecordingClip))
+  const liveNext = liveRecordings.value.find((c) => c.startedAt + 1 >= after - 1000 && passesFiltersLive(c))
   if (liveNext) return playLive(liveNext, 0)
   // …otherwise WAIT at the live edge: the resume watcher takes it from here.
   pause()
@@ -352,10 +358,10 @@ watch(recordings, () => {
 })
 // The wait-at-edge resume: any new live clip or saved clip that passes the filters restarts the
 // DVR chain exactly where it left off (the cursor's forward position).
-watch([liveRecordings, recordings], () => {
+watch([liveRecordings, recordings, now], () => {
   if (!waiting.value) return
   const after = (cursorTime.value ?? now.value) - 1000
-  const liveC = liveRecordings.value.find((c) => c.startedAt >= after && passesFilters(c as unknown as RecordingClip))
+  const liveC = liveRecordings.value.find((c) => c.startedAt >= after && passesFiltersLive(c))
   if (liveC) return playLive(liveC, 0)
   const next = clipAtOrAfter(after)
   if (next && clipEnd(next) > after) playClip(next, Math.max(0, (after - next.startedAt) / 1000))
