@@ -92,3 +92,58 @@ test('TX recorder events relay over /ws; setEnabled drives both recorders', asyn
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('live snapshot route: corrected-header WAV of the in-progress clip, ranges, 404 when not live', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-live-'))
+  const { c } = newController()
+  const broadcaster = new StateBroadcaster(c.appState)
+  const rx = scriptedSource()
+  let open = false
+  const rxCtx = () => ({ squelchOpen: open, side: 'a' as const, channelName: 'LIVE TEST', freqMHz: 146.94, mode: 'FM', talkgroup: null })
+  const recorder = new Recorder(rx.source, dir, rxCtx)
+  const app = await createServer({ controller: c, broadcaster, recorder }, {})
+  await app.listen({ port: 0, host: '127.0.0.1' })
+  const { port } = app.server.address() as AddressInfo
+  const base = `http://127.0.0.1:${port}`
+  try {
+    await recorder.setEnabled(true)
+    open = true
+    for (let i = 0; i < 300 && !recorder.live; i += 1) {
+      rx.push(5)
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    assert.ok(recorder.live, 'clip open')
+    const id = recorder.live!.id
+    rx.push(200) // ≈2 s of PCM appended to the growing file
+    await new Promise((r) => setTimeout(r, 150)) // let the write stream flush
+
+    const res = await fetch(`${base}/recordings/${id}/live.wav`)
+    assert.equal(res.status, 200)
+    const body = Buffer.from(await res.arrayBuffer())
+    assert.equal(body.subarray(0, 4).toString(), 'RIFF')
+    const dataLen = body.readUInt32LE(40)
+    assert.ok(dataLen > 0, 'header advertises the bytes written so far (not 0)')
+    assert.equal(body.length, 44 + dataLen, 'body matches the advertised snapshot exactly')
+
+    // range request (Safari requirement) over the virtual snapshot
+    const r2 = await fetch(`${base}/recordings/${id}/live.wav`, { headers: { range: 'bytes=0-43' } })
+    assert.equal(r2.status, 206)
+    const head = Buffer.from(await r2.arrayBuffer())
+    assert.equal(head.length, 44)
+    assert.equal(head.readUInt32LE(40), dataLen, 'ranged header carries the corrected length too')
+
+    // close the clip — the live route must stop serving it
+    open = false
+    for (let i = 0; i < 300 && recorder.live; i += 1) {
+      rx.push(1)
+      await new Promise((r) => setTimeout(r, 10))
+    }
+    const r3 = await fetch(`${base}/recordings/${id}/live.wav`)
+    assert.equal(r3.status, 404, 'saved clips use the normal range route')
+    const r4 = await fetch(`${base}/recordings/..%2Fevil/live.wav`)
+    assert.ok([400, 404].includes(r4.status), 'traversal rejected')
+  } finally {
+    await app.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

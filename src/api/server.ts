@@ -16,7 +16,8 @@ import { stat } from 'node:fs/promises'
 import { basename } from 'node:path'
 import type { AppState, RadioController, WireCaptureInfo } from '../services/radio-service'
 import type { AudioBridge, RtcAudioSession } from '../audio/rtc'
-import type { Recorder } from '../audio/recorder'
+import { wavHeader, type Recorder } from '../audio/recorder'
+import { Readable } from 'node:stream'
 import type { Transcriber } from '../transcribe/service'
 import type { PacketService } from '../packet/service'
 import type { StateBroadcaster } from './broadcast'
@@ -419,6 +420,58 @@ export async function createServer(deps: ServerDeps, opts: ServerOptions = {}): 
   // Content-Length-less stream we sent before was exactly that failure.
   if (deps.recorder) {
     const rec = deps.recorder
+
+    // LIVE SNAPSHOT: the in-progress clip, playable before squelch closes. The growing WAV is
+    // already on disk (streamed by the recorder, <1s behind the air) — its header just claims 0
+    // bytes until finalize. This route emits a CORRECTED header + the data written so far, bounded
+    // by a single stat() so it never races the writer: each request is a complete, valid,
+    // scrubbable WAV of "everything up to now". Only valid while the clip is actually live —
+    // saved clips use the range route below. Range support included (Safari/iOS refuses
+    // range-less audio sources); virtual offsets == file offsets since both headers are 44 bytes.
+    app.get(`${base}/recordings/:file/live.wav`, async (req, reply) => {
+      const id = (req.params as { file: string }).file
+      const liveIds = [rec.live?.id, deps.txRecorder?.live?.id]
+      if (!liveIds.includes(id)) return reply.code(404).send('not live')
+      const path = rec.wavPath(id)
+      if (!path) return reply.code(400).send('bad id')
+      let size: number
+      try {
+        size = (await stat(path)).size
+      } catch {
+        return reply.code(404).send('not found')
+      }
+      const dataSize = Math.max(0, size - 44)
+      if (dataSize === 0) return reply.code(404).send('no audio yet')
+      const total = 44 + dataSize
+      const header = wavHeader(dataSize)
+      reply.header('Accept-Ranges', 'bytes').header('Cache-Control', 'no-store').type('audio/wav')
+      const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range ?? '')
+      let start = 0
+      let end = total - 1
+      let code = 200
+      if (range) {
+        start = range[1] ? parseInt(range[1], 10) : 0
+        end = range[2] ? Math.min(parseInt(range[2], 10), total - 1) : total - 1
+        if (Number.isNaN(start)) start = 0
+        if (Number.isNaN(end) || end >= total) end = total - 1
+        if (start > end || start >= total) {
+          return reply.code(416).header('Content-Range', `bytes */${total}`).send()
+        }
+        code = 206
+        void reply.header('Content-Range', `bytes ${start}-${end}/${total}`)
+      }
+      const s = start
+      const e = end
+      async function* body(): AsyncGenerator<Buffer> {
+        if (s < 44) yield header.subarray(s, Math.min(e + 1, 44))
+        if (e >= 44) {
+          const from = Math.max(s, 44)
+          for await (const chunk of createReadStream(path!, { start: from, end: e })) yield chunk as Buffer
+        }
+      }
+      return reply.code(code).header('Content-Length', e - s + 1).send(Readable.from(body()))
+    })
+
     app.get(`${base}/recordings/:file`, async (req, reply) => {
       const file = (req.params as { file: string }).file.replace(/\.wav$/, '')
       const path = rec.wavPath(file)

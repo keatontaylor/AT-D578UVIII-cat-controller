@@ -178,9 +178,55 @@ const cursorTime = ref<number | null>(null)
 const playable = computed(() => recordings.value.filter(passesFilters).sort((a, b) => a.startedAt - b.startedAt))
 const clipAtOrAfter = (time: number): RecordingClip | null => playable.value.find((c) => clipEnd(c) >= time) ?? null
 
-function playClip(clip: RecordingClip, offsetSec = 0): void {
+// ── DVR: the LIVE clip is playable before squelch closes. The recorder's growing WAV serves as
+// complete snapshots via /recordings/<id>/live.wav; reaching the snapshot end while still live
+// re-fetches and resumes (a few seconds behind the air, buffering-tolerant). When the clip
+// closes, playback swaps to the canonical file at the same position — the DVR chain then rides
+// the normal auto-advance. With nothing left to play, the player WAITS for traffic instead of
+// stopping, and resumes the moment a filter-passing clip opens or saves.
+const isLiveId = (id: string | null): boolean => id != null && liveRecordings.value.some((c) => c.id === id)
+const liveSelected = computed<RecordingClip | null>(() => {
+  const c = liveRecordings.value.find((x) => x.id === selectedId.value)
+  return c ? { ...c, durationMs: Math.max(1000, now.value - c.startedAt) } as RecordingClip : null
+})
+const playingLive = ref(false) // the loaded src is a live snapshot (vs canonical file)
+const waiting = ref(false) // caught up to the live edge — auto-resume on new traffic
+let liveRefreshTimer: number | undefined
+const liveUrl = (id: string): string => `${import.meta.env.BASE_URL}recordings/${id}/live.wav?t=${Date.now()}`
+
+function playLive(clip: LiveRecording, offsetSec = 0): void {
   const audio = playerRef.value
   if (!audio) return
+  waiting.value = false
+  playingLive.value = true
+  playingId.value = clip.id
+  selectedId.value = clip.id
+  notePlayed(clip as unknown as RecordingClip)
+  posSec.value = offsetSec
+  cursorTime.value = clip.startedAt + offsetSec * 1000
+  audio.src = liveUrl(clip.id)
+  audio.load()
+  const begin = (): void => {
+    audio.removeEventListener('loadedmetadata', begin)
+    try {
+      audio.currentTime = Math.max(0, offsetSec)
+    } catch { /* pre-metadata seek */ }
+    audio.play().then(() => (playing.value = true)).catch(() => (playing.value = false))
+  }
+  if (audio.readyState >= 1) begin()
+  else audio.addEventListener('loadedmetadata', begin)
+}
+function jumpToLive(): void {
+  const c = liveRecordings.value.find((x) => x.id === selectedId.value) ?? liveRecordings.value.find((x) => passesFilters(x as unknown as RecordingClip))
+  if (c) playLive(c, Math.max(0, (now.value - c.startedAt) / 1000 - 2))
+}
+
+function playClip(clip: RecordingClip, offsetSec = 0): void {
+  if (isLiveId(clip.id)) return playLive(clip, offsetSec)
+  const audio = playerRef.value
+  if (!audio) return
+  waiting.value = false
+  playingLive.value = false
   playingId.value = clip.id
   selectedId.value = clip.id
   notePlayed(clip)
@@ -221,18 +267,51 @@ function playNext(): void {
   const cur = recordings.value.find((c) => c.id === playingId.value)
   const after = cur ? clipEnd(cur) + 1 : (cursorTime.value ?? now.value) + 1
   const next = clipAtOrAfter(after)
-  if (next) playClip(next, 0)
-  else {
-    pause()
-    playingId.value = null
-  }
+  if (next) return playClip(next, 0)
+  // Nothing saved ahead — roll into an in-progress clip if one passes the filters…
+  const liveNext = liveRecordings.value.find((c) => c.startedAt + 1 >= after - 1000 && passesFilters(c as unknown as RecordingClip))
+  if (liveNext) return playLive(liveNext, 0)
+  // …otherwise WAIT at the live edge: the resume watcher takes it from here.
+  pause()
+  playingId.value = null
+  waiting.value = true
 }
 function onEnded(): void {
+  const id = playingId.value
+  if (playingLive.value && id) {
+    if (isLiveId(id)) {
+      // still recording — refresh the snapshot and resume where we left off (throttled)
+      const at = posSec.value
+      const c = liveRecordings.value.find((x) => x.id === id)
+      window.clearTimeout(liveRefreshTimer)
+      liveRefreshTimer = window.setTimeout(() => {
+        if (c && isLiveId(id) && playingId.value === id) playLive(c, at)
+        else onEnded()
+      }, 2500)
+      return
+    }
+    const saved = recordings.value.find((c) => c.id === id)
+    if (saved) {
+      // clip finalized — swap to the canonical file for the tail we haven't heard yet
+      playingLive.value = false
+      return playClip(saved, posSec.value)
+    }
+  }
   playNext() // continuous: roll into the next clip
 }
+// The wait-at-edge resume: any new live clip or saved clip that passes the filters restarts the
+// DVR chain exactly where it left off (the cursor's forward position).
+watch([liveRecordings, recordings], () => {
+  if (!waiting.value) return
+  const after = (cursorTime.value ?? now.value) - 1000
+  const liveC = liveRecordings.value.find((c) => c.startedAt >= after && passesFilters(c as unknown as RecordingClip))
+  if (liveC) return playLive(liveC, 0)
+  const next = clipAtOrAfter(after)
+  if (next && clipEnd(next) > after) playClip(next, Math.max(0, (after - next.startedAt) / 1000))
+})
 function onTimeupdate(): void {
   const audio = playerRef.value
-  const clip = recordings.value.find((c) => c.id === playingId.value)
+  const clip = recordings.value.find((c) => c.id === playingId.value) ?? liveRecordings.value.find((c) => c.id === playingId.value)
   if (audio && clip) {
     cursorTime.value = clip.startedAt + audio.currentTime * 1000
     if (clip.id === selectedId.value) posSec.value = audio.currentTime
@@ -355,7 +434,7 @@ function goLive(): void {
   cursorTime.value = null
 }
 
-const selected = computed(() => recordings.value.find((c) => c.id === selectedId.value) ?? null)
+const selected = computed(() => recordings.value.find((c) => c.id === selectedId.value) ?? liveSelected.value)
 
 // ── Transcript (side-process metadata): status rides the clip list; TEXT is fetched lazily here,
 // only for the selected clip — deliberately never part of hydration. Re-fetches when the selected
@@ -595,6 +674,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocDown)
   document.removeEventListener('keydown', onDocKey)
   window.clearTimeout(hoverTimer)
+  window.clearTimeout(liveRefreshTimer)
 })
 </script>
 
@@ -649,7 +729,7 @@ onBeforeUnmount(() => {
     <!-- ═══ FEED (vertical, newest first) — the phone-width projection of the same data ═══ -->
     <div v-if="effectiveView === 'feed'" class="rec-feed">
       <!-- recording IN PROGRESS: pinned, pulsing -->
-      <div v-for="clip in liveRecordings" :key="clip.id" class="rec-feed-live">
+      <div v-for="clip in liveRecordings" :key="clip.id" class="rec-feed-live" role="button" :title="'Play the live buffer'" @click="playLive(clip)">
         <span class="rec-dot" />
         <span class="rec-feed-live-label">REC · {{ isTx(clip) ? 'TX ' : '' }}{{ laneLabel(clip) }}</span>
         <span class="rec-feed-live-dur">{{ liveElapsed(clip) }}</span>
@@ -749,7 +829,8 @@ onBeforeUnmount(() => {
             :key="clip.id"
             class="rec-block rec-block--rec"
             :style="liveBlockStyle(clip)"
-            :title="`Recording… ${laneLabel(clip)}${isTx(clip) ? ' (TX)' : ''}`"
+            :title="`Recording… ${laneLabel(clip)}${isTx(clip) ? ' (TX)' : ''} — click to play the live buffer`"
+            @click.stop="playLive(clip)"
           />
         </div>
       </div>
@@ -775,6 +856,7 @@ onBeforeUnmount(() => {
         </span>
         <div class="rec-player-info">
           <template v-if="selected">
+            <span v-if="isLiveId(selected.id)" class="rec-pill rec-pill--live">⦿ LIVE</span>
             <span class="rec-player-title">{{ laneLabel(selected) }}</span>
             <span v-if="isDmrClip(selected) && selected.channelName" class="rec-player-sub">{{ selected.channelName }}</span>
             <span v-if="isTx(selected)" class="rec-pill rec-pill--tx">TX</span>
@@ -782,13 +864,15 @@ onBeforeUnmount(() => {
             <span class="rec-player-meta">{{ fmtTime(selected.startedAt) }}</span>
             <span v-if="selected.freqMHz != null" class="rec-player-meta">{{ fmtFreq(selected.freqMHz) }}</span>
           </template>
+          <span v-else-if="waiting" class="rec-player-idle rec-player-waiting">⦿ monitoring — waiting for traffic…</span>
           <span v-else class="rec-player-idle">Select a clip — or press play to run the timeline from the cursor</span>
         </div>
         <span class="rec-player-actions">
-          <a v-if="selected" class="btn btn-sm btn-ghost" :href="clipUrl(selected.id)" :download="`${selected.id}.wav`" title="Download WAV">
+          <button v-if="selected && isLiveId(selected.id)" class="btn btn-sm btn-ghost rec-live-jump" title="Jump to the live edge" @click="jumpToLive">⦿ Live</button>
+          <a v-if="selected && !isLiveId(selected.id)" class="btn btn-sm btn-ghost" :href="clipUrl(selected.id)" :download="`${selected.id}.wav`" title="Download WAV">
             <svg class="rec-icon rec-icon--stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M4.5 20h15" /></svg>
           </a>
-          <button v-if="selected" class="btn btn-sm btn-ghost rec-player-del" title="Delete this clip" @click="remove(selected.id)">
+          <button v-if="selected && !isLiveId(selected.id)" class="btn btn-sm btn-ghost rec-player-del" title="Delete this clip" @click="remove(selected.id)">
             <svg class="rec-icon rec-icon--stroke" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6.5 7l1 12a2 2 0 002 2h5a2 2 0 002-2l1-12M9.5 7V5a1 1 0 011-1h3a1 1 0 011 1v2" /></svg>
           </button>
         </span>
@@ -801,7 +885,10 @@ onBeforeUnmount(() => {
 
       <!-- ═══ TRANSCRIPT — under the loaded clip's player/metadata/scrubber. Text arrives lazily
            (recordings.transcript on selection); the list only ever carries the status. ═══ -->
-      <div v-if="selected && !isTx(selected)" class="rec-transcript">
+      <div v-if="selected && isLiveId(selected.id)" class="rec-transcript">
+        <span class="rec-transcript-status">⦿ recording — transcript arrives when the squelch closes</span>
+      </div>
+      <div v-else-if="selected && !isTx(selected)" class="rec-transcript">
         <!-- Clip summary + importance — one line: neutral "what happened" for every scored clip;
              tier ≥2 adds the badge (with the model's importance reason on hover). Tier 1 is a
              model-internal buffer, shown as a plain summary like tier 0. -->
@@ -988,6 +1075,10 @@ onBeforeUnmount(() => {
 
 /* ── TRANSCRIPT — below the scrubber; long net transcripts scroll inside the block ── */
 .rec-transcript { border-top: 1px solid var(--border, #30363d); padding-top: 6px; display: flex; flex-direction: column; gap: 4px; }
+.rec-pill--live { background: #da3633; color: #fff; animation: rec-pulse 1.6s ease-in-out infinite; }
+.rec-block--rec, .rec-feed-live { cursor: pointer; }
+.rec-player-waiting { animation: rec-pulse 1.6s ease-in-out infinite; }
+.rec-live-jump { color: #f85149; }
 .rec-callsign {
   color: var(--accent, #58a6ff); text-decoration: none; border-bottom: 1px dotted currentColor;
 }
