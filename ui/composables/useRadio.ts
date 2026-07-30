@@ -611,7 +611,7 @@ async function getRtcStats(): Promise<RtcStats | null> {
 // WINDOWED: the archive spans days (thousands of clips) but the panel shows at most 24 h — only
 // that slice hydrates; panning further back lazy-loads via extendRecordings. A re-hydrate keeps
 // whatever wider range this session already pulled in.
-const REC_HYDRATE_WINDOW_MS = 24 * 3600_000
+const REC_HYDRATE_WINDOW_MS = 2 * 3600_000 // covers the default 1h view + headroom; panning lazy-extends
 const recordingsLoadedSince = ref<number>(Number.POSITIVE_INFINITY)
 let recHydrated = false
 async function hydrateRecordings(): Promise<void> {

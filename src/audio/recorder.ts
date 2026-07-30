@@ -413,11 +413,16 @@ export class Recorder {
     const SLACK_MS = 6 * 3600_000
     const metas: ClipMeta[] = []
     for (const f of files) {
-      if (!f.endsWith('.json')) continue
+      // ONLY clip sidecars: the directory also holds `<id>.transcript.json` (transcripts, with
+      // full text + segments) and the transcriber's own state/learner files — all of which
+      // `endsWith('.json')` happily matched, so every hydrate shipped them as bogus clips
+      // (measured: 2.45 MB payload, including a 118 KB learner file). Shape-validated below too.
+      if (!f.endsWith('.json') || f.endsWith('.transcript.json') || f.startsWith('transcribe-')) continue
       const t = idStartTime(f.slice(0, -5))
       if (t !== null && (t < since - SLACK_MS || t >= until)) continue
       try {
         const meta = JSON.parse(await fsp.readFile(join(this.dir, f), 'utf8')) as ClipMeta
+        if (typeof meta.id !== 'string' || typeof meta.startedAt !== 'number' || typeof meta.durationMs !== 'number') continue
         if (meta.startedAt + meta.durationMs < since || meta.startedAt >= until) continue
         // sidecars written before the TX feature lack `direction` — they are all RX
         metas.push(meta.direction ? meta : { ...meta, direction: 'rx' })

@@ -424,3 +424,24 @@ test('a clip that closes before resolving stays silent: saved is its first annou
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('list() ignores non-clip JSON in the recordings dir (transcripts, transcriber state)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-'))
+  try {
+    const { writeFileSync } = await import('node:fs')
+    const id = '2026-07-29T12-00-00-000Z'
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, startedAt: Date.now(), durationMs: 4000, side: 'a', channelName: 'REAL', freqMHz: null, mode: 'FM', talkgroup: null, talkgroupName: null, direction: 'rx' }))
+    // the impostors that used to be listed as clips (field: 2.45 MB hydrate payloads)
+    writeFileSync(join(dir, `${id}.transcript.json`), JSON.stringify({ v: 1, status: 'done', text: 'x'.repeat(500), segments: [{ startMs: 0, endMs: 1, text: 'x' }] }))
+    writeFileSync(join(dir, 'transcribe-learner.json'), JSON.stringify({ events: Array.from({ length: 500 }, () => ({ kind: 'play', channel: 'BCSO', at: Date.now() })) }))
+    writeFileSync(join(dir, 'transcribe-state.json'), JSON.stringify({ day: '2026-07-29', daySec: 100 }))
+    writeFileSync(join(dir, 'garbage.json'), JSON.stringify({ nope: true }))
+    const rec = new Recorder(fakeCapture, dir, ctx)
+    const all = await rec.list()
+    assert.deepEqual(all.map((c) => c.id), [id], 'only the real clip sidecar is a clip')
+    const windowed = await rec.list({ sinceMs: Date.now() - 3600_000 })
+    assert.deepEqual(windowed.map((c) => c.id), [id], 'windowed listing filters them too')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
