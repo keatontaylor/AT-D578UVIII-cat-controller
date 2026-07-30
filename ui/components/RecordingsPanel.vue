@@ -125,7 +125,7 @@ const lanes = computed<Lane[]>(() => {
   }
   // in-progress recordings: always shown (no duration yet, so no min-duration filter), growing
   // toward "now" — their lane appears even before the first saved clip lands on it
-  for (const c of liveRecordings.value) {
+  for (const c of liveOk.value) {
     if (channelFilter.value !== 'all' && laneKey(c) !== channelFilter.value) continue
     if (c.startedAt > end || now.value < start) continue
     laneFor(c).live.push(c)
@@ -186,6 +186,8 @@ const clipAtOrAfter = (time: number): RecordingClip | null => playable.value.fin
 // the normal auto-advance. With nothing left to play, the player WAITS for traffic instead of
 // stopping, and resumes the moment a filter-passing clip opens or saves.
 const isLiveId = (id: string | null): boolean => id != null && liveRecordings.value.some((c) => c.id === id)
+/** Live clips arrive by push and by hydrate; a partial one must never break the timeline. */
+const liveOk = computed(() => liveRecordings.value.filter((c) => c && typeof c.startedAt === 'number' && !!c.id))
 /** Filter test for an IN-PROGRESS clip: it has no durationMs yet (so passesFilters would always
  * reject it — the auto-advance bug), and its elapsed length is what matters for the min-duration
  * filter anyway. */
@@ -785,7 +787,7 @@ onBeforeUnmount(() => {
     <!-- ═══ FEED (vertical, newest first) — the phone-width projection of the same data ═══ -->
     <div v-if="effectiveView === 'feed'" class="rec-feed">
       <!-- recording IN PROGRESS: pinned, pulsing -->
-      <div v-for="clip in liveRecordings" :key="clip.id" class="rec-feed-live" role="button" :title="'Play the live buffer'" @click="playLive(clip)">
+      <div v-for="clip in liveOk" :key="clip.id" class="rec-feed-live" role="button" :title="'Play the live buffer'" @click="playLive(clip)">
         <span class="rec-dot" />
         <span class="rec-feed-live-label">REC · {{ isTx(clip) ? 'TX ' : '' }}{{ laneLabel(clip) }}</span>
         <span class="rec-feed-live-dur">{{ liveElapsed(clip) }}</span>

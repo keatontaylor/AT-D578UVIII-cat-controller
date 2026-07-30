@@ -616,16 +616,25 @@ const recordingsLoadedSince = ref<number>(Number.POSITIVE_INFINITY)
 let recHydrated = false
 async function hydrateRecordings(): Promise<void> {
   const since = Math.min(Date.now() - REC_HYDRATE_WINDOW_MS, recordingsLoadedSince.value)
-  const [status, list, live] = await Promise.all([
+  // FAULT-ISOLATED: each piece settles independently so one failure can't blank the others (a
+  // live-clip hydrate that rejected used to take the whole saved-clip backfill down with it).
+  const [status, list, live] = await Promise.allSettled([
     rpc<{ enabled: boolean; tailMs: number; minDurationMs: number }>('recordings.status'),
     rpc<RecordingClip[]>('recordings.list', { sinceMs: since }),
-    rpc<LiveRecording[]>('recordings.live').catch(() => [] as LiveRecording[]),
+    rpc<LiveRecording[]>('recordings.live'),
   ])
-  recorderStatus.value = status
-  recordings.value = [...list].sort((a, b) => b.startedAt - a.startedAt)
-  liveRecordings.value = live
-  recordingsLoadedSince.value = since
+  if (status.status === 'fulfilled') recorderStatus.value = status.value
+  if (list.status === 'fulfilled') {
+    recordings.value = [...list.value].sort((a, b) => b.startedAt - a.startedAt)
+    recordingsLoadedSince.value = since
+  } else {
+    console.error('[recordings] list hydrate failed:', list.reason)
+  }
+  // A live clip that fails to hydrate is cosmetic — never let it hide the archive.
+  liveRecordings.value = live.status === 'fulfilled' ? live.value.filter((c) => c && typeof c.startedAt === 'number') : []
+  if (live.status === 'rejected') console.error('[recordings] live hydrate failed:', live.reason)
   recHydrated = true
+  if (list.status === 'rejected') throw list.reason // surface only a REAL archive failure
 }
 
 // Pan-into-the-past lazy load: fetch [sinceMs, loadedSince) and merge (dedupe by id).
