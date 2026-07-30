@@ -29,15 +29,19 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
   an emergency signal.)
 - **Net activations for a REAL event**: ARES/RACES callout, SKYWARN activation (an actual
   activation — not the practice net), emergency net standing up.
-- **Net OPENINGS — a net actively being called to order** (I use these to learn which nets exist
-  and when they run): net control taking the frequency RIGHT NOW and convening the net — "calling
-  the net to order", the first call for check-ins. Tier 2 **even when the script is recurring**;
-  do not let the recurrence signal discount a real opening. NAME the net in the reason and
+- **Net OPENINGS — the FIRST transmission of a net session** (I use these to learn which nets
+  exist and when they run). The decisive signal: **a station identifying itself as net control**
+  ("I'll be serving as Net Control", "this is net control", "calling the net to order") or the
+  first call for check-ins. This is tier 2 **even when that same transmission also reads the
+  whole preamble** — schedule, purpose, format, "directed net" explanation, "anyone needing the
+  repeater before we start", "I'll pause for traffic" are all NORMAL parts of an opening, and
+  they do NOT demote it to routine. Tier 2 **even when the script is recurring**; do not let the
+  recurrence signal discount a real opening — a recurring net opening is exactly what I want. NAME the net in the reason and
   summary whenever it's audible ("Colorado Connection evening net opening"). What is NOT an
   opening (all tier 0): automated schedule announcements or reminders ("...Net, Tuesday night,
   7 o'clock"), repeater/system IDs ("This is the Colorado Connection"), a station announcing they
-  are MONITORING for calls, preamble instruction fragments ("key up for two seconds..."), and
-  anything with mid-net texture — reports or check-ins already flowing, "next station", "standing
+  are MONITORING for calls, bare instruction fragments with no net-control identification
+  ("key up for two seconds..." alone), and anything with mid-net texture — reports or check-ins already flowing, "next station", "standing
   by for reports". Mid-net is mid-net even if you see no opening clip in this batch (batches are
   short windows; the opening was probably earlier). Flag only the EARLIEST true opening of a
   given net in the batch.
@@ -56,7 +60,8 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
 
 ## Keep routine (tier 0)
 
-- Scheduled nets AFTER their opening: mid-net check-ins, continued preamble, "next station",
+- Scheduled nets AFTER the opening transmission: mid-net check-ins, later preamble continuation,
+  "next station",
   net-control housekeeping, the closing — including scripts that MENTION emergencies, 911, or
   "if this were an actual emergency". High recurrence = scripted. (The opening call-up itself
   is tier 2 — see above.)
@@ -84,6 +89,11 @@ sheriff/fire scan channels (BCSO, Boulder County fire districts).
 
 - "Good evening, this is net control calling the Colorado Connection net to order, we meet every
   evening at 6:30…" → **2** (net OPENING — flag it and name the net, scripted or not)
+- "Hi Net. My name is … and I'll be serving as Net Control for this evening's Net. This Net
+  operates every Wednesday from 8 to 9 pm… this is a directed net… if anyone needs the repeater
+  before we start the net, feel free… I'll pause for traffic." → **2** — an opening AND its full
+  preamble in one transmission is still an OPENING (net control identified itself). Reason should
+  name the net, e.g. "BARC Wednesday social net opening".
 - Later clips of the SAME net — more preamble ("…we practice copying the information needed to
   report an emergency to 911…"), check-ins, "next station" → **0** (mid-net; the 911 mention is
   script, not an emergency)
