@@ -429,8 +429,10 @@ test('list() ignores non-clip JSON in the recordings dir (transcripts, transcrib
   const dir = mkdtempSync(join(tmpdir(), 'rec-'))
   try {
     const { writeFileSync } = await import('node:fs')
-    const id = '2026-07-29T12-00-00-000Z'
-    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, startedAt: Date.now(), durationMs: 4000, side: 'a', channelName: 'REAL', freqMHz: null, mode: 'FM', talkgroup: null, talkgroupName: null, direction: 'rx' }))
+    // the id IS the start timestamp (list() pre-filters by filename) — keep them consistent
+    const startedAt = Date.now() - 60_000
+    const id = new Date(startedAt).toISOString().replace(/[:.]/g, '-')
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, startedAt, durationMs: 4000, side: 'a', channelName: 'REAL', freqMHz: null, mode: 'FM', talkgroup: null, talkgroupName: null, direction: 'rx' }))
     // the impostors that used to be listed as clips (field: 2.45 MB hydrate payloads)
     writeFileSync(join(dir, `${id}.transcript.json`), JSON.stringify({ v: 1, status: 'done', text: 'x'.repeat(500), segments: [{ startMs: 0, endMs: 1, text: 'x' }] }))
     writeFileSync(join(dir, 'transcribe-learner.json'), JSON.stringify({ events: Array.from({ length: 500 }, () => ({ kind: 'play', channel: 'BCSO', at: Date.now() })) }))
