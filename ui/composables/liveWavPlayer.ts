@@ -24,8 +24,10 @@ const SAMPLE_RATE = 8000
 const BYTES_PER_S = SAMPLE_RATE * 2
 const POLL_MS = 1500
 
-export function createLiveWavPlayer(url: string, onUpdate: () => void): LiveWavPlayer {
-  const ctx = new AudioContext()
+/** ctx MUST be a shared AudioContext that was created/resumed inside a user gesture — engines
+ * are often started by AUTO-advance (no gesture), where a fresh AudioContext would sit suspended
+ * and play silence (the field bug this parameter fixes). */
+export function createLiveWavPlayer(url: string, ctx: AudioContext, onUpdate: () => void): LiveWavPlayer {
   const chunks: Float32Array[] = [] // decoded PCM in arrival order (contiguous stream)
   let totalSamples = 0
   let bytesSeen = 44 // skip the WAV header on the first fetch
@@ -159,7 +161,7 @@ export function createLiveWavPlayer(url: string, onUpdate: () => void): LiveWavP
       isPlaying = false
       window.clearTimeout(pollTimer)
       clearScheduled()
-      void ctx.close()
+      // the AudioContext is SHARED — never close it here
     },
   }
 }

@@ -200,6 +200,15 @@ const playingLive = ref(false) // live engine active (vs the <audio> element)
 const waiting = ref(false) // caught up to the live edge — auto-resume on new traffic
 let liveEngine: LiveWavPlayer | null = null
 let liveTicker: number | undefined
+// ONE AudioContext for all live engines, unlocked by the first user gesture that starts
+// playback — auto-advance transitions then inherit the running context (a context created
+// outside a gesture is born suspended and plays silence).
+let audioCtx: AudioContext | null = null
+function ensureAudioCtx(): AudioContext {
+  if (!audioCtx) audioCtx = new AudioContext()
+  if (audioCtx.state === 'suspended') void audioCtx.resume()
+  return audioCtx
+}
 // Continuous playback (auto-advance to the next clip / wait at the live edge) vs single-clip.
 const CONT_KEY = 'anytone.rec.continuous'
 const continuous = ref(localStorage.getItem(CONT_KEY) !== '0')
@@ -230,7 +239,7 @@ function playLive(clip: LiveRecording, offsetSec = 0): void {
   posSec.value = offsetSec
   cursorTime.value = clip.startedAt + offsetSec * 1000
   const id = clip.id
-  liveEngine = createLiveWavPlayer(liveUrl(id), () => {
+  liveEngine = createLiveWavPlayer(liveUrl(id), ensureAudioCtx(), () => {
     // engine reports the clip finalized (route 404) → hand off to the canonical file
     if (liveEngine?.ended() && playingId.value === id) {
       const at = liveEngine.positionS()
@@ -259,6 +268,7 @@ function jumpToLive(): void {
 }
 
 function playClip(clip: RecordingClip, offsetSec = 0): void {
+  ensureAudioCtx() // most calls originate from clicks; harmless when not
   if (isLiveId(clip.id)) return playLive(clip, offsetSec)
   const audio = playerRef.value
   if (!audio) return
@@ -290,6 +300,7 @@ function pause(): void {
   playing.value = false
 }
 function togglePlay(): void {
+  ensureAudioCtx() // user gesture — unlock audio for later auto-advance into live clips
   if (playing.value) return pause()
   if (playingLive.value && liveEngine) {
     liveEngine.play(posSec.value)
