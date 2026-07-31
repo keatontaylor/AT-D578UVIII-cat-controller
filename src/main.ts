@@ -287,6 +287,12 @@ recorder.subscribe((e) => {
 })
 // Boot rescan: queue clips saved since first-enable that never got transcribed (crash recovery).
 void recorder.list().then((clips) => transcriber.rescan(clips)).catch(() => {})
+// Periodic rescan: out-of-band clips (the SDR capture process drops WAV+JSON pairs into the
+// recordings dir) ingest within a minute instead of waiting for a restart. Windowed = cheap.
+const sdrRescan = setInterval(() => {
+  void recorder.list({ sinceMs: Date.now() - 2 * 3600_000 }).then((clips) => transcriber.rescan(clips)).catch(() => {})
+}, 60_000)
+sdrRescan.unref?.()
 
 // UI PTT deadman: keyed with no `ptt.hold` beacon for this long → force-release (see server.ts).
 const PTT_DEADMAN_MS = Number(process.env['ANYTONE_PTT_DEADMAN_MS'] ?? 4000)

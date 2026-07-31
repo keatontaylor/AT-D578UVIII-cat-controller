@@ -447,3 +447,28 @@ test('list() ignores non-clip JSON in the recordings dir (transcripts, transcrib
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('SDR-dropped clips (WAV+JSON pair) list as normal clips and rescan queues them', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rec-sdr-'))
+  try {
+    const { writeFileSync } = await import('node:fs')
+    const { wavHeader } = await import('../src/audio/recorder')
+    const startedAt = Date.now() - 30_000
+    const id = `${new Date(startedAt).toISOString().replace(/[:.]/g, '-')}-sdr`
+    const pcm = Buffer.alloc(8000 * 2 * 4) // 4s silence
+    writeFileSync(join(dir, `${id}.wav`), Buffer.concat([wavHeader(pcm.length), pcm]))
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, startedAt, durationMs: 4000, side: null, channelName: 'BCSO SOUTH', freqMHz: 159.27, mode: 'FM', talkgroup: null, talkgroupName: null, direction: 'rx' }))
+    const rec = new Recorder(fakeCapture, dir, ctx)
+    const listed = await rec.list({ sinceMs: Date.now() - 3600_000 })
+    assert.deepEqual(listed.map((c) => c.id), [id], 'foreign clip listed (windowed, -sdr suffix ok)')
+    assert.equal(listed[0]!.channelName, 'BCSO SOUTH')
+    const { Transcriber } = await import('../src/transcribe/service')
+    const svc = new Transcriber({ dir, recorderEnabled: () => true, keyFn: () => 'k', startTimer: false, chatClient: { complete: async () => ({ content: '{}', totalTokens: null, remainingTokens: null }) } })
+    ;(svc as unknown as { state: { enabledSince?: number } }).state.enabledSince = startedAt - 1000
+    svc.rescan(listed)
+    assert.equal(svc.statusOf(id), 'queued', 'rescan queues the SDR clip for transcription')
+    svc.close()
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
