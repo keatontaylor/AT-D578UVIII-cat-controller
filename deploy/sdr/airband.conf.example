@@ -1,0 +1,29 @@
+# AnyTone multichannel SDR — window 153.7-156.1 MHz (the county's densest 2.4 MHz):
+# BOTH dispatch simulcasts via their Central members + the tactical stack.
+# Simulcast fact (measured r=0.957 @ 0ms): BCSO N/C/S carry ONE dispatch audio — capture one.
+# squelch_threshold -22 dBFS calibrated on the old window; recalibrate if false-opens appear.
+devices: ({
+  type = "rtlsdr";
+  index = 0;
+  gain = 40;
+  centerfreq = 154.9;
+  sample_rate = 2.4;
+  channels: (
+    { freq = 155.145;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5551; }); },
+    { freq = 154.220;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5552; }); },
+    { freq = 154.370;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5553; }); },
+    { freq = 155.250;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5554; }); },
+    { freq = 155.055;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5555; }); },
+    { freq = 155.805;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5556; }); },
+    { freq = 155.925;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5557; }); },
+    { freq = 153.950;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5558; }); }
+  );
+});
