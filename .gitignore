@@ -49,3 +49,4 @@ tools/*
 __pycache__/
 *.pyc
 groundtruth/
+data/dtrs-talkgroups.json
