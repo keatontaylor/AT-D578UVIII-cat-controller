@@ -343,11 +343,13 @@ export class Transcriber {
     return rungs
   }
 
-  /** ON = recording on + key present (+ no kill switch). Checked live so key/recorder changes
-   * take effect without restart. */
+  /** ON = a Groq key exists (+ no kill switch). Historically also gated on the radio recorder
+   * being enabled, but clips now arrive from INDEPENDENT sources too (SDR/P25 drop straight into
+   * the recordings dir), so a disconnected radio must NOT stop those from transcribing. Key
+   * presence is the real opt-in; checked live so key changes take effect without restart. */
   get enabled(): boolean {
     if (process.env['ANYTONE_TRANSCRIBE'] === '0') return false
-    return this.deps.recorderEnabled() && this.keyFn() !== null
+    return this.keyFn() !== null
   }
 
   subscribe(cb: (e: TranscriberEvent) => void): () => void {
