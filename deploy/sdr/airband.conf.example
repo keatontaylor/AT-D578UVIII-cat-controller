@@ -24,6 +24,10 @@ devices: ({
     { freq = 155.925;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
       outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5557; }); },
     { freq = 153.950;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
-      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5558; }); }
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5558; }); },
+    { freq = 154.055;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5559; }); },
+    { freq = 155.385;  modulation = "nfm"; bandwidth = 12500; squelch_threshold = -22;
+      outputs: ({ type = "udp_stream"; dest_address = "127.0.0.1"; dest_port = 5560; }); }
   );
 });
