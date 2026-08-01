@@ -285,8 +285,11 @@ const transcriber = new Transcriber({
 recorder.subscribe((e) => {
   if (e.type === 'saved') transcriber.onClipSaved(e.clip)
 })
-// Boot rescan: queue clips saved since first-enable that never got transcribed (crash recovery).
-void recorder.list().then((clips) => transcriber.rescan(clips)).catch(() => {})
+// Boot rescan: catch clips saved while the process was down (crash/restart recovery). WINDOWED —
+// an unwindowed list() re-queues the ENTIRE archive (field: 14k old clips → hours of backlog +
+// blown Whisper budget). A few hours covers any realistic downtime; older gaps stay as-is.
+const BOOT_RESCAN_MS = Number(process.env['ANYTONE_BOOT_RESCAN_MS'] ?? 4 * 3600_000)
+void recorder.list({ sinceMs: Date.now() - BOOT_RESCAN_MS }).then((clips) => transcriber.rescan(clips)).catch(() => {})
 // Periodic rescan: out-of-band clips (the SDR capture process drops WAV+JSON pairs into the
 // recordings dir) ingest within a minute instead of waiting for a restart. Windowed = cheap.
 const sdrRescan = setInterval(() => {
