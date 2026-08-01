@@ -9,6 +9,7 @@
 // never visible without its sidecar. Ids carry an '-sdr' suffix (the '-tx' pattern) so they can
 // never collide with radio-recorded clips. The main process ingests via its periodic rescan.
 import { createWriteStream, mkdirSync, renameSync, writeFileSync, openSync, writeSync, closeSync, rmSync, type WriteStream } from 'node:fs'
+import { createSocket } from 'node:dgram'
 import { join } from 'node:path'
 import { wavHeader } from '../audio/recorder'
 
@@ -119,7 +120,7 @@ function closeClip(): void {
   })
 }
 
-process.stdin.on('data', (raw: Buffer) => {
+function onData(raw: Buffer): void {
   lastDataAt = Date.now()
   if (!clip) openClip()
   const chunk = filterChunk(raw)
@@ -129,7 +130,42 @@ process.stdin.on('data', (raw: Buffer) => {
     log('max clip length reached — rotating')
     closeClip() // next chunk opens a fresh clip
   }
-})
+}
+
+// Input: stdin pipe from rtl_fm (single-channel mode), or a UDP socket fed by one rtl_airband
+// channel's udp_stream output (multichannel mode — one capture instance per channel, same
+// squelch-gated data-flow contract: rtl_airband only streams while the channel squelch is open).
+const UDP_PORT = Number(process.env['ANYTONE_SDR_UDP_PORT'] ?? 0)
+// rtl_airband's udp_stream emits MONO 32-BIT FLOAT at 16 kHz (log-verified) — convert to our
+// native s16le/8k: float→int16 with clamp, then 2:1 decimation via pair-averaging (a 1-zero
+// lowpass; fine for comms voice). Carry the odd trailing sample into the next datagram.
+let carry: number | null = null
+function f32x16kToS16x8k(msg: Buffer): Buffer {
+  const n = Math.floor(msg.length / 4)
+  const vals = new Float32Array(n)
+  for (let i = 0; i < n; i++) vals[i] = msg.readFloatLE(i * 4)
+  const src: number[] = carry !== null ? [carry, ...vals] : [...vals]
+  const pairs = Math.floor(src.length / 2)
+  carry = src.length % 2 ? src[src.length - 1]! : null
+  const out = Buffer.alloc(pairs * 2)
+  for (let i = 0; i < pairs; i++) {
+    const v = ((src[2 * i]! + src[2 * i + 1]!) / 2) * 32767
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v))), i * 2)
+  }
+  return out
+}
+if (UDP_PORT) {
+  const sock = createSocket('udp4')
+  sock.on('message', (msg: Buffer) => {
+    const pcm = f32x16kToS16x8k(msg)
+    if (pcm.length) onData(pcm)
+  })
+  sock.bind(UDP_PORT, '127.0.0.1')
+  log(`input: UDP 127.0.0.1:${UDP_PORT} (f32/16k → s16/8k)`)
+} else {
+  process.stdin.on('data', onData)
+  process.stdin.on('end', shutdown)
+}
 
 setInterval(() => {
   if (clip && Date.now() - lastDataAt > CFG.tailMs) closeClip()
@@ -141,6 +177,5 @@ function shutdown(): void {
 }
 process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
-process.stdin.on('end', shutdown)
 
 log(`capturing ${CFG.channelName}${CFG.freqMHz ? ` @ ${CFG.freqMHz} MHz` : ''} → ${CFG.dir} (tail ${CFG.tailMs}ms, min ${CFG.minMs}ms)`)
