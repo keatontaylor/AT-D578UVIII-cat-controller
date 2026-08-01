@@ -858,14 +858,15 @@ export class Transcriber {
     if (this.bucketS === null) return null
     const refill = ((this.now() - this.bucketAt) / 1000) * BUCKET_REFILL_RATE
     const est = this.bucketS + refill
-    return this.bucketLimitS !== null ? Math.min(est, this.bucketLimitS) : est
+    // Only clamp to a POSITIVE limit — a 0/negative limit is a bad reading, not a real ceiling.
+    return this.bucketLimitS !== null && this.bucketLimitS > 0 ? Math.min(est, this.bucketLimitS) : est
   }
   /** Fold a response's rate-limit headers into the tracker. */
   private noteLimits(l: GroqResult['limits']): void {
     if (l.remainingS === null) return
     this.bucketS = l.remainingS
     this.bucketAt = this.now()
-    if (l.limitS !== null) this.bucketLimitS = l.limitS
+    if (l.limitS !== null && l.limitS > 0) this.bucketLimitS = l.limitS
   }
   private budgetAllows(sec: number): boolean {
     this.roll()

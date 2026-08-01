@@ -143,6 +143,9 @@ export async function transcribe(wav: Buffer, opts: GroqOptions): Promise<GroqRe
 }
 
 function numHeader(v: string | null): number | null {
+  // Number(null) and Number('') are both 0 (finite!) — a MISSING header must read as null, not 0,
+  // or a headerless response poisons the caller's remaining-tokens bucket to "0 of 0" (deadlock).
+  if (v === null || v.trim() === '') return null
   const n = Number(v)
   return Number.isFinite(n) ? n : null
 }

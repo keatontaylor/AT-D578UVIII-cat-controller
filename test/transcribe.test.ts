@@ -283,3 +283,16 @@ test('digital (P25/DMR) clips bypass the analog kerchunk floor — short calls t
   assert.equal(calls.length, 1, 'P25 short call transcribed (digital = protocol-gated voice)')
   assert.equal(svc.statusOf('p25-short'), 'done')
 })
+
+test('a headerless Whisper response must not poison the audio budget (0-of-0 deadlock)', async () => {
+  // transcribeFn that reports NO rate-limit headers (limits all null) — must NOT gate future clips
+  const { svc, dir, calls } = rig({
+    result: () => ({ text: 'dispatch traffic here', segments: [], avgLogprob: -0.2, maxNoSpeechProb: 0.05, apiMs: 5, limits: { remainingS: null, limitS: null, resetS: null, remainingReq: null } }),
+  })
+  svc.onClipSaved(clip(dir, 'a', makeWav(0, 4, 0), { channelName: 'X', mode: 'P25' }))
+  await svc.tick()
+  assert.equal(calls.length, 1, 'first clip transcribed')
+  svc.onClipSaved(clip(dir, 'b', makeWav(0, 4, 0), { channelName: 'X', mode: 'P25' }))
+  await svc.tick()
+  assert.equal(calls.length, 2, 'second clip NOT deferred — no bucket poisoning from missing headers')
+})
