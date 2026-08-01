@@ -23,6 +23,33 @@ const CFG = {
   maxMs: Number(process.env['ANYTONE_SDR_MAX_MS'] ?? 15 * 60_000), // hard cap: a stuck carrier can't grow one clip forever
 }
 
+// CTCSS high-pass: BCSO SOUTH carries a 136.5 Hz PL tone (field-measured ×27 over the noise
+// median — the 'defined hum'). Real receivers strip sub-audible tones before the speaker;
+// rtl_fm does not, so we do: 2nd-order Butterworth HPF at the standard comms passband floor.
+// State resets per clip (stale state = a thump at clip start). 0 disables.
+const HPF_HZ = Number(process.env['ANYTONE_SDR_HPF_HZ'] ?? 250)
+const hpf = (() => {
+  if (!HPF_HZ) return null
+  const K = Math.tan(Math.PI * HPF_HZ / RATE)
+  const norm = 1 / (1 + Math.SQRT2 * K + K * K)
+  return { b0: norm, b1: -2 * norm, b2: norm, a1: 2 * (K * K - 1) * norm, a2: (1 - Math.SQRT2 * K + K * K) * norm }
+})()
+let z1 = 0
+let z2 = 0
+function filterChunk(chunk: Buffer): Buffer {
+  if (!hpf) return chunk
+  const out = Buffer.alloc(chunk.length)
+  const n = Math.floor(chunk.length / 2)
+  for (let i = 0; i < n; i++) {
+    const x = chunk.readInt16LE(i * 2)
+    const y = hpf.b0 * x + z1
+    z1 = hpf.b1 * x - hpf.a1 * y + z2
+    z2 = hpf.b2 * x - hpf.a2 * y
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(y))), i * 2)
+  }
+  return out
+}
+
 const liveDir = join(CFG.dir, '.sdr-live')
 mkdirSync(liveDir, { recursive: true })
 
@@ -38,6 +65,8 @@ function openClip(): void {
   const stream = createWriteStream(tmp)
   stream.write(wavHeader(0)) // placeholder; patched at finalize
   clip = { id, startedAt, tmp, stream, bytes: 0 }
+  z1 = 0
+  z2 = 0
   log(`squelch open → ${id}`)
 }
 
@@ -74,9 +103,10 @@ function closeClip(): void {
   })
 }
 
-process.stdin.on('data', (chunk: Buffer) => {
+process.stdin.on('data', (raw: Buffer) => {
   lastDataAt = Date.now()
   if (!clip) openClip()
+  const chunk = filterChunk(raw)
   clip!.stream.write(chunk)
   clip!.bytes += chunk.length
   if (clip!.bytes / BYTES_PER_MS >= CFG.maxMs) {
