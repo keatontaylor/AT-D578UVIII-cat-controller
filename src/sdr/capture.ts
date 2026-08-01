@@ -23,29 +23,46 @@ const CFG = {
   maxMs: Number(process.env['ANYTONE_SDR_MAX_MS'] ?? 15 * 60_000), // hard cap: a stuck carrier can't grow one clip forever
 }
 
-// CTCSS high-pass: BCSO SOUTH carries a 136.5 Hz PL tone (field-measured ×27 over the noise
-// median — the 'defined hum'). Real receivers strip sub-audible tones before the speaker;
-// rtl_fm does not, so we do: 2nd-order Butterworth HPF at the standard comms passband floor.
-// State resets per clip (stale state = a thump at clip start). 0 disables.
+// CTCSS removal — two stages, because field measurement humbled the first attempt: a single
+// 2nd-order HPF at 250 Hz only cuts ~11 dB at 136.5 Hz and the PL tone stayed audible.
+// (1) a NOTCH at the channel's exact CTCSS frequency (ANYTONE_SDR_NOTCH_HZ, default the
+// measured 136.5; Q=8 → ~2s settle, >30 dB at the tone, voice untouched), and (2) a 4th-order
+// Butterworth HPF at 250 Hz (two cascaded biquads) for general sub-voice rumble. States reset
+// per clip. Set either env to 0 to disable that stage.
 const HPF_HZ = Number(process.env['ANYTONE_SDR_HPF_HZ'] ?? 250)
-const hpf = (() => {
-  if (!HPF_HZ) return null
-  const K = Math.tan(Math.PI * HPF_HZ / RATE)
+const NOTCH_HZ = Number(process.env['ANYTONE_SDR_NOTCH_HZ'] ?? 136.5)
+interface Biquad { b0: number; b1: number; b2: number; a1: number; a2: number; z1: number; z2: number }
+function hpBiquad(fc: number): Biquad {
+  const K = Math.tan(Math.PI * fc / RATE)
   const norm = 1 / (1 + Math.SQRT2 * K + K * K)
-  return { b0: norm, b1: -2 * norm, b2: norm, a1: 2 * (K * K - 1) * norm, a2: (1 - Math.SQRT2 * K + K * K) * norm }
-})()
-let z1 = 0
-let z2 = 0
-function filterChunk(chunk: Buffer): Buffer {
-  if (!hpf) return chunk
+  return { b0: norm, b1: -2 * norm, b2: norm, a1: 2 * (K * K - 1) * norm, a2: (1 - Math.SQRT2 * K + K * K) * norm, z1: 0, z2: 0 }
+}
+function notchBiquad(f0: number, q: number): Biquad {
+  const w = 2 * Math.PI * f0 / RATE
+  const alpha = Math.sin(w) / (2 * q)
+  const a0 = 1 + alpha
+  return { b0: 1 / a0, b1: -2 * Math.cos(w) / a0, b2: 1 / a0, a1: -2 * Math.cos(w) / a0, a2: (1 - alpha) / a0, z1: 0, z2: 0 }
+}
+function makeSections(): Biquad[] {
+  const out: Biquad[] = []
+  if (NOTCH_HZ) out.push(notchBiquad(NOTCH_HZ, 8))
+  if (HPF_HZ) out.push(hpBiquad(HPF_HZ), hpBiquad(HPF_HZ))
+  return out
+}
+let sections = makeSections()
+export function filterChunk(chunk: Buffer, secs: Biquad[] = sections): Buffer {
+  if (!secs.length) return chunk
   const out = Buffer.alloc(chunk.length)
   const n = Math.floor(chunk.length / 2)
   for (let i = 0; i < n; i++) {
-    const x = chunk.readInt16LE(i * 2)
-    const y = hpf.b0 * x + z1
-    z1 = hpf.b1 * x - hpf.a1 * y + z2
-    z2 = hpf.b2 * x - hpf.a2 * y
-    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(y))), i * 2)
+    let v = chunk.readInt16LE(i * 2)
+    for (const s of secs) {
+      const y = s.b0 * v + s.z1
+      s.z1 = s.b1 * v - s.a1 * y + s.z2
+      s.z2 = s.b2 * v - s.a2 * y
+      v = y
+    }
+    out.writeInt16LE(Math.max(-32768, Math.min(32767, Math.round(v))), i * 2)
   }
   return out
 }
@@ -65,8 +82,7 @@ function openClip(): void {
   const stream = createWriteStream(tmp)
   stream.write(wavHeader(0)) // placeholder; patched at finalize
   clip = { id, startedAt, tmp, stream, bytes: 0 }
-  z1 = 0
-  z2 = 0
+  sections = makeSections() // fresh filter state per clip
   log(`squelch open → ${id}`)
 }
 
