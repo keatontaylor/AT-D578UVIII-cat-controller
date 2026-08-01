@@ -27,6 +27,9 @@ export interface TranscribableClip {
   readonly channelName: string | null
   readonly talkgroupName?: string | null
   readonly direction?: string
+  /** Radio mode (FM / DMR / P25 …) — DIGITAL clips are protocol-voice-gated, so the analog
+   * kerchunk/VAD floors (tuned against Whisper's short-noise hallucinations) don't apply. */
+  readonly mode?: string | null
 }
 
 export type TranscriptStatus = 'queued' | 'deferred' | 'done' | 'skipped' | 'failed'
@@ -83,7 +86,12 @@ interface PersistedState {
   chatTokens?: number
 }
 
-const MIN_CLIP_MS = 3000 // kerchunk floor — bake-off-proven hallucination fodder, ~1% of audio
+const MIN_CLIP_MS = 3000 // analog kerchunk floor — bake-off-proven hallucination fodder, ~1% of audio
+// Digital modes (P25/DMR) only emit decoded VOICE frames — a 1s call is real dispatch, not noise
+// (measured on Mead: 68% of P25 calls were <3s and were being discarded → one-sided convos).
+const DIGITAL_MODES = new Set(['P25', 'DMR', 'D+A', 'A+D'])
+const isDigital = (mode?: string | null): boolean => mode != null && DIGITAL_MODES.has(mode)
+const minClipMs = (clip: { mode?: string | null }): number => (isDigital(clip.mode) ? 700 : MIN_CLIP_MS)
 
 /** Transcript with no scoreable content — field-measured at 30% of done clips (48h: 566/1890):
  * bare punctuation, Whisper's ALL-CAPS sound captions on noise ("BELL RINGS" = repeater courtesy
@@ -100,7 +108,7 @@ export function isJunkTranscript(text: string, flags: readonly string[]): boolea
 const BUCKET_REFILL_RATE = 2 // audio-seconds refilled per wall-clock second (measured)
 const BUCKET_FLOOR_S = 120 // keep a little headroom so a forced clip can always squeeze in
 const RESERVE_FRAC = Number(process.env['ANYTONE_TRANSCRIBE_RESERVE'] ?? 0.15) // last 15% = learner-ranked channels only
-const MIN_SPEECH_MS = 1000 // post-VAD: less than this much speech energy → nothing to transcribe
+const MIN_SPEECH_MS = 1000 // post-VAD: less than this much speech energy → nothing to transcribe (analog)
 const MAX_ATTEMPTS = 3
 const DEFAULTS = {
   model: 'whisper-large-v3-turbo',
@@ -355,7 +363,7 @@ export class Transcriber {
   onClipSaved(clip: TranscribableClip): void {
     if (!this.enabled) return
     if (clip.direction === 'tx') return
-    if (clip.durationMs < MIN_CLIP_MS) return // derived skip — no sidecar file needed
+    if (clip.durationMs < minClipMs(clip)) return // derived skip — no sidecar file needed
     this.markEnabledSince()
     this.queue.set(clip.id, { clip, forced: false, attempts: 0, deferred: false })
     this.emit({ id: clip.id, status: 'queued' })
@@ -396,7 +404,7 @@ export class Transcriber {
     if (!this.enabled || this.state.enabledSince === undefined) return
     let queued = 0
     for (const clip of clips) {
-      if (clip.direction === 'tx' || clip.durationMs < MIN_CLIP_MS) continue
+      if (clip.direction === 'tx' || clip.durationMs < minClipMs(clip)) continue
       if (clip.startedAt < this.state.enabledSince) continue
       if (this.queue.has(clip.id) || this.sidecar(clip.id)) continue
       this.queue.set(clip.id, { clip, forced: false, attempts: 0, deferred: false })
@@ -646,7 +654,8 @@ export class Transcriber {
       this.finish(clip.id, { v: 1, status: 'failed', reason: `unreadable wav: ${(e as Error).message}` })
       return
     }
-    if (profile.speechMs < MIN_SPEECH_MS && !item.forced) {
+    const minSpeech = isDigital(item.clip.mode) ? 300 : MIN_SPEECH_MS
+    if (profile.speechMs < minSpeech && !item.forced) {
       this.finish(clip.id, {
         v: 1, status: 'skipped', reason: 'no-speech',
         trim: { startMs: 0, endMs: profile.durationMs, speechMs: profile.speechMs },

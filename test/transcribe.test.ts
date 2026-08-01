@@ -270,3 +270,16 @@ test('audio budget follows Groq headers: bucket gates spending and sets a short 
   await svc.tick()
   assert.equal(calls.length, 2, 'resumed after the bucket refilled (minutes, not an hour)')
 })
+
+test('digital (P25/DMR) clips bypass the analog kerchunk floor — short calls transcribe', async () => {
+  const { svc, dir, calls } = rig()
+  // a 1.2s FM clip is kerchunk → dropped; the same length P25 call is real dispatch → kept
+  svc.onClipSaved(clip(dir, 'fm-short', makeWav(0, 1.2, 0), { channelName: 'COLCON', mode: 'FM' }))
+  await svc.tick()
+  assert.equal(calls.length, 0, 'analog short clip discarded by the 3s floor')
+
+  svc.onClipSaved(clip(dir, 'p25-short', makeWav(0, 1.2, 0), { channelName: 'BoulderCo LE1', mode: 'P25' }))
+  await svc.tick()
+  assert.equal(calls.length, 1, 'P25 short call transcribed (digital = protocol-gated voice)')
+  assert.equal(svc.statusOf('p25-short'), 'done')
+})
